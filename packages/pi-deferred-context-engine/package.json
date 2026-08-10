@@ -1,0 +1,74 @@
+{
+  "name": "pi-deferred-context-engine",
+  "version": "0.1.0",
+  "description": "Run-scoped deferred tools, skills, and duplicate prompt context for Pi.",
+  "type": "module",
+  "author": "AdityaVG13",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "extension",
+    "deferred",
+    "context",
+    "tools",
+    "setActiveTools",
+    "skills"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "main": "./index.js",
+  "exports": "./index.js",
+  "files": [
+    "index.js",
+    "engine.js",
+    "config.js",
+    "context.js",
+    "catalog.js",
+    "perf.js",
+    "config.default.json",
+    "config.example.json",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "pi": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typebox": "^1.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AdityaVG13/pi-stack.git",
+    "directory": "packages/pi-deferred-context-engine"
+  },
+  "bugs": {
+    "url": "https://github.com/AdityaVG13/pi-stack/issues"
+  },
+  "homepage": "https://github.com/AdityaVG13/pi-stack/tree/main/packages/pi-deferred-context-engine#readme"
+}

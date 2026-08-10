@@ -1,0 +1,23 @@
+{
+  "enabled": true,
+  "deferByDefault": true,
+  "deferSkills": true,
+  "deduplicateContext": true,
+  "promotionLifetime": "run",
+  "maxSearchResults": 3,
+  "maxSkillBytes": 65536,
+  "replaceAlwaysActive": true,
+  "replaceNeverDefer": true,
+  "alwaysActive": [
+    "my_critical_tool"
+  ],
+  "neverDefer": [
+    "my_critical_tool"
+  ],
+  "deferredNames": [],
+  "deferredPrefixes": [
+    "mcp_",
+    "experimental_"
+  ],
+  "activeSkills": []
+}

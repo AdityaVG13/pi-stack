@@ -1,0 +1,64 @@
+{
+  "name": "pi-papercuts",
+  "version": "0.1.0",
+  "description": "Agent complaint box for Pi: file friction into an append-only .papercuts.jsonl, then keep working.",
+  "type": "module",
+  "author": "AdityaVG13",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "extension",
+    "papercuts",
+    "friction",
+    "agent-telemetry",
+    "complaint-box"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "main": "./index.js",
+  "exports": "./index.js",
+  "files": [
+    "index.js",
+    "store.js",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "pi": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AdityaVG13/pi-stack.git",
+    "directory": "packages/pi-papercuts"
+  },
+  "bugs": {
+    "url": "https://github.com/AdityaVG13/pi-stack/issues"
+  },
+  "homepage": "https://github.com/AdityaVG13/pi-stack/tree/main/packages/pi-papercuts#readme"
+}

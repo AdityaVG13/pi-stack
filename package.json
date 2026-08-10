@@ -1,0 +1,29 @@
+{
+  "name": "pi-stack",
+  "private": true,
+  "type": "module",
+  "description": "Composable Pi packages: deferred context engine and papercuts.",
+  "scripts": {
+    "test": "npm test --prefix packages/pi-papercuts && npm test --prefix packages/pi-deferred-context-engine",
+    "test:papercuts": "npm test --prefix packages/pi-papercuts",
+    "test:deferred": "npm test --prefix packages/pi-deferred-context-engine",
+    "release-check": "node scripts/release-check.mjs",
+    "pack:all": "npm pack --prefix packages/pi-papercuts && npm pack --prefix packages/pi-deferred-context-engine"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent"
+  ],
+  "pi": {
+    "extensions": [
+      "./packages/pi-papercuts/index.js",
+      "./packages/pi-deferred-context-engine/index.js"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AdityaVG13/pi-stack.git"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,36 @@
+{
+  "enabled": true,
+  "deferByDefault": true,
+  "deferSkills": true,
+  "deduplicateContext": true,
+  "promotionLifetime": "run",
+  "maxSearchResults": 3,
+  "maxSkillBytes": 65536,
+  "replaceAlwaysActive": false,
+  "replaceNeverDefer": false,
+  "alwaysActive": [
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "grep",
+    "find",
+    "ls",
+    "papercuts"
+  ],
+  "neverDefer": [
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "grep",
+    "find",
+    "ls",
+    "papercuts"
+  ],
+  "deferredNames": [],
+  "deferredPrefixes": [
+    "mcp_"
+  ],
+  "activeSkills": []
+}

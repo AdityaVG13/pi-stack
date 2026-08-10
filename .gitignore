@@ -1,0 +1,25 @@
+node_modules/
+*.tgz
+.DS_Store
+*.log
+.env
+.env.*
+.npm/
+coverage/
+.tokenzero/
+**/.tokenzero/
+.fszero/
+**/.fszero/
+.graphzero/
+**/.graphzero/
+.cut-branches/
+.papercuts.jsonl
+.ee/
+.hermes/
+.pi-subagents/
+# local agent / skill run output (never publish)
+.public-clean/
+**/.public-clean/
+.state-space-collapse/
+**/.state-space-collapse/
+.skill-loop-progress.md
