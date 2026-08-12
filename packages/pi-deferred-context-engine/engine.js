@@ -28,6 +28,21 @@ function uniqueNames(names) {
   return [...new Set(names.filter((name) => typeof name === "string" && name.length > 0))];
 }
 
+/**
+ * Soft routing signal: tools named in `priority` come first (in priority
+ * order); everything else keeps its original relative order after them.
+ * Models reach for earlier / more salient tools, so putting preferred spine
+ * tools (e.g. zero) above fallbacks (exec_command, apply_patch) nudges
+ * routing without hiding anything.
+ */
+export function orderByPriority(names, priority) {
+  if (!Array.isArray(priority) || priority.length === 0) return names;
+  const present = new Set(names);
+  const prioritized = priority.filter((name) => present.has(name));
+  const prioritizedSet = new Set(prioritized);
+  return [...prioritized, ...names.filter((name) => !prioritizedSet.has(name))];
+}
+
 export function createDeferredController(pi, initialConfig) {
   let config = initialConfig;
   const deferred = new Set();
@@ -58,9 +73,14 @@ export function createDeferredController(pi, initialConfig) {
 
   function setActiveIfChanged(next) {
     lastSetError = null;
-    const normalized = uniqueNames(next);
+    const normalized = orderByPriority(uniqueNames(next), config.toolPriority);
     const current = activeNames();
-    if (!sameNames(current, normalized)) {
+    // Sequence compare, not set compare: priority ordering is part of the
+    // contract, so an order-only difference still re-applies the active set.
+    const identical =
+      current.length === normalized.length &&
+      current.every((name, index) => name === normalized[index]);
+    if (!identical) {
       try {
         pi.setActiveTools(normalized);
       } catch (error) {
@@ -68,6 +88,12 @@ export function createDeferredController(pi, initialConfig) {
       }
     }
     return activeNames();
+  }
+
+  /** Pins (alwaysActive) that no registered tool satisfies — loud, not silent. */
+  function missingPinNames(registered) {
+    const names = registered ?? allNames();
+    return [...pinNames()].filter((name) => !names.includes(name)).sort();
   }
 
   function synchronize({ resetPromotions = false } = {}) {
@@ -112,10 +138,12 @@ export function createDeferredController(pi, initialConfig) {
     // neverDefer alone does not force inactive tools active — that is alwaysActive's job.
 
     const active = setActiveIfChanged(next);
+    const missingPins = missingPinNames(names);
     return {
       active,
       deferred: [...deferred].sort(),
       promoted: [...promoted].sort(),
+      ...(missingPins.length > 0 ? { missingPins } : {}),
       ...(lastSetError ? { setActiveError: lastSetError } : {}),
     };
   }
@@ -197,12 +225,14 @@ export function createDeferredController(pi, initialConfig) {
 
 
   function status() {
+    const missingPins = missingPinNames();
     return {
       enabled: Boolean(config.enabled),
       all: allNames().length,
       active: activeNames().length,
       deferred: deferred.size,
       promoted: promoted.size,
+      ...(missingPins.length > 0 ? { missingPins } : {}),
       ...(lastSetError ? { setActiveError: lastSetError } : {}),
     };
   }

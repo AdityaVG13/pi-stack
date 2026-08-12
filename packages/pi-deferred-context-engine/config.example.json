@@ -19,5 +19,8 @@
     "mcp_",
     "experimental_"
   ],
-  "activeSkills": []
+  "activeSkills": [],
+  "toolPriority": [
+    "my_critical_tool"
+  ]
 }

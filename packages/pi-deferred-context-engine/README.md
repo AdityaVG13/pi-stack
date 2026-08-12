@@ -73,6 +73,7 @@ Same name can be in one, both, or neither.
 | `maxSkillBytes` | `65536` | Skill body size limit |
 | `deferredPrefixes` | `["mcp_"]` | Prefix defer |
 | `activeSkills` | `[]` | Skills kept in prompt |
+| `toolPriority` | `[]` | Ordered soft routing signal: listed tools are presented first in the active set; the rest keep registration order. User list replaces defaults wholesale. Missing `alwaysActive` pins are reported as `missingPins` in `/deferred status`. |
 
 Lists merge with defaults unless `replaceAlwaysActive` / `replaceNeverDefer` is true. After config edits: `/deferred reload`. After package order changes: Pi `/reload`.
 

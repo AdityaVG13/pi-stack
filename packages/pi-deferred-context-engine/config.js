@@ -22,6 +22,7 @@ export const KNOWN_CONFIG_KEYS = Object.freeze([
   "deferredNames",
   "deferredPrefixes",
   "activeSkills",
+  "toolPriority",
 ]);
 
 const KNOWN_CONFIG_KEY_SET = new Set(KNOWN_CONFIG_KEYS);
@@ -145,7 +146,7 @@ export function parseUserConfig(raw, { strict = false } = {}) {
     if (field.present) value[key] = field.value;
   }
 
-  for (const key of ["alwaysActive", "neverDefer", "deferredNames", "deferredPrefixes", "activeSkills"]) {
+  for (const key of ["alwaysActive", "neverDefer", "deferredNames", "deferredPrefixes", "activeSkills", "toolPriority"]) {
     const field = parseStringListField(raw[key], key, strict);
     if (!field.ok) return field;
     if (field.present) value[key] = field.value;
@@ -226,6 +227,9 @@ export function mergeConfig(defaults, user = {}) {
     deferredNames: conflict.deferredNames,
     deferredPrefixes: mergeStringSetting(defaults, user, "deferredPrefixes"),
     activeSkills: mergeStringSetting(defaults, user, "activeSkills"),
+    // Ordered soft routing signal: user list replaces defaults wholesale when
+    // present (merging two orders is ambiguous). Empty = registration order.
+    toolPriority: uniqueStrings(user.toolPriority ?? defaults.toolPriority ?? []),
   };
 }
 

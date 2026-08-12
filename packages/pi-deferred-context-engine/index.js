@@ -322,8 +322,9 @@ export default function piDeferredContextEngine(pi) {
         ctx.ui.notify(
           "deferred " + (state.enabled ? "on" : "off") +
           " | all=" + state.all + " active=" + state.active + " deferred=" + state.deferred +
-          " promoted=" + state.promoted + " lifetime=" + config.promotionLifetime,
-          "info",
+          " promoted=" + state.promoted + " lifetime=" + config.promotionLifetime +
+          (state.missingPins ? " | MISSING PINS: " + state.missingPins.join(", ") : ""),
+          state.missingPins ? "warning" : "info",
         );
       } catch (error) {
         ctx.ui.notify("deferred error: " + (error instanceof Error ? error.message : String(error)), "error");

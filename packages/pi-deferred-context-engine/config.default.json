@@ -32,5 +32,6 @@
   "deferredPrefixes": [
     "mcp_"
   ],
-  "activeSkills": []
+  "activeSkills": [],
+  "toolPriority": []
 }

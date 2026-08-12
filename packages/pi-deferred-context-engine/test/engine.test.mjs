@@ -233,3 +233,57 @@ test("promote and manuallyDeferred are exclusive per name", () => {
   controller.synchronize();
   assert.ok(!pi.getActiveTools().includes("optional_tool"), "promotion cleared by demote");
 });
+
+test("toolPriority orders prioritized tools first and keeps the rest in registration order", () => {
+  const pi = mockPi([{ name: "zero", description: "ZeroStack native execute" }]);
+  const controller = createDeferredController(pi, {
+    ...config,
+    alwaysActive: [...config.alwaysActive, "zero"],
+    neverDefer: [...config.neverDefer, "zero"],
+    toolPriority: ["zero", "read"],
+  });
+  controller.synchronize({ resetPromotions: true });
+  const active = pi.getActiveTools();
+  assert.equal(active[0], "zero");
+  assert.equal(active[1], "read");
+  // Non-prioritized actives keep relative order after the prioritized block.
+  const rest = active.slice(2);
+  assert.ok(rest.includes("bash"));
+  assert.ok(rest.indexOf("bash") < rest.indexOf("search_tools"));
+});
+
+test("toolPriority names missing from the registry are ignored, not invented", () => {
+  const pi = mockPi();
+  const controller = createDeferredController(pi, { ...config, toolPriority: ["ghost_tool", "bash"] });
+  controller.synchronize({ resetPromotions: true });
+  const active = pi.getActiveTools();
+  assert.equal(active[0], "bash");
+  assert.ok(!active.includes("ghost_tool"));
+});
+
+test("order-only drift is re-applied on synchronize", () => {
+  const pi = mockPi();
+  const controller = createDeferredController(pi, { ...config, toolPriority: ["bash"] });
+  controller.synchronize({ resetPromotions: true });
+  const before = pi.calls.length;
+  // Simulate the host restoring a resumed session with a different order.
+  pi.setActiveTools([...pi.getActiveTools()].reverse());
+  controller.synchronize();
+  assert.ok(pi.calls.length > before + 1, "synchronize must restore priority order");
+  assert.equal(pi.getActiveTools()[0], "bash");
+});
+
+test("missing alwaysActive pins are reported by synchronize and status", () => {
+  const pi = mockPi();
+  const controller = createDeferredController(pi, {
+    ...config,
+    alwaysActive: [...config.alwaysActive, "zero"],
+  });
+  const state = controller.synchronize({ resetPromotions: true });
+  assert.deepEqual(state.missingPins, ["edit", "find", "grep", "ls", "write", "zero"]);
+  assert.ok(controller.status().missingPins.includes("zero"));
+  // Registering the pinned tool clears the report on the next synchronize.
+  pi.register({ name: "zero", description: "ZeroStack native execute" });
+  const healed = controller.synchronize();
+  assert.ok(!(healed.missingPins || []).includes("zero"));
+});
