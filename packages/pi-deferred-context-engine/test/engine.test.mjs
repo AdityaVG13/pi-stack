@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { rankCapabilities } from "../catalog.js";
-import { createDeferredController, SPINE_NAMES } from "../engine.js";
+import { createDeferredController, orderByPriority, SPINE_NAMES } from "../engine.js";
 
 function mockPi(extraTools = []) {
   const tools = [
@@ -235,16 +235,16 @@ test("promote and manuallyDeferred are exclusive per name", () => {
 });
 
 test("toolPriority orders prioritized tools first and keeps the rest in registration order", () => {
-  const pi = mockPi([{ name: "zero", description: "ZeroStack native execute" }]);
+  const pi = mockPi([{ name: "preferred_reader", description: "Preferred file reader" }]);
   const controller = createDeferredController(pi, {
     ...config,
-    alwaysActive: [...config.alwaysActive, "zero"],
-    neverDefer: [...config.neverDefer, "zero"],
-    toolPriority: ["zero", "read"],
+    alwaysActive: [...config.alwaysActive, "preferred_reader"],
+    neverDefer: [...config.neverDefer, "preferred_reader"],
+    toolPriority: ["preferred_reader", "read"],
   });
   controller.synchronize({ resetPromotions: true });
   const active = pi.getActiveTools();
-  assert.equal(active[0], "zero");
+  assert.equal(active[0], "preferred_reader");
   assert.equal(active[1], "read");
   // Non-prioritized actives keep relative order after the prioritized block.
   const rest = active.slice(2);
@@ -259,6 +259,49 @@ test("toolPriority names missing from the registry are ignored, not invented", (
   const active = pi.getActiveTools();
   assert.equal(active[0], "bash");
   assert.ok(!active.includes("ghost_tool"));
+});
+
+test("toolPriority applies immediately when a deferred tool is promoted", () => {
+  const pi = mockPi([{ name: "preferred_reader", description: "Preferred file reader" }]);
+  const controller = createDeferredController(pi, {
+    ...config,
+    toolPriority: ["preferred_reader", "bash"],
+  });
+  controller.synchronize({ resetPromotions: true });
+  const before = pi.getActiveTools();
+  assert.equal(before[0], "bash");
+  assert.ok(!before.includes("preferred_reader"));
+
+  assert.deepEqual(controller.promote(["preferred_reader"]).added, ["preferred_reader"]);
+  const after = pi.getActiveTools();
+  assert.deepEqual(after.slice(0, 2), ["preferred_reader", "bash"]);
+  assert.deepEqual(new Set(after), new Set([...before, "preferred_reader"]), "promotion remains additive");
+  assert.deepEqual(
+    after.filter((name) => name !== "preferred_reader" && name !== "bash"),
+    before.filter((name) => name !== "bash"),
+    "unlisted active tools keep their relative order",
+  );
+});
+
+test("disabled DCE restores registration order without applying toolPriority", () => {
+  const pi = mockPi();
+  const registered = pi.getAllTools().map((tool) => tool.name);
+  const controller = createDeferredController(pi, {
+    ...config,
+    enabled: false,
+    toolPriority: ["bash", "search_tools"],
+  });
+  const state = controller.synchronize({ resetPromotions: true });
+  assert.deepEqual(state.active, registered);
+  assert.deepEqual(pi.getActiveTools(), registered);
+});
+
+test("orderByPriority ignores unknown and duplicate entries in one stable pass", () => {
+  const names = ["read", "bash", "search_tools", "custom_tool"];
+  assert.deepEqual(
+    orderByPriority(names, ["custom_tool", "ghost_tool", "custom_tool", "read"]),
+    ["custom_tool", "read", "bash", "search_tools"],
+  );
 });
 
 test("order-only drift is re-applied on synchronize", () => {
@@ -277,13 +320,13 @@ test("missing alwaysActive pins are reported by synchronize and status", () => {
   const pi = mockPi();
   const controller = createDeferredController(pi, {
     ...config,
-    alwaysActive: [...config.alwaysActive, "zero"],
+    alwaysActive: [...config.alwaysActive, "preferred_reader"],
   });
   const state = controller.synchronize({ resetPromotions: true });
-  assert.deepEqual(state.missingPins, ["edit", "find", "grep", "ls", "write", "zero"]);
-  assert.ok(controller.status().missingPins.includes("zero"));
+  assert.deepEqual(state.missingPins, ["edit", "find", "grep", "ls", "preferred_reader", "write"]);
+  assert.ok(controller.status().missingPins.includes("preferred_reader"));
   // Registering the pinned tool clears the report on the next synchronize.
-  pi.register({ name: "zero", description: "ZeroStack native execute" });
+  pi.register({ name: "preferred_reader", description: "Preferred file reader" });
   const healed = controller.synchronize();
-  assert.ok(!(healed.missingPins || []).includes("zero"));
+  assert.ok(!(healed.missingPins || []).includes("preferred_reader"));
 });

@@ -25,6 +25,7 @@ test("extension defers tools and skills for one complete agent run", async () =>
     replaceNeverDefer: true,
     alwaysActive: ["critical_tool", "confirm_user", "show_plan"],
     neverDefer: ["critical_tool", "confirm_user", "show_plan"],
+    toolPriority: ["weather_lookup", "show_plan", "critical_tool"],
   }), "utf8");
   fs.writeFileSync(skillPath, "# Release workflow\n\nVerify tests before publishing.\n", "utf8");
 
@@ -53,7 +54,8 @@ test("extension defers tools and skills for one complete agent run", async () =>
 
     extension(pi);
     await handlers.get("session_start")();
-    assert.deepEqual(active.sort(), ["confirm_user", "show_plan", "search_tools", "critical_tool"].sort());
+    assert.deepEqual([...active].sort(), ["confirm_user", "show_plan", "search_tools", "critical_tool"].sort());
+    assert.deepEqual(active.slice(0, 2), ["show_plan", "critical_tool"]);
     assert.ok(!active.includes("list_capabilities"));
 
     const contexts = [
@@ -87,10 +89,12 @@ test("extension defers tools and skills for one complete agent run", async () =>
     });
     assert.match(toolResult.content[0].text, /weather_lookup/);
     assert.ok(active.includes("weather_lookup"));
+    assert.deepEqual(active.slice(0, 3), ["weather_lookup", "show_plan", "critical_tool"]);
 
     await handlers.get("agent_settled")();
     assert.ok(!active.includes("weather_lookup"));
-    assert.deepEqual(active.sort(), ["confirm_user", "show_plan", "search_tools", "critical_tool"].sort());
+    assert.deepEqual([...active].sort(), ["confirm_user", "show_plan", "search_tools", "critical_tool"].sort());
+    assert.deepEqual(active.slice(0, 2), ["show_plan", "critical_tool"]);
     assert.ok(commands.has("deferred"));
   } finally {
     if (previous === undefined) delete process.env.PI_DEFERRED_TOOLS_CONFIG;

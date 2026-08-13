@@ -18,12 +18,6 @@ import { formatCatalog } from "./catalog.js";
  */
 export const SPINE_NAMES = new Set(["search_tools"]);
 
-function sameNames(left, right) {
-  if (left.length !== right.length) return false;
-  const names = new Set(left);
-  return right.every((name) => names.has(name));
-}
-
 function uniqueNames(names) {
   return [...new Set(names.filter((name) => typeof name === "string" && name.length > 0))];
 }
@@ -31,16 +25,23 @@ function uniqueNames(names) {
 /**
  * Soft routing signal: tools named in `priority` come first (in priority
  * order); everything else keeps its original relative order after them.
- * Models reach for earlier / more salient tools, so putting preferred spine
- * tools (e.g. zero) above fallbacks (exec_command, apply_patch) nudges
- * routing without hiding anything.
+ * Models tend to reach for earlier / more salient tools, so putting preferred
+ * capabilities above alternatives nudges routing without hiding anything.
  */
 export function orderByPriority(names, priority) {
   if (!Array.isArray(priority) || priority.length === 0) return names;
-  const present = new Set(names);
-  const prioritized = priority.filter((name) => present.has(name));
-  const prioritizedSet = new Set(prioritized);
-  return [...prioritized, ...names.filter((name) => !prioritizedSet.has(name))];
+  const remaining = new Set(names);
+  const ordered = [];
+  for (const name of priority) {
+    // Set.delete makes duplicate priority entries free and prevents duplicate
+    // active tools without another normalization pass.
+    if (remaining.delete(name)) ordered.push(name);
+  }
+  if (ordered.length === 0) return names;
+  for (const name of names) {
+    if (remaining.has(name)) ordered.push(name);
+  }
+  return ordered;
 }
 
 export function createDeferredController(pi, initialConfig) {
@@ -71,9 +72,15 @@ export function createDeferredController(pi, initialConfig) {
 
   let lastSetError = null;
 
+  function normalizeActiveNames(next) {
+    const names = uniqueNames(next);
+    // Disabled means no DCE policy, including no priority-induced reordering.
+    return config.enabled ? orderByPriority(names, config.toolPriority) : names;
+  }
+
   function setActiveIfChanged(next) {
     lastSetError = null;
-    const normalized = orderByPriority(uniqueNames(next), config.toolPriority);
+    const normalized = normalizeActiveNames(next);
     const current = activeNames();
     // Sequence compare, not set compare: priority ordering is part of the
     // contract, so an order-only difference still re-applies the active set.
@@ -168,7 +175,9 @@ export function createDeferredController(pi, initialConfig) {
       else added.push(name);
     }
 
-    if (added.length > 0) pi.setActiveTools([...new Set([...active, ...added])]);
+    // Keep promotion additive for Pi's deferred-loading fast path while also
+    // placing every active tool according to the configured priority order.
+    if (added.length > 0) pi.setActiveTools(normalizeActiveNames([...active, ...added]));
     for (const name of [...added, ...already]) {
       // Exclusive lifecycle: promotion clears manual demote for this name.
       promoted.add(name);
@@ -199,7 +208,7 @@ export function createDeferredController(pi, initialConfig) {
 
     if (removed.length > 0) {
       const removeSet = new Set(removed);
-      pi.setActiveTools(active.filter((name) => !removeSet.has(name)));
+      pi.setActiveTools(normalizeActiveNames(active.filter((name) => !removeSet.has(name))));
     }
     for (const name of removed) {
       // Exclusive lifecycle: demote clears promotion for this name.

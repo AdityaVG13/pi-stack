@@ -73,9 +73,28 @@ Same name can be in one, both, or neither.
 | `maxSkillBytes` | `65536` | Skill body size limit |
 | `deferredPrefixes` | `["mcp_"]` | Prefix defer |
 | `activeSkills` | `[]` | Skills kept in prompt |
-| `toolPriority` | `[]` | Ordered soft routing signal: listed tools are presented first in the active set; the rest keep registration order. User list replaces defaults wholesale. Missing `alwaysActive` pins are reported as `missingPins` in `/deferred status`. |
+| `toolPriority` | `[]` | Ordered soft routing signal for active tools. User list replaces defaults wholesale. |
 
 Lists merge with defaults unless `replaceAlwaysActive` / `replaceNeverDefer` is true. After config edits: `/deferred reload`. After package order changes: Pi `/reload`.
+
+### Tool priority
+
+When DCE is enabled, `toolPriority` controls the order sent to Pi:
+
+```json
+{
+  "toolPriority": ["preferred_reader", "general_shell"]
+}
+```
+
+1. Listed tools that are active appear first, in configured order.
+2. Every other active tool follows in its existing relative order.
+
+The order is applied at startup, reload/apply, before each agent run, and after dynamic promotion. Promotions stay additive: DCE keeps every active tool and inserts newly promoted tools at their configured position.
+
+`toolPriority` does not activate or defer a tool by itself. An inactive entry takes its position when a pin or promotion activates it. Unknown names are ignored. When DCE is disabled, it restores registration order and does not apply priority.
+
+Missing `alwaysActive` pins are reported as `missingPins` in `/deferred status`.
 
 See `config.example.json` in the package.
 
