@@ -27,10 +27,74 @@ function dataOf(result) {
   return JSON.parse(start >= 0 ? text.slice(start) : text);
 }
 
+const plainTheme = {
+  fg: (_color, text) => String(text),
+  bold: (text) => String(text),
+};
+
+function rendered(component, width = 120) {
+  return component.render(width).map((line) => line.trimEnd()).join("\n");
+}
+
 test("registers the papercuts tool with the promoted name", () => {
   const tool = captureTool();
   assert.equal(tool.name, "papercuts");
   assert.ok(tool.description.includes("complaint box"));
+});
+
+test("current Pi execute signature reads cwd from the fifth argument", async () => {
+  const tool = captureTool();
+  const repo = tmpRepo();
+  const result = dataOf(
+    await tool.execute("ctx-five", { action: "add", text: "current signature" }, undefined, undefined, { cwd: repo }),
+  );
+  assert.equal(result.meta.file, path.join(repo, ".papercuts.jsonl"));
+  assert.equal(result.data.record.cwd, repo);
+});
+
+test("add uses a compact TUI renderer instead of exposing the JSON envelope", async () => {
+  const tool = captureTool();
+  const repo = tmpRepo();
+  const args = {
+    action: "add",
+    text: "A long tool failure was hard to scan; show a concise themed result instead.",
+    tags: ["tooling", "tui"],
+    severity: "major",
+  };
+
+  const call = rendered(tool.renderCall(args, plainTheme, { expanded: false }));
+  assert.match(call, /papercuts add/);
+  assert.match(call, /major · tooling · tui/);
+  assert.match(call, /A long tool failure/);
+  assert.doesNotMatch(call, /\{"action"/);
+
+  const result = await tool.execute("render-add", args, undefined, { cwd: repo });
+  const view = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }));
+  assert.match(view, /^✓ Filed pc_[0-9a-f]{12} · major$/);
+  assert.doesNotMatch(view, /"ok"|"record"|"cwd"/);
+
+  const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, { args }));
+  assert.match(expanded, /tags: tooling, tui/);
+  assert.match(expanded, /file:/);
+});
+
+test("TUI renderer strips terminal control sequences from displayed arguments", () => {
+  const tool = captureTool();
+  const args = { action: "add", text: "plain \u001b[31mred\u001b[0m text", tags: ["\u001b[2Jtui"] };
+  const call = rendered(tool.renderCall(args, plainTheme, { expanded: false }));
+  assert.doesNotMatch(call, /\u001b/);
+  assert.match(call, /plain red text/);
+  assert.match(call, /minor · tui/);
+});
+
+test("usage errors render as readable guidance instead of raw JSON", async () => {
+  const tool = captureTool();
+  const args = { action: "add" };
+  const result = await tool.execute("render-error", args, undefined, { cwd: tmpRepo() });
+  const view = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }));
+  assert.match(view, /^✗ papercuts add requires non-empty 'text'\./);
+  assert.match(view, /papercuts\(\{action:'add'/);
+  assert.doesNotMatch(view, /"ok"|"error":\{/);
 });
 
 test("add then list then resolve round-trips through the git-root log", async () => {

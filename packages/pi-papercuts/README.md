@@ -37,6 +37,8 @@ papercuts({ action: "schema" })
 
 Severity: `minor` (default), `major`, `blocker`. Ids are content-addressed; duplicate adds are no-ops.
 
+Interactive Pi uses a compact themed call/result view. Expand a tool row for the full text, tags, and log path. Structured result details remain available to the agent and session history.
+
 ## Where it stores
 
 1. `file` param  

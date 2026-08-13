@@ -12,6 +12,8 @@
  * handlers trust that shape. Wire log lines: `store.parseEvent` once; fold receives only parsed events.
  */
 
+import { stripVTControlCharacters } from "node:util";
+import { Text } from "@earendil-works/pi-tui";
 import * as store from "./store.js";
 
 /** Sole severity vocabulary (re-export). List filters + add use this allowlist only. */
@@ -128,6 +130,124 @@ function textResult(payload, humanLine) {
   const json = JSON.stringify(payload);
   const text = humanLine ? `${humanLine}\n${json}` : json;
   return { content: [{ type: "text", text }], details: payload };
+}
+
+function cleanDisplayText(value) {
+  return stripVTControlCharacters(String(value ?? "")).replace(/\s+/g, " ").trim();
+}
+
+function clippedDisplayText(value, maxChars) {
+  const text = cleanDisplayText(value);
+  return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text;
+}
+
+function resultText(result) {
+  return (result?.content ?? [])
+    .filter((item) => item?.type === "text")
+    .map((item) => item.text)
+    .join("\n");
+}
+
+/** Compact, themed call display. Full structured arguments remain in the session. */
+function renderPapercutsCall(args, theme, context) {
+  const action = args?.action === "log" ? "add" : cleanDisplayText(args?.action);
+  let text = theme.fg("toolTitle", theme.bold("papercuts"));
+  if (action) text += ` ${theme.fg("muted", action)}`;
+
+  if (action === "add") {
+    const severity = cleanDisplayText(args?.severity || "minor");
+    const tags = Array.isArray(args?.tags) ? args.tags.map(cleanDisplayText).filter(Boolean) : [];
+    text += `\n  ${theme.fg("dim", [severity, ...tags].join(" · "))}`;
+    const body = clippedDisplayText(args?.text, context?.expanded ? 10_000 : 240);
+    if (body) text += `\n  ${theme.fg("toolOutput", body)}`;
+  } else if (action === "resolve" && Array.isArray(args?.ids)) {
+    text += `\n  ${theme.fg("dim", args.ids.map(cleanDisplayText).filter(Boolean).join(", "))}`;
+  } else if (action === "list") {
+    const filters = [args?.status || "open", args?.severity, args?.tag && `#${args.tag}`].filter(Boolean);
+    text += `\n  ${theme.fg("dim", filters.join(" · "))}`;
+  }
+
+  return new Text(text, 0, 0);
+}
+
+function renderPapercutsResult(result, { expanded }, theme, context) {
+  const payload = result?.details;
+  if (!payload || typeof payload !== "object") {
+    return new Text(theme.fg("toolOutput", resultText(result)), 0, 0);
+  }
+  if (payload.ok === false) {
+    const error = payload.error ?? {};
+    let text = theme.fg("error", `✗ ${cleanDisplayText(error.message || "Papercuts action failed")}`);
+    if (error.suggested_fix) text += `\n  ${theme.fg("dim", cleanDisplayText(error.suggested_fix))}`;
+    return new Text(text, 0, 0);
+  }
+
+  const action = context?.args?.action === "log" ? "add" : context?.args?.action;
+  const data = payload.data ?? {};
+  if (action === "add" && data.record) {
+    const record = data.record;
+    const verb = data.changed ? "✓ Filed" : "• Already filed";
+    const color = data.changed ? "success" : "muted";
+    let text = theme.fg(color, `${verb} ${record.id} · ${record.severity}`);
+    if (expanded) {
+      text += `\n  ${theme.fg("toolOutput", cleanDisplayText(record.text))}`;
+      if (record.tags?.length) {
+        text += `\n  ${theme.fg("dim", `tags: ${record.tags.map(cleanDisplayText).join(", ")}`)}`;
+      }
+      if (payload.meta?.file) text += `\n  ${theme.fg("dim", `file: ${cleanDisplayText(payload.meta.file)}`)}`;
+    }
+    return new Text(text, 0, 0);
+  }
+
+  if (action === "list") {
+    if (!Array.isArray(data.items)) {
+      return new Text(theme.fg("toolOutput", resultText(result)), 0, 0);
+    }
+    const status = cleanDisplayText(context?.args?.status || "open");
+    let text = theme.fg("muted", `${data.total} ${status} papercut${data.total === 1 ? "" : "s"}`);
+    const shown = expanded ? data.items : data.items.slice(0, 5);
+    for (const item of shown) {
+      text += `\n  ${theme.fg("accent", cleanDisplayText(item.id))} ${theme.fg("dim", `[${cleanDisplayText(item.severity)}]`)} ${theme.fg("toolOutput", clippedDisplayText(item.text, 120))}`;
+    }
+    if (!expanded && data.items.length > shown.length) {
+      text += `\n  ${theme.fg("dim", `… ${data.items.length - shown.length} more`)}`;
+    }
+    return new Text(text, 0, 0);
+  }
+
+  if (action === "resolve") {
+    const resolved = data.resolved ?? [];
+    const already = data.alreadyResolved ?? [];
+    let text = resolved.length
+      ? theme.fg("success", `✓ Resolved ${resolved.length} papercut${resolved.length === 1 ? "" : "s"}`)
+      : theme.fg("muted", "No open papercuts changed");
+    if (resolved.length) text += `\n  ${theme.fg("dim", resolved.map(cleanDisplayText).join(", "))}`;
+    if (already.length) {
+      text += `\n  ${theme.fg("dim", `already resolved: ${already.map(cleanDisplayText).join(", ")}`)}`;
+    }
+    return new Text(text, 0, 0);
+  }
+
+  if (action === "doctor") {
+    const color = data.healthy ? "success" : "warning";
+    const mark = data.healthy ? "✓" : "!";
+    let text = theme.fg(color, `${mark} Papercuts log ${data.healthy ? "healthy" : "needs attention"}`);
+    text += `\n  ${theme.fg("dim", `cuts: ${data.cuts} · open: ${data.open} · events: ${data.checked_lines}`)}`;
+    if (data.findings?.length) text += `\n  ${theme.fg("warning", data.findings.join("; "))}`;
+    return new Text(text, 0, 0);
+  }
+
+  if (action === "schema") {
+    let text = theme.fg("success", `✓ Schema ready · ${cleanDisplayText(context?.args?.target || "all")}`);
+    if (expanded) text += `\n${theme.fg("dim", JSON.stringify(data, null, 2))}`;
+    return new Text(text, 0, 0);
+  }
+
+  return new Text(
+    expanded ? theme.fg("dim", JSON.stringify(payload, null, 2)) : theme.fg("success", "✓ Papercuts action complete"),
+    0,
+    0,
+  );
 }
 
 function agentName(params) {
@@ -535,19 +655,24 @@ export default function registerPapercuts(pi) {
       "Use this tool when friction is worth fixing later; file it and keep working.",
     ],
     parameters: PapercutsParams,
-    execute: async (_id, params, _signal, ctx) => {
+    renderCall: renderPapercutsCall,
+    renderResult: renderPapercutsResult,
+    execute: async (_id, params, _signal, onUpdate, ctx) => {
+      // Pi 0.84+ passes onUpdate then ctx. Accept the older four-argument
+      // calling convention too so existing SDK hosts keep the correct cwd.
+      const executionContext = ctx ?? (onUpdate && typeof onUpdate === "object" ? onUpdate : undefined);
       try {
         const parsed = parsePapercutsParams(params);
         if (!parsed.ok) return textResult(parsed.error);
         switch (parsed.value.action) {
           case "add":
-            return doAdd(parsed.value, ctx);
+            return doAdd(parsed.value, executionContext);
           case "list":
-            return doList(parsed.value, ctx);
+            return doList(parsed.value, executionContext);
           case "resolve":
-            return doResolve(parsed.value, ctx);
+            return doResolve(parsed.value, executionContext);
           case "doctor":
-            return doDoctor(parsed.value, ctx);
+            return doDoctor(parsed.value, executionContext);
           case "schema":
             return doSchema(parsed.value);
           default:
