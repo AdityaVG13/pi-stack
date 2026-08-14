@@ -22,5 +22,10 @@
   "activeSkills": [],
   "toolPriority": [
     "my_critical_tool"
-  ]
+  ],
+  "compactSchemas": {
+    "enabled": true,
+    "maxParamDescriptionChars": 160,
+    "keepFull": []
+  }
 }

@@ -15,6 +15,7 @@ export const KNOWN_CONFIG_KEYS = Object.freeze([
   "promotionLifetime",
   "maxSearchResults",
   "maxSkillBytes",
+  "compactSchemas",
   "replaceAlwaysActive",
   "replaceNeverDefer",
   "alwaysActive",
@@ -112,6 +113,35 @@ function parsePositiveIntField(raw, key, strict) {
  * Unknown keys: stripped (default) or refused when `strict: true`.
  * @returns {{ ok: true, value: object } | { ok: false, error: string }}
  */
+/**
+ * compactSchemas trust edge: { enabled?, maxParamDescriptionChars?, keepFull? }.
+ * Invalid shapes are rejected in strict mode and omitted otherwise.
+ */
+function parseCompactSchemas(raw, strict) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return strict
+      ? { ok: false, error: "compactSchemas must be a JSON object" }
+      : { ok: true, present: false };
+  }
+  const value = {};
+  if (Object.prototype.hasOwnProperty.call(raw, "enabled")) {
+    if (typeof raw.enabled !== "boolean") {
+      if (strict) return { ok: false, error: "compactSchemas.enabled must be a boolean" };
+    } else value.enabled = raw.enabled;
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "maxParamDescriptionChars")) {
+    if (!Number.isInteger(raw.maxParamDescriptionChars) || raw.maxParamDescriptionChars <= 0) {
+      if (strict) return { ok: false, error: "compactSchemas.maxParamDescriptionChars must be a positive integer" };
+    } else value.maxParamDescriptionChars = raw.maxParamDescriptionChars;
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "keepFull")) {
+    if (!Array.isArray(raw.keepFull) || raw.keepFull.some((n) => typeof n !== "string" || n.length === 0)) {
+      if (strict) return { ok: false, error: "compactSchemas.keepFull must be an array of non-empty strings" };
+    } else value.keepFull = [...raw.keepFull];
+  }
+  return { ok: true, present: true, value };
+}
+
 export function parseUserConfig(raw, { strict = false } = {}) {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     return { ok: false, error: "config must be a JSON object" };
@@ -150,6 +180,12 @@ export function parseUserConfig(raw, { strict = false } = {}) {
     const field = parseStringListField(raw[key], key, strict);
     if (!field.ok) return field;
     if (field.present) value[key] = field.value;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(raw, "compactSchemas")) {
+    const parsed = parseCompactSchemas(raw.compactSchemas, strict);
+    if (!parsed.ok) return parsed;
+    if (parsed.present) value.compactSchemas = parsed.value;
   }
 
   return { ok: true, value };
@@ -227,6 +263,7 @@ export function mergeConfig(defaults, user = {}) {
     deferredNames: conflict.deferredNames,
     deferredPrefixes: mergeStringSetting(defaults, user, "deferredPrefixes"),
     activeSkills: mergeStringSetting(defaults, user, "activeSkills"),
+    compactSchemas: { ...(defaults.compactSchemas || {}), ...(user.compactSchemas || {}) },
     // Ordered soft routing signal: user list replaces defaults wholesale when
     // present (merging two orders is ambiguous). Empty = registration order.
     toolPriority: uniqueStrings(user.toolPriority ?? defaults.toolPriority ?? []),

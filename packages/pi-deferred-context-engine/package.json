@@ -1,6 +1,6 @@
 {
   "name": "pi-deferred-context-engine",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Run-scoped deferred tools, skills, and duplicate prompt context for Pi.",
   "type": "module",
   "author": "AdityaVG13",

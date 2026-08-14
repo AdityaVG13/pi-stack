@@ -1,4 +1,5 @@
 import { shouldDefer } from "./config.js";
+import { pruneSchemaInPlace, restorePrunedSchema } from "./compact.js";
 import { formatCatalog } from "./catalog.js";
 
 /**
@@ -49,6 +50,50 @@ export function createDeferredController(pi, initialConfig) {
   const deferred = new Set();
   const manuallyDeferred = new Set();
   const promoted = new Set();
+  // Tiered schema disclosure: name -> { undo, savedBytes }. A tool is either
+  // compacted (entry present) or full (absent) — no third state.
+  const compactedSchemas = new Map();
+
+  function applyCompaction() {
+    const cc = config.compactSchemas || {};
+    const enabled = Boolean(config.enabled) && cc.enabled === true;
+    const keepFull = new Set([...SPINE_NAMES, ...(cc.keepFull || [])]);
+    for (const tool of allTools()) {
+      const name = tool.name;
+      const wantFull = !enabled || keepFull.has(name) || promoted.has(name);
+      const entry = compactedSchemas.get(name);
+      if (wantFull) {
+        if (entry) {
+          restorePrunedSchema(entry.undo);
+          compactedSchemas.delete(name);
+        }
+        continue;
+      }
+      if (entry || !tool.parameters || typeof tool.parameters !== "object") continue;
+      try {
+        const before = JSON.stringify(tool.parameters).length;
+        const undo = pruneSchemaInPlace(tool.parameters, {
+          maxChars: cc.maxParamDescriptionChars,
+        });
+        if (undo.length === 0) continue;
+        const savedBytes = before - JSON.stringify(tool.parameters).length;
+        compactedSchemas.set(name, { undo, savedBytes });
+      } catch {
+        // Frozen or exotic schema: restore whatever landed and leave it full.
+        const partial = compactedSchemas.get(name);
+        if (partial) {
+          restorePrunedSchema(partial.undo);
+          compactedSchemas.delete(name);
+        }
+      }
+    }
+  }
+
+  function compactionStats() {
+    let savedBytes = 0;
+    for (const entry of compactedSchemas.values()) savedBytes += entry.savedBytes;
+    return { compactedTools: compactedSchemas.size, savedBytes };
+  }
 
   const allTools = () => pi.getAllTools();
   const allNames = () => allTools().map((tool) => tool.name);
@@ -113,6 +158,7 @@ export function createDeferredController(pi, initialConfig) {
       deferred.clear();
       manuallyDeferred.clear();
       const restored = setActiveIfChanged(names);
+      applyCompaction();
       return {
         active: restored,
         deferred: [],
@@ -145,6 +191,7 @@ export function createDeferredController(pi, initialConfig) {
     // neverDefer alone does not force inactive tools active — that is alwaysActive's job.
 
     const active = setActiveIfChanged(next);
+    applyCompaction();
     const missingPins = missingPinNames(names);
     return {
       active,
@@ -184,6 +231,7 @@ export function createDeferredController(pi, initialConfig) {
       manuallyDeferred.delete(name);
       deferred.delete(name);
     }
+    applyCompaction();
     return { added, already, unknown };
   }
 
@@ -216,6 +264,7 @@ export function createDeferredController(pi, initialConfig) {
       manuallyDeferred.add(name);
       deferred.add(name);
     }
+    applyCompaction();
     return { removed, alreadyInactive, protected: protectedTools, unknown };
   }
 
@@ -237,6 +286,7 @@ export function createDeferredController(pi, initialConfig) {
     const missingPins = missingPinNames();
     return {
       enabled: Boolean(config.enabled),
+      compaction: compactionStats(),
       all: allNames().length,
       active: activeNames().length,
       deferred: deferred.size,
@@ -246,5 +296,5 @@ export function createDeferredController(pi, initialConfig) {
     };
   }
 
-  return { catalog, demote, promote, setConfig, status, synchronize };
+  return { applyCompaction, catalog, compactionStats, demote, promote, setConfig, status, synchronize };
 }

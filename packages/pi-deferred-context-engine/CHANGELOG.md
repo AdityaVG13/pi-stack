@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0
+
+- Tiered schema disclosure (`compactSchemas`): active tools keep full structural parameter schemas while prose descriptions over `maxParamDescriptionChars` are pruned in place (plus `examples`/`$comment` dropped). Promotion via search_tools/promote_tools restores the original schema byte-exact; demotion re-compacts; disabling the engine restores everything. Savings surface in `/deferred status` as `compaction: { compactedTools, savedBytes }`.
+
+
 ## 0.1.2
 
 - `toolPriority` config: ordered soft routing signal; prioritized tools are

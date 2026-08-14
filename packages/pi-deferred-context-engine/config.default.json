@@ -33,5 +33,10 @@
     "mcp_"
   ],
   "activeSkills": [],
-  "toolPriority": []
+  "toolPriority": [],
+  "compactSchemas": {
+    "enabled": false,
+    "maxParamDescriptionChars": 160,
+    "keepFull": []
+  }
 }

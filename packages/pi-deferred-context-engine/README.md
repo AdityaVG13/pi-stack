@@ -74,6 +74,7 @@ Same name can be in one, both, or neither.
 | `deferredPrefixes` | `["mcp_"]` | Prefix defer |
 | `activeSkills` | `[]` | Skills kept in prompt |
 | `toolPriority` | `[]` | Ordered soft routing signal for active tools. User list replaces defaults wholesale. |
+| `compactSchemas` | `{ enabled: false }` | Tiered schema disclosure for active tools (see below) |
 
 Lists merge with defaults unless `replaceAlwaysActive` / `replaceNeverDefer` is true. After config edits: `/deferred reload`. After package order changes: Pi `/reload`.
 
@@ -97,6 +98,29 @@ The order is applied at startup, reload/apply, before each agent run, and after 
 Missing `alwaysActive` pins are reported as `missingPins` in `/deferred status`.
 
 See `config.example.json` in the package.
+
+### Compact schemas (tiered disclosure)
+
+With many tools active, parameter-schema prose dominates the request payload.
+`compactSchemas` keeps every active tool's structural schema (types, enums,
+required) while pruning long prose in place:
+
+```json
+{
+  "compactSchemas": {
+    "enabled": true,
+    "maxParamDescriptionChars": 160,
+    "keepFull": ["my_complex_tool"]
+  }
+}
+```
+
+- Property descriptions longer than `maxParamDescriptionChars` are truncated at
+  a sentence boundary; `examples` and `$comment` are dropped.
+- Promoting a tool (search_tools / promote_tools) restores its original schema
+  byte-exact; demotion re-compacts it. Disabling the engine restores everything.
+- `keepFull` names (plus the spine) are never compacted.
+- `/deferred status` reports `compaction: { compactedTools, savedBytes }`.
 
 ## Gotchas
 
