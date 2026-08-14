@@ -30,7 +30,7 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "prepublishOnly": "npm test"
+    "prepublishOnly": "npm test && node ../../scripts/preflight.mjs"
   },
   "pi": {
     "extensions": [
