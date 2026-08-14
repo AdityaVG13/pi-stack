@@ -42,13 +42,14 @@ const CONTRACT_VERSION = 1;
 export const SCHEMA_TARGETS = ["all", "record", "error", "exit-codes"];
 const LIST_STATUSES = ["open", "resolved", "all"];
 const LIST_FORMATS = ["json", "md"];
-const WIRE_ACTIONS = ["add", "log", "list", "resolve", "doctor", "schema"];
+const WIRE_ACTIONS = ["add", "log", "list", "resolve", "prune", "doctor", "schema"];
 
 /** Fields legal per action family after `log` → `add`. Reject foreign keys at boundary. */
 const ALLOWED_FIELDS = {
   add: new Set(["action", "text", "tags", "severity", "evidence", "cmd", "exit", "stderr", "agent", "file"]),
   list: new Set(["action", "status", "tag", "agent", "severity", "limit", "format", "file"]),
   resolve: new Set(["action", "ids", "note", "agent", "file"]),
+  prune: new Set(["action", "file"]),
   doctor: new Set(["action", "file"]),
   schema: new Set(["action", "target", "file"]),
 };
@@ -72,8 +73,8 @@ const AgentField = Type.Optional(Type.String({ description: "filter by agent (li
 // per-action trust edge (parse, don't validate).
 const PapercutsParams = Type.Object({
   action: Type.Union(
-    ["add", "log", "list", "resolve", "doctor", "schema"].map((a) => Type.Literal(a)),
-    { description: "add (log = wire alias) | list | resolve | doctor | schema" },
+    ["add", "log", "list", "resolve", "prune", "doctor", "schema"].map((a) => Type.Literal(a)),
+    { description: "add (log = wire alias) | list | resolve | prune | doctor | schema" },
   ),
   text: Type.Optional(Type.String({ description: "add: what you hit and what would have prevented it — one line" })),
   tags: Type.Optional(Type.Array(Type.String(), { description: "add: area tags, e.g. ['tooling','docs']" })),
@@ -315,7 +316,7 @@ export function parsePapercutsParams(params) {
   if (wireAction == null || wireAction === "") {
     return {
       ok: false,
-      error: errorEnvelope("usage", "papercuts requires 'action'.", "Use action: add|list|resolve|doctor|schema."),
+      error: errorEnvelope("usage", "papercuts requires 'action'.", "Use action: add|list|resolve|prune|doctor|schema."),
     };
   }
   if (!WIRE_ACTIONS.includes(wireAction)) {
@@ -324,7 +325,7 @@ export function parsePapercutsParams(params) {
       error: errorEnvelope(
         "usage",
         `Unknown papercuts action '${wireAction}'.`,
-        "Use action: add|list|resolve|doctor|schema.",
+        "Use action: add|list|resolve|prune|doctor|schema.",
       ),
     };
   }
@@ -457,6 +458,8 @@ export function parsePapercutsParams(params) {
     }
     case "doctor":
       return { ok: true, value: { action: "doctor", file: params.file } };
+    case "prune":
+      return { ok: true, value: { action: "prune", file: params.file } };
     case "schema": {
       const target = params.target ?? "all";
       if (!SCHEMA_TARGETS.includes(target)) {
@@ -474,7 +477,7 @@ export function parsePapercutsParams(params) {
     default:
       return {
         ok: false,
-        error: errorEnvelope("usage", `Unknown papercuts action '${wireAction}'.`, "Use action: add|list|resolve|doctor|schema."),
+        error: errorEnvelope("usage", `Unknown papercuts action '${wireAction}'.`, "Use action: add|list|resolve|prune|doctor|schema."),
       };
   }
 }
@@ -571,6 +574,18 @@ function doResolve(params, ctx) {
   return textResult(envelope({ changed: events_out.length > 0, resolved: toResolve.map((i) => i.id), alreadyResolved: already.map((i) => i.id) }, meta));
 }
 
+// Compaction: resolved cut+resolve events move to <log>.archive.jsonl; the
+// main log keeps only open cuts so the working list never bloats. History is
+// preserved append-only in the archive.
+function doPrune(params, ctx) {
+  const file = store.resolveLogPath({ file: params.file, cwd: ctx?.cwd ?? process.cwd() });
+  const receipt = store.prune(file);
+  const line = receipt.archivedEvents > 0
+    ? `pruned ${receipt.archived} resolved papercut(s) to ${receipt.archiveFile} · ${receipt.open} open remain`
+    : `nothing to prune · ${receipt.open} open`;
+  return textResult(envelope(receipt, { file }), line);
+}
+
 function doDoctor(params, ctx) {
   const file = store.resolveLogPath({ file: params.file, cwd: ctx?.cwd ?? process.cwd() });
   const { events, tornLines } = store.readEvents(file);
@@ -623,7 +638,7 @@ export default function registerPapercuts(pi) {
       "A complaint box for friction you hit while working: dead-end tool calls, broken links, misleading docs, footgun configs, missing helpers. " +
       "File a one-line papercut the moment you hit one (action=add), then keep working. " +
       "Papercuts persist in an append-only .papercuts.jsonl at the git root so a human or a later agent can review the backlog and fix the real problems. " +
-      "Actions: add, list, resolve, doctor, schema.",
+      "Actions: add, list, resolve, prune (archive resolved entries, compact the log), doctor, schema.",
     promptSnippet: "File a friction note (papercut) the moment you hit one, then keep working",
     promptGuidelines: [
       "When you hit friction during work — a dead-end tool call, a broken link, a misleading doc, a footgun config, a missing helper — call papercuts action=add BEFORE moving on. Don't stop working; file it and push through.",
@@ -652,10 +667,12 @@ export default function registerPapercuts(pi) {
             return doResolve(parsed.value, executionContext);
           case "doctor":
             return doDoctor(parsed.value, executionContext);
+          case "prune":
+            return doPrune(parsed.value, executionContext);
           case "schema":
             return doSchema(parsed.value);
           default:
-            return textResult(errorEnvelope("usage", `Unknown papercuts action '${params?.action}'.`, "Use action: add|list|resolve|doctor|schema."));
+            return textResult(errorEnvelope("usage", `Unknown papercuts action '${params?.action}'.`, "Use action: add|list|resolve|prune|doctor|schema."));
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

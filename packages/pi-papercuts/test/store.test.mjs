@@ -151,3 +151,30 @@ test("matchIds accepts bare hex and rejects non-hex / <4 hex", () => {
   const three = store.matchIds([a], ["pc_9f2"]);
   assert.deepEqual(three.missing, ["pc_9f2"]);
 });
+
+test("prune archives resolved events and keeps open cuts", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "papercuts-prune-"));
+  const file = path.join(dir, ".papercuts.jsonl");
+  const ts = "2026-01-01T00:00:00.000Z";
+  store.appendEvents(file, [
+    { kind: "cut", id: "pc_aaaa11112222", ts, agent: "t", text: "open one", tags: [], severity: "minor", cwd: dir, repo: null },
+    { kind: "cut", id: "pc_bbbb11112222", ts, agent: "t", text: "resolved one", tags: [], severity: "major", cwd: dir, repo: null },
+    { kind: "resolve", id: "pc_bbbb11112222", ts, agent: "t", note: "done" },
+  ]);
+  const receipt = store.prune(file);
+  assert.equal(receipt.archived, 1);
+  assert.equal(receipt.archivedEvents, 2);
+  assert.equal(receipt.open, 1);
+  const after = store.fold(store.readEvents(file).events);
+  assert.equal(after.length, 1);
+  assert.equal(after[0].id, "pc_aaaa11112222");
+  assert.equal(after[0].status, "open");
+  const archived = store.fold(store.readEvents(receipt.archiveFile).events);
+  assert.equal(archived.length, 1);
+  assert.equal(archived[0].status, "resolved");
+  // idempotent: second prune is a no-op
+  const second = store.prune(file);
+  assert.equal(second.archivedEvents, 0);
+  assert.equal(second.open, 1);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

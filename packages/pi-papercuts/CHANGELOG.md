@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0
+
+- New `prune` action: archives every resolved cut (and its resolve events) to `<log>.archive.jsonl` and atomically rewrites the main log with open cuts only. The working list stays lean; history stays append-only in the archive. Idempotent; torn lines drop with the same self-heal semantics as read.
+
 ## 0.2.0
 
 - Flatten the tool parameters schema from a root Type.Union to one Type.Object with an action enum. Root-level unions serialize to `properties: {}` for Anthropic models — no field typing, so array params (tags, ids) coerced to strings and calls failed. Per-action strictness still lives in parsePapercutsParams (parse, don't validate).

@@ -171,6 +171,41 @@ export function appendEvents(filePath, events) {
 
 /** severity-first (blocker > major > minor), then newest first. */
 export function sortItems(items) {
+  return sortItemsInner(items);
+}
+
+/**
+ * Compact the log: archive every event belonging to a resolved cut into
+ * `<log>.archive.jsonl` (append-only history preserved), atomically rewrite
+ * the main log with only open-cut events. Torn lines are dropped (same
+ * self-heal semantics as read). Returns counts + the archive path.
+ */
+export function prune(filePath, { archivePath } = {}) {
+  const { events, tornLines } = readEvents(filePath);
+  const items = fold(events);
+  const resolvedIds = new Set(items.filter((i) => i.status === "resolved").map((i) => i.id));
+  const keep = [];
+  const archive = [];
+  for (const e of events) (resolvedIds.has(e.id) ? archive : keep).push(e);
+  const target =
+    archivePath ??
+    (filePath.endsWith(".jsonl") ? `${filePath.slice(0, -6)}.archive.jsonl` : `${filePath}.archive.jsonl`);
+  if (archive.length > 0) {
+    appendEvents(target, archive);
+    const tmp = `${filePath}.tmp-prune-${process.pid}`;
+    fs.writeFileSync(tmp, keep.length > 0 ? keep.map((e) => JSON.stringify(e)).join("\n") + "\n" : "", "utf-8");
+    fs.renameSync(tmp, filePath);
+  }
+  return {
+    archived: resolvedIds.size,
+    archivedEvents: archive.length,
+    open: items.length - resolvedIds.size,
+    tornDropped: tornLines,
+    archiveFile: target,
+  };
+}
+
+function sortItemsInner(items) {
   return [...items].sort((a, b) => {
     const sev = (SEVERITY_RANK[a.severity] ?? 99) - (SEVERITY_RANK[b.severity] ?? 99);
     if (sev !== 0) return sev;
@@ -223,4 +258,3 @@ export function matchIds(items, prefixes) {
   }
   return { found, missing, ambiguous };
 }
-
