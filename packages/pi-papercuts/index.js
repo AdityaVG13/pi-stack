@@ -66,53 +66,32 @@ const AgentField = Type.Optional(Type.String({ description: "filter by agent (li
  * with list/resolve/schema on the same object (when host validates).
  * Execute still runs parsePapercutsParams (real boundary under Typebox stub).
  */
-const PapercutsParams = Type.Union([
-  Type.Object({
-    action: Type.Union([Type.Literal("add"), Type.Literal("log")], {
-      description: "add a papercut (log is a wire alias of add)",
-    }),
-    text: Type.Optional(Type.String({ description: "what you hit and what would have prevented it — one line" })),
-    tags: Type.Optional(Type.Array(Type.String(), { description: "area tags, e.g. ['tooling','docs']" })),
-    severity: Type.Optional(SeveritySchema),
-    evidence: Type.Optional(Type.String({ description: "free-note evidence (XOR with cmd/exit/stderr; not both)" })),
-    cmd: Type.Optional(Type.String({ description: "failed command (tool-failure evidence; XOR with free-note evidence)" })),
-    exit: Type.Optional(Type.Integer({ description: "failed command exit status (tool-failure evidence path)" })),
-    stderr: Type.Optional(Type.String({ description: `sanitized stderr <=${store.MAX_EVIDENCE_FIELD_BYTES} bytes; never env dumps (tool-failure path)` })),
-    agent: AgentField,
-    file: FileField,
-  }),
-  Type.Object({
-    action: Type.Literal("list"),
-    status: Type.Optional(Type.Union(LIST_STATUSES.map((s) => Type.Literal(s)), { description: "default open" })),
-    tag: Type.Optional(Type.String({ description: "filter by tag" })),
-    agent: AgentField,
-    severity: Type.Optional(SeveritySchema),
-    limit: Type.Optional(Type.Integer({ description: "default 50; integer >= 0" })),
-    format: Type.Optional(Type.Union(LIST_FORMATS.map((f) => Type.Literal(f)), { description: "default json; md is a human review digest" })),
-    file: FileField,
-  }),
-  Type.Object({
-    action: Type.Literal("resolve"),
-    ids: Type.Optional(Type.Array(Type.String(), { description: "one or more papercut id prefixes (pc_ + at least 4 hex)" })),
-    note: Type.Optional(Type.String({ description: "resolution note" })),
-    agent: AgentField,
-    file: FileField,
-  }),
-  Type.Object({
-    action: Type.Literal("doctor"),
-    file: FileField,
-  }),
-  Type.Object({
-    action: Type.Literal("schema"),
-    target: Type.Optional(
-      Type.Union(
-        SCHEMA_TARGETS.map((t) => Type.Literal(t)),
-        { description: "all|record|error|exit-codes; default all" },
-      ),
-    ),
-    file: FileField,
-  }),
-]);
+// Flat object root: root-level unions flatten to properties:{} for Anthropic
+// serialization (no field typing; array params coerce to strings). One object
+// with an action enum keeps full typing; parsePapercutsParams remains the
+// per-action trust edge (parse, don't validate).
+const PapercutsParams = Type.Object({
+  action: Type.Union(
+    ["add", "log", "list", "resolve", "doctor", "schema"].map((a) => Type.Literal(a)),
+    { description: "add (log = wire alias) | list | resolve | doctor | schema" },
+  ),
+  text: Type.Optional(Type.String({ description: "add: what you hit and what would have prevented it — one line" })),
+  tags: Type.Optional(Type.Array(Type.String(), { description: "add: area tags, e.g. ['tooling','docs']" })),
+  severity: Type.Optional(SeveritySchema),
+  evidence: Type.Optional(Type.String({ description: "add: free-note evidence (XOR with cmd/exit/stderr; not both)" })),
+  cmd: Type.Optional(Type.String({ description: "add: failed command (tool-failure evidence; XOR with free-note evidence)" })),
+  exit: Type.Optional(Type.Integer({ description: "add: failed command exit status (tool-failure evidence path)" })),
+  stderr: Type.Optional(Type.String({ description: `add: sanitized stderr <=${store.MAX_EVIDENCE_FIELD_BYTES} bytes; never env dumps (tool-failure path)` })),
+  status: Type.Optional(Type.Union(LIST_STATUSES.map((s) => Type.Literal(s)), { description: "list: default open" })),
+  tag: Type.Optional(Type.String({ description: "list: filter by tag" })),
+  limit: Type.Optional(Type.Integer({ description: "list: default 50; integer >= 0" })),
+  format: Type.Optional(Type.Union(LIST_FORMATS.map((f) => Type.Literal(f)), { description: "list: default json; md is a human review digest" })),
+  ids: Type.Optional(Type.Array(Type.String(), { description: "resolve: papercut id prefixes (pc_ + at least 4 hex)" })),
+  note: Type.Optional(Type.String({ description: "resolve: resolution note" })),
+  target: Type.Optional(Type.Union(SCHEMA_TARGETS.map((t) => Type.Literal(t)), { description: "schema: all|record|error|exit-codes; default all" })),
+  agent: AgentField,
+  file: FileField,
+});
 
 function envelope(data, meta = {}) {
   return { ok: true, data, meta: { contract: CONTRACT_VERSION, ...meta } };

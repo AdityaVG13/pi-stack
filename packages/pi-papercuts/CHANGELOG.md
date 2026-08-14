@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0
+
+- Flatten the tool parameters schema from a root Type.Union to one Type.Object with an action enum. Root-level unions serialize to `properties: {}` for Anthropic models — no field typing, so array params (tags, ids) coerced to strings and calls failed. Per-action strictness still lives in parsePapercutsParams (parse, don't validate).
+
+
 ## 0.1.2
 
 - Add compact themed TUI rendering for calls, filed results, validation
