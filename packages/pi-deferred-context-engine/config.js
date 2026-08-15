@@ -333,3 +333,36 @@ export function emptyPinReplaceWarnings(config) {
   }
   return warnings;
 }
+
+/**
+ * Persist promoted tools into the user config's alwaysActive (and neverDefer
+ * mirror when present). Creates the config file if missing. Returns the names
+ * actually added (already-pinned names are skipped).
+ * @param {string[]} names
+ * @param {string} [configPath]
+ * @returns {string[]}
+ */
+export function addAlwaysActive(names, configPath = userConfigPath()) {
+  const clean = [...new Set(names)].filter((name) => typeof name === "string" && name.length > 0);
+  if (clean.length === 0) return [];
+  let raw = {};
+  if (fs.existsSync(configPath)) {
+    raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new Error("user config at " + configPath + " is not an object");
+    }
+  }
+  const existing = Array.isArray(raw.alwaysActive) ? raw.alwaysActive : [];
+  const added = clean.filter((name) => !existing.includes(name));
+  if (added.length === 0) return [];
+  raw.alwaysActive = [...existing, ...added];
+  // Configs that maintain an explicit neverDefer list expect pins mirrored there.
+  if (Array.isArray(raw.neverDefer)) {
+    raw.neverDefer = [...new Set([...raw.neverDefer, ...added])];
+  }
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  const temp = configPath + "." + process.pid + ".tmp";
+  fs.writeFileSync(temp, JSON.stringify(raw, null, 2) + "\n", "utf8");
+  fs.renameSync(temp, configPath);
+  return added;
+}

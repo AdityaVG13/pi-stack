@@ -17,7 +17,7 @@ try {
 }
 
 import { rankCapabilities } from "./catalog.js";
-import { emptyPinReplaceWarnings, loadConfig,
+import { addAlwaysActive, emptyPinReplaceWarnings, loadConfig,
   packageDefaults, userConfigPath } from "./config.js";
 import { optimizeSystemPrompt, readSkill, schemaAudit } from "./context.js";
 import { createDeferredController, SPINE_NAMES } from "./engine.js";
@@ -358,9 +358,43 @@ export default function piDeferredContextEngine(pi) {
     if (systemPrompt === event.systemPrompt) return {};
     return { systemPrompt };
   });
-  pi.on("agent_settled", () => {
-    if (config.enabled && config.promotionLifetime === "run") {
+  // Session-lifetime promotions survive across runs; at the end of a task the
+  // user is offered ONCE per tool to keep it pinned (alwaysActive) for future
+  // sessions. Declined or accepted names are never re-asked this session.
+  const promotionKeepAsked = new Set();
+  pi.on("agent_settled", async (_event, ctx) => {
+    if (!config.enabled) return;
+    if (config.promotionLifetime === "run") {
       controller.synchronize({ resetPromotions: true });
+      return;
+    }
+    if (typeof ctx?.ui?.confirm !== "function") return;
+    const pinned = new Set(config.alwaysActive || []);
+    const candidates = controller.promotedNames()
+      .filter((name) => !promotionKeepAsked.has(name) && !pinned.has(name));
+    if (candidates.length === 0) return;
+    for (const name of candidates) promotionKeepAsked.add(name);
+    try {
+      const keep = await ctx.ui.confirm(
+        "Keep promoted tools?",
+        "Promoted this session: " + candidates.join(", ") +
+        ". Add to alwaysActive so future sessions start with them?",
+      );
+      if (!keep) return;
+      const added = addAlwaysActive(candidates);
+      config = loadConfig();
+      controller.setConfig(config, { resetPromotions: false });
+      ctx.ui.notify(
+        added.length > 0
+          ? "pinned alwaysActive: " + added.join(", ")
+          : "already pinned: " + candidates.join(", "),
+        "info",
+      );
+    } catch (error) {
+      ctx.ui.notify(
+        "deferred keep-promotion failed: " + (error instanceof Error ? error.message : String(error)),
+        "error",
+      );
     }
   });
 }

@@ -296,5 +296,10 @@ export function createDeferredController(pi, initialConfig) {
     };
   }
 
-  return { applyCompaction, catalog, compactionStats, demote, promote, setConfig, status, synchronize };
+  /** Names currently promoted (sorted); the keep-pinned prompt consumes this. */
+  function promotedNames() {
+    return [...promoted].sort();
+  }
+
+  return { applyCompaction, catalog, compactionStats, demote, promote, promotedNames, setConfig, status, synchronize };
 }

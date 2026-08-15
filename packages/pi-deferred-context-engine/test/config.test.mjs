@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { emptyPinReplaceWarnings, loadConfig, mergeConfig, packageDefaults, shouldDefer, stripDeferredProtectedConflicts } from "../config.js";
+import { addAlwaysActive, emptyPinReplaceWarnings, loadConfig, mergeConfig, packageDefaults, shouldDefer, stripDeferredProtectedConflicts } from "../config.js";
 
 test("merges user lists without losing protected defaults", () => {
   // DCE-D9: mergeConfig requires package defaults for numeric/bool keys (JSON sole source)
@@ -157,4 +157,32 @@ test("joint: empty replace soft-warn only when that side is empty", () => {
     emptyPinReplaceWarnings({ replaceAlwaysActive: false, alwaysActive: [], replaceNeverDefer: false, neverDefer: [] }),
     [],
   );
+});
+
+test("addAlwaysActive appends new pins, mirrors neverDefer, and skips existing", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deferred-keep-"));
+  const configPath = path.join(directory, "config.json");
+  fs.writeFileSync(configPath, JSON.stringify({
+    alwaysActive: ["existing_tool"],
+    neverDefer: ["existing_tool"],
+  }), "utf8");
+
+  const added = addAlwaysActive(["subagent_wait", "existing_tool", "subagent_wait"], configPath);
+  assert.deepEqual(added, ["subagent_wait"]);
+  const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  assert.deepEqual(raw.alwaysActive, ["existing_tool", "subagent_wait"]);
+  assert.deepEqual(raw.neverDefer, ["existing_tool", "subagent_wait"]);
+
+  // No-op when everything is already pinned.
+  assert.deepEqual(addAlwaysActive(["subagent_wait"], configPath), []);
+});
+
+test("addAlwaysActive creates a missing config file", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deferred-keep-"));
+  const configPath = path.join(directory, "nested", "config.json");
+  const added = addAlwaysActive(["zero"], configPath);
+  assert.deepEqual(added, ["zero"]);
+  const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  assert.deepEqual(raw.alwaysActive, ["zero"]);
+  assert.equal(raw.neverDefer, undefined);
 });

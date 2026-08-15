@@ -187,3 +187,115 @@ test("before_agent_start injects short deferred_tools guidance without full cata
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("session-lifetime promotions prompt once to keep, then pin on confirm", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deferred-keep-flow-"));
+  const configPath = path.join(directory, "config.json");
+  fs.writeFileSync(configPath, JSON.stringify({
+    enabled: true,
+    deferByDefault: true,
+    promotionLifetime: "session",
+    replaceAlwaysActive: true,
+    replaceNeverDefer: true,
+    alwaysActive: ["critical_tool"],
+    neverDefer: ["critical_tool"],
+  }), "utf8");
+
+  const previous = process.env.PI_DEFERRED_TOOLS_CONFIG;
+  process.env.PI_DEFERRED_TOOLS_CONFIG = configPath;
+  try {
+    const { default: extension } = await import(`../index.js?keep=${Date.now()}`);
+    const tools = [
+      { name: "critical_tool", description: "Run a critical workflow", parameters: {} },
+      { name: "weather_lookup", description: "Look up current weather forecasts", parameters: {} },
+    ];
+    let active = tools.map((tool) => tool.name);
+    const handlers = new Map();
+    const commands = new Map();
+    const pi = {
+      getAllTools: () => tools,
+      getActiveTools: () => [...active],
+      setActiveTools: (names) => { active = [...new Set(names)]; },
+      registerTool: (tool) => { tools.push(tool); active.push(tool.name); },
+      registerCommand: (name, command) => commands.set(name, command),
+      on: (name, handler) => handlers.set(name, handler),
+    };
+    extension(pi);
+    await handlers.get("session_start")();
+    assert.ok(!active.includes("weather_lookup"));
+
+    // Promote via search_tools, as the model would.
+    const searchTool = tools.find((tool) => tool.name === "search_tools");
+    await searchTool.execute("call-1", { query: "weather forecast" }, undefined, { ui: { notify: () => {} } });
+    assert.ok(active.includes("weather_lookup"));
+
+    // Settle #1: confirm keeps the tool; config file gains the pin.
+    const confirms = [];
+    const notes = [];
+    const ctx = {
+      ui: {
+        confirm: async (title, message) => { confirms.push({ title, message }); return true; },
+        notify: (text, kind) => notes.push({ text, kind }),
+      },
+    };
+    await handlers.get("agent_settled")({}, ctx);
+    assert.equal(confirms.length, 1);
+    assert.match(confirms[0].message, /weather_lookup/);
+    const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    assert.deepEqual(raw.alwaysActive, ["critical_tool", "weather_lookup"]);
+    assert.ok(active.includes("weather_lookup"));
+
+    // Settle #2: same tool never re-asked.
+    await handlers.get("agent_settled")({}, ctx);
+    assert.equal(confirms.length, 1);
+  } finally {
+    if (previous === undefined) delete process.env.PI_DEFERRED_TOOLS_CONFIG;
+    else process.env.PI_DEFERRED_TOOLS_CONFIG = previous;
+  }
+});
+
+test("session-lifetime promotions survive agent_settled without a UI", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deferred-keep-noui-"));
+  const configPath = path.join(directory, "config.json");
+  fs.writeFileSync(configPath, JSON.stringify({
+    enabled: true,
+    deferByDefault: true,
+    promotionLifetime: "session",
+    replaceAlwaysActive: true,
+    replaceNeverDefer: true,
+    alwaysActive: ["critical_tool"],
+    neverDefer: ["critical_tool"],
+  }), "utf8");
+
+  const previous = process.env.PI_DEFERRED_TOOLS_CONFIG;
+  process.env.PI_DEFERRED_TOOLS_CONFIG = configPath;
+  try {
+    const { default: extension } = await import(`../index.js?keepnoui=${Date.now()}`);
+    const tools = [
+      { name: "critical_tool", description: "Run a critical workflow", parameters: {} },
+      { name: "weather_lookup", description: "Look up current weather forecasts", parameters: {} },
+    ];
+    let active = tools.map((tool) => tool.name);
+    const handlers = new Map();
+    const pi = {
+      getAllTools: () => tools,
+      getActiveTools: () => [...active],
+      setActiveTools: (names) => { active = [...new Set(names)]; },
+      registerTool: (tool) => { tools.push(tool); active.push(tool.name); },
+      registerCommand: () => {},
+      on: (name, handler) => handlers.set(name, handler),
+    };
+    extension(pi);
+    await handlers.get("session_start")();
+    const searchTool = tools.find((tool) => tool.name === "search_tools");
+    await searchTool.execute("call-1", { query: "weather forecast" }, undefined, { ui: { notify: () => {} } });
+    assert.ok(active.includes("weather_lookup"));
+
+    // Headless settle (no ctx): promotion persists, nothing is asked or reset.
+    await handlers.get("agent_settled")({});
+    assert.ok(active.includes("weather_lookup"));
+  } finally {
+    if (previous === undefined) delete process.env.PI_DEFERRED_TOOLS_CONFIG;
+    else process.env.PI_DEFERRED_TOOLS_CONFIG = previous;
+  }
+});
