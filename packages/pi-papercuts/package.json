@@ -24,6 +24,7 @@
   "files": [
     "index.js",
     "store.js",
+    "decode.js",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"

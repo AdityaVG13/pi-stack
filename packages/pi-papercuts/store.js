@@ -1,3 +1,4 @@
+import { isString, isObject, isFunction } from "./decode.js";
 /**
  * pi-papercuts core store — append-only JSONL papercut log.
  *
@@ -59,7 +60,7 @@ const EVENT_KINDS = ["cut", "resolve"];
  * fold() only accepts events that passed this parser.
  */
 export function parseEvent(line) {
-  const trimmed = typeof line === "string" ? line.trim() : "";
+  const trimmed = isString(line) ? line.trim() : "";
   if (!trimmed) return { ok: false, reason: "empty" };
   let parsed;
   try {
@@ -67,7 +68,7 @@ export function parseEvent(line) {
   } catch {
     return { ok: false, reason: "json" };
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+  if (!parsed || !isObject(parsed) || Array.isArray(parsed)) {
     return { ok: false, reason: "not_object" };
   }
   if (!EVENT_KINDS.includes(parsed.kind)) {
@@ -108,11 +109,12 @@ export function fold(events) {
     if (seen.has(e.id)) continue;
     seen.add(e.id);
     const res = resolves.get(e.id);
-    items.push({
+    const item = {
       ...e,
       status: res ? "resolved" : "open",
-      ...(res ? { resolution: { ts: res.ts, agent: res.agent, note: res.note } } : {}),
-    });
+    };
+    if (res) item.resolution = { ts: res.ts, agent: res.agent, note: res.note };
+    items.push(item);
   }
   return items;
 }
@@ -149,7 +151,7 @@ function ensureWritableLog(filePath) {
   if (st.isDirectory()) {
     return { ok: false, code: "usage", message: "papercuts log path is a directory: " + filePath };
   }
-  if (typeof st.isFIFO === "function" && st.isFIFO()) {
+  if (isFunction(st.isFIFO) && st.isFIFO()) {
     return { ok: false, code: "usage", message: "papercuts log path is a FIFO/pipe (would hang): " + filePath };
   }
   if (!st.isFile()) {

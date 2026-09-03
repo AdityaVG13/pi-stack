@@ -1,3 +1,4 @@
+import { isObject } from "../decode.js";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -21,7 +22,7 @@ function captureTool() {
 
 function dataOf(result) {
   // Prefer structured details; text may prefix a human line before the JSON envelope.
-  if (result.details && typeof result.details === "object") return result.details;
+  if (result.details && isObject(result.details)) return result.details;
   const text = result.content[0].text;
   const start = text.indexOf("{");
   return JSON.parse(start >= 0 ? text.slice(start) : text);
@@ -82,7 +83,7 @@ test("TUI renderer strips terminal control sequences from displayed arguments", 
   const tool = captureTool();
   const args = { action: "add", text: "plain \u001b[31mred\u001b[0m text", tags: ["\u001b[2Jtui"] };
   const call = rendered(tool.renderCall(args, plainTheme, { expanded: false }));
-  assert.doesNotMatch(call, /\u001b/);
+  assert.equal(call.includes("\u001b"), false);
   assert.match(call, /plain red text/);
   assert.match(call, /minor · tui/);
 });

@@ -1,3 +1,4 @@
+import { isString, isObject } from "./decode.js";
 /**
  * pi-papercuts — a complaint box for the agent.
  *
@@ -152,7 +153,7 @@ function renderPapercutsCall(args, theme, context) {
 
 function renderPapercutsResult(result, { expanded }, theme, context) {
   const payload = result?.details;
-  if (!payload || typeof payload !== "object") {
+  if (!payload || !isObject(payload)) {
     return new Text(theme.fg("toolOutput", resultText(result)), 0, 0);
   }
   if (payload.ok === false) {
@@ -269,7 +270,7 @@ function parseEvidenceFields(params) {
     return { ok: true, evidence: undefined };
   }
   if (hasNote) {
-    if (typeof rawNote !== "string") {
+    if (!isString(rawNote)) {
       return {
         ok: false,
         error: errorEnvelope(
@@ -306,7 +307,7 @@ function parseEvidenceFields(params) {
  * handlers do not re-check those facts.
  */
 export function parsePapercutsParams(params) {
-  if (params == null || typeof params !== "object" || Array.isArray(params)) {
+  if (params == null || !isObject(params) || Array.isArray(params)) {
     return {
       ok: false,
       error: errorEnvelope("usage", "papercuts params must be an object.", "papercuts({action:'add', text:'…'})"),
@@ -439,7 +440,7 @@ export function parsePapercutsParams(params) {
           ),
         };
       }
-      if (!ids.every((id) => typeof id === "string" && id.length > 0)) {
+      if (!ids.every((id) => isString(id) && id.length > 0)) {
         return {
           ok: false,
           error: errorEnvelope("usage", "resolve ids must be non-empty strings.", "papercuts({action:'resolve', ids:['pc_9f2c']})"),
@@ -505,8 +506,8 @@ function doAdd(params, ctx) {
     severity,
     cwd,
     repo: repo || cwd,
-    ...(params.evidence ? { evidence: params.evidence } : {}),
   };
+  if (params.evidence) record.evidence = params.evidence;
   // duplicate-safe: identical content already logged -> no-op.
   const { events } = store.readEvents(file);
   if (store.fold(events).some((item) => item.id === record.id)) {
@@ -604,7 +605,7 @@ function doSchema(params) {
     resolve: { kind: "resolve", id: "pc_<12 lowercase hex> (the cut id)", ts: "RFC3339 UTC milliseconds", agent: "string", note: "string|null" },
     list_item: { cut: "all cut fields", status: "open|resolved", resolution: "{ts,agent,note}|omitted" },
   };
-  const errors = { shape: { ok: false, error: { code: "string", message: "string", retryable: false, suggested_fix: "string" }, meta: { contract: 1 } }, codes: ["usage", "not_found", "internal"] };
+  const errors = { "shape": { ok: false, error: { code: "string", message: "string", retryable: false, suggested_fix: "string" }, meta: { contract: 1 } }, codes: ["usage", "not_found", "internal"] };
   const exitCodes = { 0: "success", 2: "usage", 66: "not found", 70: "internal", 74: "I/O" };
   const target = params.target; // parsed closed union
   if (target === "record") return textResult(envelope({ contract: CONTRACT_VERSION, records }));
@@ -654,7 +655,7 @@ export default function registerPapercuts(pi) {
     execute: async (_id, params, _signal, onUpdate, ctx) => {
       // Pi 0.84+ passes onUpdate then ctx. Accept the older four-argument
       // calling convention too so existing SDK hosts keep the correct cwd.
-      const executionContext = ctx ?? (onUpdate && typeof onUpdate === "object" ? onUpdate : undefined);
+      const executionContext = ctx ?? (onUpdate && isObject(onUpdate) ? onUpdate : undefined);
       try {
         const parsed = parsePapercutsParams(params);
         if (!parsed.ok) return textResult(parsed.error);
@@ -677,7 +678,7 @@ export default function registerPapercuts(pi) {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         let code = "internal";
-        if (error && typeof error === "object" && "code" in error) {
+        if (error && isObject(error) && "code" in error) {
           if (error.code === "usage") code = "usage";
           else if (error.code === "io" || ["ENOENT", "EACCES", "EPERM", "ENOSPC", "EROFS", "EISDIR"].includes(error.code)) code = "internal";
         }

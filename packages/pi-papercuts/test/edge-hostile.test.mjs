@@ -1,3 +1,4 @@
+import { isObject } from "../decode.js";
 /**
  * Hostile edge-case regressions discovered in pre-0.1.0 audit.
  * These assert desired safe behavior and are regressions for store/tool harden.
@@ -25,7 +26,7 @@ function captureTool() {
 }
 
 function dataOf(result) {
-  if (result.details && typeof result.details === "object") return result.details;
+  if (result.details && isObject(result.details)) return result.details;
   const text = result.content[0].text;
   const start = text.indexOf("{");
   return JSON.parse(start >= 0 ? text.slice(start) : text);
