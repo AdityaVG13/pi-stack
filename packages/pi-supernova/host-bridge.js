@@ -540,8 +540,14 @@ function createNativeAdapters(getCwd, vfs, config) {
       const res = await executeSnap({
         query: params.query,
         searchDir: snapTarget,
-        vfs,
-        runCommand: (argv, opts) => runCommand(argv, { cwd, signal, ...opts }),
+        vfs: {
+          read: async (candidate) => {
+            // Jail each snap candidate (symlink files must not escape the workspace).
+            const jailed = await resolveWorkspacePath(cwd, candidate, "snap", false);
+            return vfs.read(jailed);
+          },
+        },
+        runCommand: (argv, opts) => runCommand(argv, { cwd: snapTarget, signal, ...opts }),
       });
       return textResult(JSON.stringify(res, null, 2), res);
     },
@@ -667,8 +673,15 @@ export function createHostBridge({ pi, config, getCwd }) {
 
   if (pi && isFunction(pi.registerTool)) {
     const original = pi.registerTool.bind(pi);
+    const excluded = new Set(config.excludeTools || []);
     pi.registerTool = (tool) => {
-      if (tool && isString(tool.name) && isFunction(tool.execute)) {
+      if (
+        tool &&
+        isString(tool.name) &&
+        isFunction(tool.execute) &&
+        tool.name !== "supernova" &&
+        !excluded.has(tool.name)
+      ) {
         executors.set(tool.name, tool.execute.bind(tool));
       }
       return original(tool);
@@ -720,6 +733,15 @@ export function createHostBridge({ pi, config, getCwd }) {
       throw new Error(`supernova host call budget exceeded (${maxCalls})`);
     }
     if (activeSignal?.aborted) throw new Error("aborted");
+    if (!isString(name) || !name) throw new Error("tool name required");
+
+    // Never re-enter supernova or other excluded composition tools via the bridge.
+    const excluded = new Set(config.excludeTools || []);
+    if (name === "supernova" || excluded.has(name)) {
+      throw new Error(
+        `nova.call("${name}") is blocked (excluded / non-reentrant). Use nova.search/describe for discovery, or call a concrete host tool.`,
+      );
+    }
 
     const record = { name, args: args || {}, time: Date.now() };
     trace.push(record);

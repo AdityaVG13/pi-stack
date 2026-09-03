@@ -149,15 +149,14 @@ Optional `~/.pi/agent/supernova.json` or `~/.omp/agent/supernova.json`
   "maxBridgeCalls": 256,
   "maxCallResultChars": 65536,
   "maxReturnChars": 200000,
-  "maxLogLines": 50,
-  "maxLogLineChars": 2000,
-  "maxSearchResults": 8,
-  "spillDir": null,
-  "excludeTools": [],
-  "mutatingTools": [],
-  "mutatingPrefixes": []
+  "maxLogLines": 100,
+  "maxLogLineChars": 4096,
+  "maxSearchResults": 12,
+  "spillDir": null
 }
 ```
+
+Defaults also set `excludeTools` to `["supernova", "search_tools", "promote_tools", "demote_tools", "list_capabilities"]` — do **not** override with `[]` unless you intend to clear that list (empty array replaces defaults). Same for `mutatingTools` / `mutatingPrefixes`.
 
 Paths resolve from `$HOME` + install location — **no hardcoded usernames**. Dual-install picks the host that loaded the package (`~/.pi/...` vs `~/.omp/...`).
 
@@ -200,8 +199,9 @@ Slash command: `/supernova` — catalog size + captured executors.
 
 ## Limitations
 
-- Guest JavaScript is **intentionally unsandboxed** (in-process). Same class of trust as host `bash`.
-- Shell execution is an irreversible transaction barrier; nested `nova.speculate` rejects it rather than promising rollback.
+- Guest JavaScript is **intentionally unsandboxed** (in-process). Same class of trust as host `bash`. Adapter path jails are **not** a security boundary against `await import("node:fs")` inside the guest.
+- Every `supernova` execute begins a speculative overlay; `bash` / mutating host tools **flush** pending writes to disk (transaction barrier). After that, error-path “rollback” cannot undo durable mutations.
+- Nested `nova.speculate` rejects irreversible external mutations rather than promising rollback.
 - Native adapters cover core file/shell tools; exotic host tools need successful `registerTool` capture.
 - First public cut (`0.0.1`) — APIs and TUI will iterate.
 

@@ -77,4 +77,54 @@ describe("workspace jail", () => {
     assert.equal(r.ok, true);
     assert.match(r.value, /pi-supernova/);
   });
+
+  it("does not leak symlink-file contents via snap or read", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "supernova-snap-jail-"));
+    const workspace = path.join(tmp, "workspace");
+    const outside = path.join(tmp, "outside");
+    await fs.mkdir(workspace);
+    await fs.mkdir(outside);
+    await fs.writeFile(path.join(outside, "secret.txt"), "TOPSECRET_SNAP_JAIL");
+    await fs.writeFile(path.join(workspace, "ok.js"), "export const visible = 1;\n");
+    await fs.symlink(path.join(outside, "secret.txt"), path.join(workspace, "leak.txt"));
+    const b = createHostBridge({
+      pi: null,
+      config: { maxBridgeCalls: 32, maxCallResultChars: 8000 },
+      getCwd: () => workspace,
+    });
+
+    try {
+      // Direct read of the symlink file must fail closed.
+      await assert.rejects(
+        () => b.call("read", { path: "leak.txt" }),
+        /escapes workspace/,
+      );
+      // Snap may skip unreadable candidates; it must never return outside content.
+      const snap = await b.call("snap", { query: "TOPSECRET_SNAP_JAIL" });
+      assert.doesNotMatch(String(snap.value ?? ""), /TOPSECRET_SNAP_JAIL/);
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks nova.call re-entry into supernova / excluded tools", async () => {
+    const b = createHostBridge({
+      pi: {
+        registerTool(tool) {
+          // Simulate late registration of supernova itself.
+          if (tool?.name) this._last = tool;
+        },
+      },
+      config: {
+        maxBridgeCalls: 32,
+        maxCallResultChars: 8000,
+        excludeTools: ["supernova", "search_tools"],
+      },
+      getCwd: () => root,
+    });
+    b.bindCallContext({}, undefined);
+    b.resetCallBudget();
+    await assert.rejects(() => b.call("supernova", { code: "return 1" }), /blocked|excluded|non-reentrant/);
+    await assert.rejects(() => b.call("search_tools", { query: "x" }), /blocked|excluded|non-reentrant/);
+  });
 });

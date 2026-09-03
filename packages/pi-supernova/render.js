@@ -12,13 +12,41 @@ import { isString, isObject } from "./decode.js";
 
 const ELLIPSIS = "…";
 
-/** Visible columns — ANSI/OSC stripped, tabs → 3 spaces. ASCII-fast. */
+/**
+ * Visible columns — ANSI/OSC stripped, tabs → 3 spaces.
+ * ASCII-fast; non-ASCII uses a wide-char heuristic aligned with typical terminal
+ * / pi-tui behavior (emoji & symbols like ⚡ are 2 cols — undercount ⇒ 92>91 crash).
+ */
 export function measureWidth(text) {
 	const raw = String(text ?? "").replace(/\t/g, "   ");
 	if (raw.length === 0) return 0;
-	// Fast path: no escapes → length equals columns for BMP-ish tool output we emit.
-	if (!raw.includes("\x1b")) return raw.length;
-	return stripVTControlCharacters(raw).length;
+	const plain = raw.includes("\x1b") ? stripVTControlCharacters(raw) : raw;
+	if (/^[\x20-\x7e]*$/.test(plain)) return plain.length;
+	let width = 0;
+	for (const ch of plain) {
+		width += codePointWidth(ch.codePointAt(0));
+	}
+	return width;
+}
+
+function codePointWidth(cp) {
+	if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) return 0;
+	// Fullwidth / wide ranges (CJK, Hangul, emoji blocks we actually emit).
+	if (cp >= 0x1100 && cp <= 0x115f) return 2;
+	if (cp === 0x2329 || cp === 0x232a) return 2;
+	if (cp >= 0x2e80 && cp <= 0xa4cf) return 2;
+	if (cp >= 0xac00 && cp <= 0xd7a3) return 2;
+	if (cp >= 0xf900 && cp <= 0xfaff) return 2;
+	if (cp >= 0xfe10 && cp <= 0xfe19) return 2;
+	if (cp >= 0xfe30 && cp <= 0xfe6f) return 2;
+	if (cp >= 0xff00 && cp <= 0xff60) return 2;
+	if (cp >= 0xffe0 && cp <= 0xffe6) return 2;
+	if (cp >= 0x1f300 && cp <= 0x1f64f) return 2;
+	if (cp >= 0x1f900 && cp <= 0x1f9ff) return 2;
+	if (cp >= 0x20000 && cp <= 0x3fffd) return 2;
+	// Ambiguous emoji/symbols pi-tui treats as wide (⚡ U+26A1 was the 92>91 footgun).
+	if (cp === 0x26a1 || cp === 0x2b50 || cp === 0x2728) return 2;
+	return 1;
 }
 
 /**
@@ -239,7 +267,8 @@ const ACTION_ICONS = {
 	grep: "⌕ ",
 	find: "⌕ ",
 	ls: "▤ ",
-	speculate: "⚡ ",
+	// Avoid double-width emoji (⚡) — measure disagreements with Pi caused 92>91 crashes.
+	speculate: "✶ ",
 	snap: "⌖ ",
 };
 
