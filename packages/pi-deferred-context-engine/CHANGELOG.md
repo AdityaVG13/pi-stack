@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.2
+
+- Anti-slop refactoring and boundary type decoding: eliminate runtime typeof checks and conditional spreads across engine, config, and compact.
+- Add decode.js to published files allowlist.
+
 ## [Unreleased]
 
 ### Changed
