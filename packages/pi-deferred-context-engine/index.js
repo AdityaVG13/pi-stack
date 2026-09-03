@@ -1,3 +1,4 @@
+import { isString, isObject, isFunction } from "./decode.js";
 /** Factory-style deferred context for registered Pi tools and skills. */
 
 /** typebox is provided by the Pi host; fall back to loose JSON Schema if missing. */
@@ -6,10 +7,10 @@ try {
   Type = (await import("typebox")).Type;
 } catch {
   Type = {
-    Object: (props, opts) => ({ type: "object", properties: props || {}, additionalProperties: false, ...(opts || {}) }),
-    String: (opts) => ({ type: "string", ...(opts || {}) }),
-    Integer: (opts) => ({ type: "integer", ...(opts || {}) }),
-    Array: (items, opts) => ({ type: "array", items: items || {}, ...(opts || {}) }),
+    Object: (props, opts) => ({ type: "object", properties: props || {}, additionalProperties: false, ...opts }),
+    String: (opts) => ({ type: "string", ...opts }),
+    Integer: (opts) => ({ type: "integer", ...opts }),
+    Array: (items, opts) => ({ type: "array", items: items || {}, ...opts }),
     Optional: (s) => ({ ...s }),
     Union: (arr) => ({ anyOf: arr }),
     Literal: (v) => ({ const: v }),
@@ -55,7 +56,7 @@ export function parseToolNames(names) {
   }
   const cleaned = [];
   for (const name of names) {
-    if (typeof name !== "string" || name.length === 0) {
+    if (!isString(name) || name.length === 0) {
       return { ok: false, error: "names must be a non-empty array of non-empty strings" };
     }
     cleaned.push(name);
@@ -73,10 +74,10 @@ export function parseToolNames(names) {
  *   (config.default.json via loadConfig). Missing → packageDefaults() sole source (no dual literal).
  */
 export function parseSearchToolsParams(params, opts = {}) {
-  if (params == null || typeof params !== "object" || Array.isArray(params)) {
+  if (params == null || !isObject(params) || Array.isArray(params)) {
     return { ok: false, error: "search_tools params must be an object" };
   }
-  if (typeof params.query !== "string") {
+  if (!isString(params.query)) {
     return { ok: false, error: "query must be a string" };
   }
   const kind = params.kind === undefined ? "all" : params.kind;
@@ -114,7 +115,7 @@ export function parseDeferredCommand(args) {
   if (args == null || args === "") {
     return { ok: true, value: "status" };
   }
-  if (typeof args !== "string") {
+  if (!isString(args)) {
     return { ok: false, error: DEFERRED_USAGE };
   }
   const trimmed = args.trim();
@@ -229,7 +230,7 @@ function skillSection(topSkill, skillNames, maxSkillBytes) {
 
 /** OMP passes string[]; Pi passes string. Never String(array) — that comma-joins blocks. */
 function normalizeSystemPromptText(systemPrompt) {
-  if (Array.isArray(systemPrompt)) return systemPrompt.filter((p) => typeof p === "string").join("\n");
+  if (Array.isArray(systemPrompt)) return systemPrompt.filter((p) => isString(p)).join("\n");
   return String(systemPrompt || "");
 }
 
@@ -238,13 +239,13 @@ function normalizeSystemPromptText(systemPrompt) {
  * Pi: event.systemPromptOptions. OMP: often absent on the event; try ctx.getSystemPromptOptions.
  */
 function resolveSystemPromptOptions(event, ctx) {
-  if (event?.systemPromptOptions && typeof event.systemPromptOptions === "object") {
+  if (event?.systemPromptOptions && isObject(event.systemPromptOptions)) {
     return event.systemPromptOptions;
   }
-  if (ctx && typeof ctx.getSystemPromptOptions === "function") {
+  if (ctx && isFunction(ctx.getSystemPromptOptions)) {
     try {
       const options = ctx.getSystemPromptOptions();
-      if (options && typeof options === "object") return options;
+      if (options && isObject(options)) return options;
     } catch {
       // Host without options — searchable skills stay empty until slash/Jeffrey.
     }
@@ -480,10 +481,10 @@ export default function piDeferredContextEngine(pi) {
           return;
         }
         if (command === "audit") {
-          const options = typeof ctx.getSystemPromptOptions === "function"
+          const options = isFunction(ctx.getSystemPromptOptions)
             ? (ctx.getSystemPromptOptions() || {})
             : {};
-          const rawPrompt = typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : "";
+          const rawPrompt = isFunction(ctx.getSystemPrompt) ? ctx.getSystemPrompt() : "";
           const optimized = optimizeSystemPrompt(normalizeSystemPromptText(rawPrompt), options, config);
           const schemas = schemaAudit(pi.getAllTools(), pi.getActiveTools());
           ctx.ui.notify(
@@ -523,7 +524,7 @@ export default function piDeferredContextEngine(pi) {
   pi.on("session_start", async () => {
     if (config.enabled) await Promise.resolve(controller.synchronize({ resetPromotions: true }));
     // Surface block CAUTION once per session so operators notice deny-lists.
-    if (typeof pi.ui?.notify === "function") {
+    if (isFunction(pi.ui?.notify)) {
       for (const warning of blockedToolsCautionWarnings(config)) {
         pi.ui.notify(warning, "warning");
       }
@@ -574,7 +575,7 @@ export default function piDeferredContextEngine(pi) {
       await Promise.resolve(controller.synchronize({ resetPromotions: true }));
       return;
     }
-    if (typeof ctx?.ui?.confirm !== "function") return;
+    if (!isFunction(ctx?.ui?.confirm)) return;
     const pinned = new Set(config.alwaysActive || []);
     const candidates = controller.promotedNames()
       .filter((name) => !promotionKeepAsked.has(name) && !pinned.has(name));

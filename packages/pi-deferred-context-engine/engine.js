@@ -1,3 +1,4 @@
+import { isString, isFunction, isObject } from "./decode.js";
 import { isBlocked, shouldDefer, SPINE_NAMES as CONFIG_SPINE_NAMES } from "./config.js";
 import { pruneSchemaInPlace, restorePrunedSchema } from "./compact.js";
 import { formatCatalog } from "./catalog.js";
@@ -22,7 +23,7 @@ import { formatCatalog } from "./catalog.js";
 export const SPINE_NAMES = CONFIG_SPINE_NAMES;
 
 function uniqueNames(names) {
-  return [...new Set(names.filter((name) => typeof name === "string" && name.length > 0))];
+  return [...new Set(names.filter((name) => isString(name) && name.length > 0))];
 }
 
 /**
@@ -82,7 +83,7 @@ export function createDeferredController(pi, initialConfig) {
         }
         continue;
       }
-      if (entry || !tool.parameters || typeof tool.parameters !== "object") continue;
+      if (entry || !tool.parameters || !isObject(tool.parameters)) continue;
       try {
         const before = JSON.stringify(tool.parameters).length;
         const undo = pruneSchemaInPlace(tool.parameters, {
@@ -152,7 +153,7 @@ export function createDeferredController(pi, initialConfig) {
     if (!identical) {
       try {
         const maybe = pi.setActiveTools(normalized);
-        if (maybe != null && typeof maybe.then === "function") {
+        if (maybe != null && isFunction(maybe.then)) {
           return Promise.resolve(maybe).then(
             () => activeNames(),
             (error) => {
@@ -178,15 +179,16 @@ export function createDeferredController(pi, initialConfig) {
     applyCompaction();
     const missingPins = missingPinNames(names);
     const blocked = [...blockedNameSet(names)].sort();
-    return {
+    const out = {
       active,
       deferred: [...deferred].sort(),
       blocked,
       promoted: [...promoted].sort(),
-      ...(sessionUnblocked.size > 0 ? { sessionUnblocked: [...sessionUnblocked].sort() } : {}),
-      ...(missingPins.length > 0 ? { missingPins } : {}),
-      ...(lastSetError ? { setActiveError: lastSetError } : {}),
     };
+    if (sessionUnblocked.size > 0) out.sessionUnblocked = [...sessionUnblocked].sort();
+    if (missingPins.length > 0) out.missingPins = missingPins;
+    if (lastSetError) out.setActiveError = lastSetError;
+    return out;
   }
 
   function synchronize({ resetPromotions = false } = {}) {
@@ -201,16 +203,17 @@ export function createDeferredController(pi, initialConfig) {
       const restored = setActiveIfChanged(names);
       const done = (active) => {
         applyCompaction();
-        return {
+        const out = {
           active,
           deferred: [],
           blocked: [],
           promoted: [...promoted],
-          ...(sessionUnblocked.size > 0 ? { sessionUnblocked: [...sessionUnblocked].sort() } : {}),
-          ...(lastSetError ? { setActiveError: lastSetError } : {}),
         };
+        if (sessionUnblocked.size > 0) out.sessionUnblocked = [...sessionUnblocked].sort();
+        if (lastSetError) out.setActiveError = lastSetError;
+        return out;
       };
-      return restored != null && typeof restored.then === "function"
+      return restored != null && isFunction(restored.then)
         ? restored.then(done)
         : done(restored);
     }
@@ -246,7 +249,7 @@ export function createDeferredController(pi, initialConfig) {
     // neverDefer alone does not force inactive tools active — that is alwaysActive's job.
 
     const active = setActiveIfChanged(next);
-    return active != null && typeof active.then === "function"
+    return active != null && isFunction(active.then)
       ? active.then((resolved) => finishSynchronize(resolved, names))
       : finishSynchronize(active, names);
   }
@@ -289,7 +292,7 @@ export function createDeferredController(pi, initialConfig) {
     // placing every active tool according to the configured priority order.
     if (added.length > 0) {
       const maybe = pi.setActiveTools(normalizeActiveNames([...active, ...added]));
-      if (maybe != null && typeof maybe.then === "function") {
+      if (maybe != null && isFunction(maybe.then)) {
         return Promise.resolve(maybe).then(finish, (error) => {
           lastSetError = error instanceof Error ? error.message : String(error);
           return finish();
@@ -332,7 +335,7 @@ export function createDeferredController(pi, initialConfig) {
     if (removed.length > 0) {
       const removeSet = new Set(removed);
       const maybe = pi.setActiveTools(normalizeActiveNames(active.filter((name) => !removeSet.has(name))));
-      if (maybe != null && typeof maybe.then === "function") {
+      if (maybe != null && isFunction(maybe.then)) {
         return Promise.resolve(maybe).then(finish, (error) => {
           lastSetError = error instanceof Error ? error.message : String(error);
           return finish();
@@ -359,7 +362,7 @@ export function createDeferredController(pi, initialConfig) {
   function status() {
     const missingPins = missingPinNames();
     const blocked = [...blockedNameSet()].sort();
-    return {
+    const out = {
       enabled: Boolean(config.enabled),
       compaction: compactionStats(),
       all: allNames().length,
@@ -368,10 +371,11 @@ export function createDeferredController(pi, initialConfig) {
       blocked: blocked.length,
       blockedNames: blocked,
       promoted: promoted.size,
-      ...(sessionUnblocked.size > 0 ? { sessionUnblocked: [...sessionUnblocked].sort() } : {}),
-      ...(missingPins.length > 0 ? { missingPins } : {}),
-      ...(lastSetError ? { setActiveError: lastSetError } : {}),
     };
+    if (sessionUnblocked.size > 0) out.sessionUnblocked = [...sessionUnblocked].sort();
+    if (missingPins.length > 0) out.missingPins = missingPins;
+    if (lastSetError) out.setActiveError = lastSetError;
+    return out;
   }
 
   /** Names currently promoted (sorted); the keep-pinned prompt consumes this. */

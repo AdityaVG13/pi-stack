@@ -1,3 +1,4 @@
+import { isString, isObject } from "./decode.js";
 /**
  * Tiered schema disclosure: active tools keep full structural schemas
  * (types, enums, required) while long prose inside parameter schemas is
@@ -15,7 +16,7 @@ const DROP_KEYS = Object.freeze(["examples", "$comment"]);
 
 /** Truncate prose at a sentence (preferred) or word boundary. */
 export function truncateProse(text, maxChars) {
-  if (typeof text !== "string" || text.length <= maxChars) return text;
+  if (!isString(text) || text.length <= maxChars) return text;
   const slice = text.slice(0, maxChars);
   const sentenceEnd = slice.lastIndexOf(". ");
   if (sentenceEnd >= Math.floor(maxChars / 2)) {
@@ -30,7 +31,7 @@ export function truncateProse(text, maxChars) {
  * means nothing was worth pruning. Cycle-safe via `seen`.
  */
 export function pruneSchemaInPlace(schema, { maxChars = 160 } = {}, undo = [], seen = new Set()) {
-  if (!schema || typeof schema !== "object" || seen.has(schema)) return undo;
+  if (!schema || !isObject(schema) || seen.has(schema)) return undo;
   seen.add(schema);
   if (Array.isArray(schema)) {
     for (const item of schema) pruneSchemaInPlace(item, { maxChars }, undo, seen);
@@ -43,12 +44,12 @@ export function pruneSchemaInPlace(schema, { maxChars = 160 } = {}, undo = [], s
       delete schema[key];
       continue;
     }
-    if (key === "description" && typeof value === "string" && value.length > maxChars) {
+    if (key === "description" && isString(value) && value.length > maxChars) {
       undo.push({ target: schema, key, value });
       schema[key] = truncateProse(value, maxChars);
       continue;
     }
-    if (value && typeof value === "object") pruneSchemaInPlace(value, { maxChars }, undo, seen);
+    if (value && isObject(value)) pruneSchemaInPlace(value, { maxChars }, undo, seen);
   }
   return undo;
 }

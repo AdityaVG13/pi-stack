@@ -1,3 +1,4 @@
+import { isString, isObject } from "./decode.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -39,7 +40,7 @@ export const KNOWN_CONFIG_KEYS = Object.freeze([
 const KNOWN_CONFIG_KEY_SET = new Set(KNOWN_CONFIG_KEYS);
 
 function uniqueStrings(values) {
-  return [...new Set(values.filter((value) => typeof value === "string" && value.length > 0))];
+  return [...new Set(values.filter((value) => isString(value) && value.length > 0))];
 }
 
 function positiveInteger(value, fallback) {
@@ -78,10 +79,10 @@ export function inferKindFromInstallPath(installDir = __dirname) {
 export function detectAgentConfigKind(argv = process.argv, execPath = process.execPath) {
   const names = [];
   for (const entry of Array.isArray(argv) ? argv : []) {
-    if (typeof entry !== "string" || !entry) continue;
+    if (!isString(entry) || !entry) continue;
     names.push(path.basename(entry).replace(/\.(js|mjs|cjs|ts|exe)$/i, "").toLowerCase());
   }
-  if (typeof execPath === "string" && execPath) {
+  if (isString(execPath) && execPath) {
     names.push(path.basename(execPath).replace(/\.(js|mjs|cjs|ts|exe)$/i, "").toLowerCase());
   }
   try {
@@ -125,7 +126,7 @@ export function userConfigPath() {
 
   for (const key of ["PI_CONFIG_DIR", "OMP_CONFIG_DIR"]) {
     const root = process.env[key];
-    if (!root || typeof root !== "string") continue;
+    if (!root || !isString(root)) continue;
     const underAgent = path.join(root, "agent", "deferred-tools.json");
     if (fs.existsSync(underAgent)) return underAgent;
     const direct = path.join(root, "deferred-tools.json");
@@ -197,7 +198,7 @@ function parseStringListField(raw, key, strict) {
     if (strict) return { ok: false, error: key + " must be an array of strings" };
     return { ok: true, present: false };
   }
-  if (strict && raw.some((item) => typeof item !== "string")) {
+  if (strict && raw.some((item) => !isString(item))) {
     return { ok: false, error: key + " must contain only strings" };
   }
   return { ok: true, present: true, value: raw };
@@ -205,7 +206,7 @@ function parseStringListField(raw, key, strict) {
 
 function parseBooleanField(raw, key, strict) {
   if (raw === undefined) return { ok: true, present: false };
-  if (typeof raw !== "boolean") {
+  if (raw !== true && raw !== false) {
     if (strict) return { ok: false, error: key + " must be a boolean" };
     return { ok: true, present: false };
   }
@@ -231,14 +232,14 @@ function parsePositiveIntField(raw, key, strict) {
  * Invalid shapes are rejected in strict mode and omitted otherwise.
  */
 function parseCompactSchemas(raw, strict) {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+  if (raw === null || !isObject(raw) || Array.isArray(raw)) {
     return strict
       ? { ok: false, error: "compactSchemas must be a JSON object" }
       : { ok: true, present: false };
   }
   const value = {};
   if (Object.prototype.hasOwnProperty.call(raw, "enabled")) {
-    if (typeof raw.enabled !== "boolean") {
+    if (raw.enabled !== true && raw.enabled !== false) {
       if (strict) return { ok: false, error: "compactSchemas.enabled must be a boolean" };
     } else value.enabled = raw.enabled;
   }
@@ -248,7 +249,7 @@ function parseCompactSchemas(raw, strict) {
     } else value.maxParamDescriptionChars = raw.maxParamDescriptionChars;
   }
   if (Object.prototype.hasOwnProperty.call(raw, "keepFull")) {
-    if (!Array.isArray(raw.keepFull) || raw.keepFull.some((n) => typeof n !== "string" || n.length === 0)) {
+    if (!Array.isArray(raw.keepFull) || raw.keepFull.some((n) => !isString(n) || n.length === 0)) {
       if (strict) return { ok: false, error: "compactSchemas.keepFull must be an array of non-empty strings" };
     } else value.keepFull = [...raw.keepFull];
   }
@@ -256,7 +257,7 @@ function parseCompactSchemas(raw, strict) {
 }
 
 export function parseUserConfig(raw, { strict = false } = {}) {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+  if (raw === null || !isObject(raw) || Array.isArray(raw)) {
     return { ok: false, error: "config must be a JSON object" };
   }
 
@@ -448,7 +449,7 @@ export function mergeConfig(defaults, user = {}) {
     blockedTools: blockConflict.blockedTools,
     blockedPrefixes: mergeStringSetting(defaults, user, "blockedPrefixes"),
     activeSkills: mergeStringSetting(defaults, user, "activeSkills"),
-    compactSchemas: { ...(defaults.compactSchemas || {}), ...(user.compactSchemas || {}) },
+    compactSchemas: { ...defaults.compactSchemas, ...user.compactSchemas },
     // Ordered soft routing signal: user list replaces defaults wholesale when
     // present (merging two orders is ambiguous). Empty = registration order.
     toolPriority: uniqueStrings(user.toolPriority ?? defaults.toolPriority ?? []),
@@ -493,7 +494,7 @@ export function loadConfig(configPath = userConfigPath(), { strict = false } = {
  */
 export function shouldDefer(name, config) {
   if (!config.enabled) return false;
-  if (typeof name !== "string" || name.length === 0) return false; // guard: hosts may return nameless tools
+  if (!isString(name) || name.length === 0) return false; // guard: hosts may return nameless tools
   if (SPINE_NAMES.has(name)) return false; // code spine — never deferred (not a user pin)
   if ((config.neverDefer || []).includes(name)) return false;
   if ((config.deferredNames || []).includes(name)) return true;
@@ -513,7 +514,7 @@ export function shouldDefer(name, config) {
  */
 export function isBlocked(name, config, opts = {}) {
   if (!config || !config.enabled) return false;
-  if (typeof name !== "string" || name.length === 0) return false;
+  if (!isString(name) || name.length === 0) return false;
   if (SPINE_NAMES.has(name)) return false;
   const sessionUnblocked = opts.sessionUnblocked;
   if (sessionUnblocked) {
@@ -521,7 +522,7 @@ export function isBlocked(name, config, opts = {}) {
     if (set.has(name)) return false;
   }
   if ((config.blockedTools || []).includes(name)) return true;
-  if ((config.blockedPrefixes || []).some((prefix) => typeof prefix === "string" && prefix.length > 0 && name.startsWith(prefix))) {
+  if ((config.blockedPrefixes || []).some((prefix) => isString(prefix) && prefix.length > 0 && name.startsWith(prefix))) {
     return true;
   }
   return false;
@@ -578,12 +579,12 @@ export function blockedToolsCautionWarnings(config) {
  * @returns {{ removed: string[], missing: string[] }}
  */
 export function removeBlockedTools(names, configPath = userConfigPath()) {
-  const clean = [...new Set(names)].filter((name) => typeof name === "string" && name.length > 0);
+  const clean = [...new Set(names)].filter((name) => isString(name) && name.length > 0);
   if (clean.length === 0) return { removed: [], missing: [] };
   let raw = {};
   if (fs.existsSync(configPath)) {
     raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    if (!isObject(raw) || raw === null || Array.isArray(raw)) {
       throw new Error("user config at " + configPath + " is not an object");
     }
   }
@@ -610,12 +611,12 @@ export function removeBlockedTools(names, configPath = userConfigPath()) {
  * @returns {string[]}
  */
 export function addAlwaysActive(names, configPath = userConfigPath()) {
-  const clean = [...new Set(names)].filter((name) => typeof name === "string" && name.length > 0);
+  const clean = [...new Set(names)].filter((name) => isString(name) && name.length > 0);
   if (clean.length === 0) return [];
   let raw = {};
   if (fs.existsSync(configPath)) {
     raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    if (!isObject(raw) || raw === null || Array.isArray(raw)) {
       throw new Error("user config at " + configPath + " is not an object");
     }
   }
