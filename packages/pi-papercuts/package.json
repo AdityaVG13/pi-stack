@@ -1,6 +1,6 @@
 {
   "name": "pi-papercuts",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Agent complaint box for Pi: file friction into an append-only .papercuts.jsonl, then keep working.",
   "type": "module",
   "author": "AdityaVG13",

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- Anti-slop refactoring and boundary type decoding: eliminate runtime typeof checks and conditional spreads across store and index.
+- Add decode.js to published files allowlist.
+
 ## 0.3.0
 
 - New `prune` action: archives every resolved cut (and its resolve events) to `<log>.archive.jsonl` and atomically rewrites the main log with open cuts only. The working list stays lean; history stays append-only in the archive. Idempotent; torn lines drop with the same self-heal semantics as read.
