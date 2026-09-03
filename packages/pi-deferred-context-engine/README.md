@@ -6,6 +6,8 @@ Needs [Pi](https://pi.dev) 0.82+ and Node 22+. Install **after** other tool-owni
 
 ## Install
 
+Install **last** among tool-owning packages so DCE sees the full registry:
+
 ```bash
 pi install npm:pi-deferred-context-engine
 ```
@@ -16,12 +18,28 @@ From a clone:
 pi install ./packages/pi-deferred-context-engine
 ```
 
+**No config file required.** On first run:
+
+- Only the spine tool `search_tools` is forced active (in code).
+- Everything else starts deferred (`deferByDefault`).
+- Use `search_tools` or `/deferred` to promote, demote, pin, or block.
+
 ```text
 /deferred status
+/deferred config
 /deferred audit
 ```
 
-Config: `~/.pi/agent/deferred-tools.json` or `PI_DEFERRED_TOOLS_CONFIG`.
+Optional user config (created only if you want pins/blocks):
+
+| Host | File |
+|------|------|
+| Pi | `~/.pi/agent/deferred-tools.json` |
+| OMP | `~/.omp/agent/deferred-tools.json` |
+
+Paths are resolved from `$HOME` + install location — **no hardcoded usernames or absolute paths**.  
+Override: `PI_DEFERRED_TOOLS_CONFIG` / `OMP_DEFERRED_TOOLS_CONFIG`, or `PI_CONFIG_DIR` / `OMP_CONFIG_DIR`.  
+Dual-install: DCE picks the file for the host that loaded this package (npm under `~/.pi/...` vs `~/.omp/...`).
 
 ## What it does
 
@@ -30,7 +48,7 @@ Config: `~/.pi/agent/deferred-tools.json` or `PI_DEFERRED_TOOLS_CONFIG`.
 - Drops byte-identical duplicate `AGENTS.md` blocks (keeps distinct files)
 - After `agent_settled`, run-scoped promotions clear (default)
 
-Hard spine is always `search_tools`. Defaults also pin stock tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) and `papercuts` if that package is installed.
+Hard spine is always `search_tools` (forced in code — not a user pin). Package defaults ship **empty** `alwaysActive` / `neverDefer` / `blockedTools`; pin only what you need in your own `deferred-tools.json`.
 
 ## Tools
 
@@ -88,7 +106,7 @@ Lists merge with defaults unless `replaceAlwaysActive` / `replaceNeverDefer` / `
 
 Use cases:
 
-- Dogfood `asgrep` by blocking stock `grep` / `glob` / `ast_grep`
+- Prefer a replacement search tool by blocking stock `grep` / `glob` / `ast_grep`
 - Prefer one of two overlapping package tools without uninstalling the other
 
 Escape hatches (human-only; the agent has no unblock tool):

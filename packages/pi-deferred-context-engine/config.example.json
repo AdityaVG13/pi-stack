@@ -11,39 +11,23 @@
   "replaceBlockedTools": true,
   "alwaysActive": [
     "search_tools",
-    "asgrep",
-    "read",
-    "edit",
-    "write",
-    "bash"
+    "my_tool"
   ],
   "neverDefer": [
     "search_tools",
-    "asgrep",
-    "read",
-    "edit",
-    "write",
-    "bash"
+    "my_tool"
   ],
   "deferredNames": [],
   "deferredPrefixes": [
     "mcp_",
     "experimental_"
   ],
-  "blockedTools": [
-    "grep",
-    "glob",
-    "ast_grep"
-  ],
+  "blockedTools": [],
   "blockedPrefixes": [],
   "activeSkills": [],
   "toolPriority": [
     "search_tools",
-    "asgrep",
-    "read",
-    "edit",
-    "write",
-    "bash"
+    "my_tool"
   ],
   "compactSchemas": {
     "enabled": true,

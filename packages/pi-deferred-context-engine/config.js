@@ -50,16 +50,111 @@ function defaultConfigPath() {
   return path.join(__dirname, "config.default.json");
 }
 
+/** Standard per-host config file locations (user-agnostic; no hard-coded usernames). */
+export function standardConfigPaths(home = os.homedir()) {
+  return {
+    pi: path.join(home, ".pi", "agent", "deferred-tools.json"),
+    omp: path.join(home, ".omp", "agent", "deferred-tools.json"),
+  };
+}
+
+/**
+ * Infer host from where THIS package was installed.
+ * npm under ~/.pi/agent/npm/... → pi; under ~/.omp/... → omp.
+ * Path-installs outside either home return "unknown".
+ */
+export function inferKindFromInstallPath(installDir = __dirname) {
+  const normalized = String(installDir || "").replace(/\\/g, "/").toLowerCase();
+  // Segment match only — avoid false hits on package names containing "pi".
+  if (normalized.includes("/.omp/")) return "omp";
+  if (normalized.includes("/.pi/")) return "pi";
+  return "unknown";
+}
+
+/**
+ * Weak signal from the running binary basename (path-install fallback).
+ * Exact basenames only — no repo-name heuristics.
+ */
+export function detectAgentConfigKind(argv = process.argv, execPath = process.execPath) {
+  const names = [];
+  for (const entry of Array.isArray(argv) ? argv : []) {
+    if (typeof entry !== "string" || !entry) continue;
+    names.push(path.basename(entry).replace(/\.(js|mjs|cjs|ts|exe)$/i, "").toLowerCase());
+  }
+  if (typeof execPath === "string" && execPath) {
+    names.push(path.basename(execPath).replace(/\.(js|mjs|cjs|ts|exe)$/i, "").toLowerCase());
+  }
+  try {
+    if (typeof Bun !== "undefined" && Bun.main) {
+      names.push(path.basename(String(Bun.main)).replace(/\.(js|mjs|cjs|ts|exe)$/i, "").toLowerCase());
+    }
+  } catch {
+    /* ignore */
+  }
+  if (names.includes("omp") || names.includes("zmp")) return "omp";
+  if (names.includes("pi")) return "pi";
+  return "unknown";
+}
+
+function settingsMentionsDeferredEngine(settingsPath) {
+  try {
+    const text = fs.readFileSync(settingsPath, "utf8");
+    return text.includes("pi-deferred-context-engine");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve deferred-tools.json for the host that loaded this package.
+ *
+ * Order (bog-standard, dual-install safe):
+ * 1. PI_DEFERRED_TOOLS_CONFIG / OMP_DEFERRED_TOOLS_CONFIG
+ * 2. PI_CONFIG_DIR / OMP_CONFIG_DIR (host-declared agent root)
+ * 3. Install location of this package (~/.pi/... vs ~/.omp/...)
+ * 4. Binary basename (pi | omp | zmp)
+ * 5. Which host settings.json lists this package
+ * 6. Whichever standard file exists (if only one)
+ * 7. Default to ~/.pi/agent/deferred-tools.json (Pi package heritage)
+ */
 export function userConfigPath() {
   const fromEnv =
     process.env.PI_DEFERRED_TOOLS_CONFIG ||
     process.env.OMP_DEFERRED_TOOLS_CONFIG;
   if (fromEnv) return fromEnv;
+
+  for (const key of ["PI_CONFIG_DIR", "OMP_CONFIG_DIR"]) {
+    const root = process.env[key];
+    if (!root || typeof root !== "string") continue;
+    const underAgent = path.join(root, "agent", "deferred-tools.json");
+    if (fs.existsSync(underAgent)) return underAgent;
+    const direct = path.join(root, "deferred-tools.json");
+    if (fs.existsSync(direct)) return direct;
+  }
+
+  const { pi: piPath, omp: ompPath } = standardConfigPaths();
+  const fromInstall = inferKindFromInstallPath(__dirname);
+  const kind = fromInstall !== "unknown" ? fromInstall : detectAgentConfigKind();
+
+  if (kind === "pi") return piPath;
+  if (kind === "omp") return ompPath;
+
   const home = os.homedir();
-  // Prefer ~/.omp/agent when present (OMP installs); else classic Pi path.
-  const ompPath = path.join(home, ".omp", "agent", "deferred-tools.json");
-  if (fs.existsSync(ompPath)) return ompPath;
-  return path.join(home, ".pi", "agent", "deferred-tools.json");
+  const piSettings = path.join(home, ".pi", "agent", "settings.json");
+  const ompSettings = path.join(home, ".omp", "agent", "settings.json");
+  // OMP may keep settings elsewhere; also check plugins package.json mention via settings.
+  const piListsUs = settingsMentionsDeferredEngine(piSettings);
+  const ompListsUs = settingsMentionsDeferredEngine(ompSettings);
+  if (piListsUs && !ompListsUs) return piPath;
+  if (ompListsUs && !piListsUs) return ompPath;
+
+  const piExists = fs.existsSync(piPath);
+  const ompExists = fs.existsSync(ompPath);
+  if (piExists && !ompExists) return piPath;
+  if (ompExists && !piExists) return ompPath;
+
+  // Both or neither: Pi default (this is a pi-package; OMP users set OMP_CONFIG_DIR or install under .omp).
+  return piPath;
 }
 
 function userOrDefault(defaults, user, key) {
@@ -399,6 +494,7 @@ export function loadConfig(configPath = userConfigPath(), { strict = false } = {
 export function shouldDefer(name, config) {
   if (!config.enabled) return false;
   if (typeof name !== "string" || name.length === 0) return false; // guard: hosts may return nameless tools
+  if (SPINE_NAMES.has(name)) return false; // code spine — never deferred (not a user pin)
   if ((config.neverDefer || []).includes(name)) return false;
   if ((config.deferredNames || []).includes(name)) return true;
   if ((config.deferredPrefixes || []).some((prefix) => name.startsWith(prefix))) return true;

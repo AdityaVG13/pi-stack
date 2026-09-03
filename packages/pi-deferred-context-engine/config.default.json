@@ -9,26 +9,8 @@
   "replaceAlwaysActive": false,
   "replaceNeverDefer": false,
   "replaceBlockedTools": false,
-  "alwaysActive": [
-    "read",
-    "bash",
-    "edit",
-    "write",
-    "grep",
-    "find",
-    "ls",
-    "papercuts"
-  ],
-  "neverDefer": [
-    "read",
-    "bash",
-    "edit",
-    "write",
-    "grep",
-    "find",
-    "ls",
-    "papercuts"
-  ],
+  "alwaysActive": [],
+  "neverDefer": [],
   "deferredNames": [],
   "deferredPrefixes": [
     "mcp_"

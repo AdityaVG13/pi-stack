@@ -40,13 +40,14 @@ test("falls back safely on malformed startup config and reports strict reloads",
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("ships portable defaults and supports complete spine replacement", () => {
+test("ships portable defaults (empty pins) and supports complete spine replacement", () => {
   const defaults = loadConfig(path.join(os.tmpdir(), `pi-deferred-missing-${process.pid}-${Date.now()}.json`));
-  for (const name of ["read", "bash", "edit", "write"]) {
-    assert.ok(defaults.alwaysActive.includes(name));
-    assert.equal(shouldDefer(name, defaults), false);
-  }
-  assert.ok(!defaults.alwaysActive.includes("br_claim"));
+  // Package defaults must not bake dogfood tools — only empty pin lists + code spine.
+  assert.deepEqual(defaults.alwaysActive, []);
+  assert.deepEqual(defaults.neverDefer, []);
+  assert.deepEqual(defaults.blockedTools, []);
+  assert.equal(shouldDefer("read", defaults), true);
+  assert.equal(shouldDefer("search_tools", defaults), false);
 
   const replaced = mergeConfig(defaults, {
     replaceAlwaysActive: true,
@@ -105,10 +106,12 @@ test("emptyPinReplaceWarnings soft-warns empty replace lists", () => {
 
 test("DCE-O6: deferredNames ∩ pin/guard stripped at merge (protected wins)", () => {
   const base = packageDefaults();
+  // Defaults no longer pin read/bash — supply pins in the overlay to exercise the strip.
   const merged = mergeConfig(base, {
+    alwaysActive: ["read", "bash"],
+    neverDefer: ["read", "bash"],
     deferredNames: ["read", "weather_lookup", "bash"],
   });
-  // read+bash are in package alwaysActive/neverDefer defaults
   assert.ok(!merged.deferredNames.includes("read"));
   assert.ok(!merged.deferredNames.includes("bash"));
   assert.ok(merged.deferredNames.includes("weather_lookup"));

@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Package defaults no longer pin stock tools (`read`/`bash`/…/`papercuts`). Shipped `alwaysActive` / `neverDefer` / `blockedTools` are empty; only the code spine `search_tools` is forced. Example config is generic (`search_tools` + `my_tool`) — no dogfood tool names.
+
+### Fixed
+
+- Dual-install config path is host-agnostic: resolve `deferred-tools.json` from install location (`~/.pi/...` vs `~/.omp/...`), then binary basename / settings membership, instead of always preferring OMP whenever that file exists. Fresh Pi or OMP installs just work; dual-install no longer steals the other host’s pins.
+
 ## 0.4.0
 
 ### Added

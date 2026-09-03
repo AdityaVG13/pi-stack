@@ -1,6 +1,6 @@
 {
   "name": "pi-deferred-context-engine",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Run-scoped deferred tools, skills, blocked deny-list, and duplicate prompt context for Pi/OMP.",
   "type": "module",
   "author": "AdityaVG13",
