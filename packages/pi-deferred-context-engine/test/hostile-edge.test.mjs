@@ -188,3 +188,27 @@ test("document: readSkill follows symlinks (skill paths are trusted)", () => {
     fs.rmSync(outside, { force: true });
   }
 });
+
+test("document: blocked tools are NOT recoverable via promote (harder than empty-pin soft-lock)", () => {
+  const defaults = loadConfig(path.join(os.tmpdir(), `pi-deferred-missing-${Date.now()}.json`));
+  const cfg = mergeConfig(defaults, {
+    replaceAlwaysActive: true,
+    alwaysActive: ["read"],
+    neverDefer: ["read"],
+    blockedTools: ["weather"],
+    blockedPrefixes: [],
+  });
+  const pi = mockPi(["read", "search_tools", "weather"]);
+  const controller = createDeferredController(pi, cfg);
+  controller.synchronize({ resetPromotions: true });
+  assert.ok(!pi.getActiveTools().includes("weather"));
+  // Contrast empty-pin soft-lock: promote cannot resurrect a blocked tool.
+  const promotion = controller.promote(["weather"]);
+  assert.deepEqual(promotion.blocked, ["weather"]);
+  assert.deepEqual(promotion.added, []);
+  assert.ok(!pi.getActiveTools().includes("weather"));
+  // Human break-glass can.
+  const session = controller.sessionUnblock(["weather"], { activate: true });
+  assert.ok(session.unblocked.includes("weather"));
+  assert.ok(pi.getActiveTools().includes("weather"));
+});

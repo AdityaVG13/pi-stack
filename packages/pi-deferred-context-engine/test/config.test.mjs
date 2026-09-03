@@ -3,7 +3,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { addAlwaysActive, emptyPinReplaceWarnings, loadConfig, mergeConfig, packageDefaults, shouldDefer, stripDeferredProtectedConflicts } from "../config.js";
+import {
+  addAlwaysActive,
+  blockedToolsCautionWarnings,
+  emptyPinReplaceWarnings,
+  hasBlockedConfig,
+  isBlocked,
+  loadConfig,
+  mergeConfig,
+  packageDefaults,
+  removeBlockedTools,
+  shouldDefer,
+  stripBlockedConflicts,
+  stripDeferredProtectedConflicts,
+} from "../config.js";
 
 test("merges user lists without losing protected defaults", () => {
   // DCE-D9: mergeConfig requires package defaults for numeric/bool keys (JSON sole source)
@@ -185,4 +198,67 @@ test("addAlwaysActive creates a missing config file", () => {
   const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
   assert.deepEqual(raw.alwaysActive, ["zero"]);
   assert.equal(raw.neverDefer, undefined);
+});
+
+test("blockedTools: spine stripped; block wins over pin/defer", () => {
+  const base = packageDefaults();
+  const merged = mergeConfig(base, {
+    blockedTools: ["search_tools", "grep", "weather"],
+    alwaysActive: ["grep", "asgrep"],
+    deferredNames: ["weather", "free_tool"],
+  });
+  assert.ok(!merged.blockedTools.includes("search_tools"));
+  assert.ok(merged.blockedTools.includes("grep"));
+  assert.ok(merged.blockedTools.includes("weather"));
+  assert.ok(!merged.alwaysActive.includes("grep"));
+  assert.ok(merged.alwaysActive.includes("asgrep"));
+  assert.ok(!merged.deferredNames.includes("weather"));
+  assert.ok(merged.deferredNames.includes("free_tool"));
+
+  const unit = stripBlockedConflicts(
+    ["search_tools", "grep"],
+    ["grep", "read"],
+    ["grep"],
+    ["grep", "other"],
+  );
+  assert.deepEqual(unit.blockedTools, ["grep"]);
+  assert.deepEqual(unit.alwaysActive, ["read"]);
+  assert.deepEqual(unit.neverDefer, []);
+  assert.deepEqual(unit.deferredNames, ["other"]);
+  assert.ok(unit.warnings.some((w) => /spine/.test(w)));
+});
+
+test("isBlocked: names, prefixes, spine immune, sessionUnblocked, enabled gate", () => {
+  const cfg = {
+    enabled: true,
+    blockedTools: ["grep"],
+    blockedPrefixes: ["mcp_bad_"],
+  };
+  assert.equal(isBlocked("grep", cfg), true);
+  assert.equal(isBlocked("mcp_bad_x", cfg), true);
+  assert.equal(isBlocked("search_tools", { ...cfg, blockedTools: ["search_tools", "grep"] }), false);
+  assert.equal(isBlocked("grep", cfg, { sessionUnblocked: ["grep"] }), false);
+  assert.equal(isBlocked("grep", { ...cfg, enabled: false }), false);
+  assert.equal(hasBlockedConfig(cfg), true);
+  assert.equal(hasBlockedConfig({ blockedTools: [], blockedPrefixes: [] }), false);
+  const caution = blockedToolsCautionWarnings(cfg);
+  assert.equal(caution.length, 1);
+  assert.match(caution[0], /CAUTION/);
+  assert.match(caution[0], /\/deferred blocked/);
+});
+
+test("removeBlockedTools persists removals atomically", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deferred-block-"));
+  const configPath = path.join(directory, "deferred-tools.json");
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({ blockedTools: ["grep", "glob", "ast_grep"] }, null, 2),
+    "utf8",
+  );
+  const result = removeBlockedTools(["grep", "missing"], configPath);
+  assert.deepEqual(result.removed, ["grep"]);
+  assert.deepEqual(result.missing, ["missing"]);
+  const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  assert.deepEqual(raw.blockedTools, ["glob", "ast_grep"]);
+  fs.rmSync(directory, { recursive: true, force: true });
 });

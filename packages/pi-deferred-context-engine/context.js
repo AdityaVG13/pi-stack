@@ -10,8 +10,13 @@ const SKILL_PREFIX = [
   "<available_skills>",
 ];
 
+/** Prompt-visible skills only (Agent Skills hide / disable-model-invocation). */
+function isPromptHiddenSkill(skill) {
+  return skill?.disableModelInvocation === true || skill?.hide === true;
+}
+
 function visibleSkills(skills = []) {
-  return skills.filter((skill) => !skill.disableModelInvocation);
+  return skills.filter((skill) => !isPromptHiddenSkill(skill));
 }
 
 function escapeXml(value) {
@@ -111,17 +116,18 @@ function optimizeSystemPromptImpl(systemPrompt, options = {}, config = {}) {
 
   let deferredSkillChars = 0;
   let deferredSkillCount = 0;
-  const skills = visibleSkills(options.skills || []);
-  if (config.deferSkills !== false && skills.length > 0) {
+  const allSkills = options.skills || [];
+  const promptSkills = visibleSkills(allSkills);
+  if (config.deferSkills !== false && promptSkills.length > 0) {
     // Skills named in activeSkills stay in the prompt; the rest are deferred
     // to search_tools. The pinned subset is re-inserted (verbose form) at the
     // exact position the full index occupied.
     const pinnedNames = new Set(config.activeSkills || []);
-    const pinned = skills.filter((skill) => pinnedNames.has(skill.name));
-    deferredSkillCount = skills.length - pinned.length;
+    const pinned = promptSkills.filter((skill) => pinnedNames.has(skill.name));
+    deferredSkillCount = promptSkills.length - pinned.length;
     const pinnedIndex = pinned.length > 0 ? formatSkillIndex(pinned) : "";
     // Verbose first (Pi stock), then compressed form if present.
-    for (const candidate of [formatSkillIndex(skills), formatCompressedSkillIndex(skills)]) {
+    for (const candidate of [formatSkillIndex(promptSkills), formatCompressedSkillIndex(promptSkills)]) {
       if (!candidate) continue;
       const index = prompt.indexOf(candidate);
       if (index < 0) continue;
@@ -131,16 +137,23 @@ function optimizeSystemPromptImpl(systemPrompt, options = {}, config = {}) {
     }
   }
 
+  // When deferSkills is on, search_tools must still find hide /
+  // disable-model-invocation skills. Prompt strip only touches visible
+  // skills; the searchable catalog is the full set.
+  const searchableSkills = config.deferSkills === false ? promptSkills : allSkills;
+
   return {
     systemPrompt: prompt,
-    skills,
+    skills: searchableSkills,
     stats: {
       beforeChars,
       afterChars: prompt.length,
       removedChars: beforeChars - prompt.length,
       duplicateFiles,
       duplicateContextChars,
-      deferredSkills: config.deferSkills === false ? 0 : deferredSkillCount,
+      deferredSkills: config.deferSkills === false
+        ? 0
+        : Math.max(deferredSkillCount, allSkills.filter(isPromptHiddenSkill).length),
       deferredSkillChars,
     },
   };

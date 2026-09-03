@@ -6,6 +6,13 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMOTION_LIFETIMES = new Set(["run", "session"]);
 
+/**
+ * Hard spine tool name(s). Never blockable; always pin+demote-guard in the engine.
+ * Keep in sync with engine SPINE_NAMES (engine re-exports this set).
+ */
+export const SPINE_TOOL_NAMES = Object.freeze(["search_tools"]);
+export const SPINE_NAMES = new Set(SPINE_TOOL_NAMES);
+
 /** Closed set of keys admitted into runtime Config (trust-edge strip/refuse). */
 export const KNOWN_CONFIG_KEYS = Object.freeze([
   "enabled",
@@ -18,10 +25,13 @@ export const KNOWN_CONFIG_KEYS = Object.freeze([
   "compactSchemas",
   "replaceAlwaysActive",
   "replaceNeverDefer",
+  "replaceBlockedTools",
   "alwaysActive",
   "neverDefer",
   "deferredNames",
   "deferredPrefixes",
+  "blockedTools",
+  "blockedPrefixes",
   "activeSkills",
   "toolPriority",
 ]);
@@ -41,7 +51,15 @@ function defaultConfigPath() {
 }
 
 export function userConfigPath() {
-  return process.env.PI_DEFERRED_TOOLS_CONFIG || path.join(os.homedir(), ".pi", "agent", "deferred-tools.json");
+  const fromEnv =
+    process.env.PI_DEFERRED_TOOLS_CONFIG ||
+    process.env.OMP_DEFERRED_TOOLS_CONFIG;
+  if (fromEnv) return fromEnv;
+  const home = os.homedir();
+  // Prefer ~/.omp/agent when present (OMP installs); else classic Pi path.
+  const ompPath = path.join(home, ".omp", "agent", "deferred-tools.json");
+  if (fs.existsSync(ompPath)) return ompPath;
+  return path.join(home, ".pi", "agent", "deferred-tools.json");
 }
 
 function userOrDefault(defaults, user, key) {
@@ -154,7 +172,15 @@ export function parseUserConfig(raw, { strict = false } = {}) {
 
   const value = {};
 
-  for (const key of ["enabled", "deferByDefault", "deferSkills", "deduplicateContext", "replaceAlwaysActive", "replaceNeverDefer"]) {
+  for (const key of [
+    "enabled",
+    "deferByDefault",
+    "deferSkills",
+    "deduplicateContext",
+    "replaceAlwaysActive",
+    "replaceNeverDefer",
+    "replaceBlockedTools",
+  ]) {
     const field = parseBooleanField(raw[key], key, strict);
     if (!field.ok) return field;
     if (field.present) value[key] = field.value;
@@ -176,7 +202,16 @@ export function parseUserConfig(raw, { strict = false } = {}) {
     if (field.present) value[key] = field.value;
   }
 
-  for (const key of ["alwaysActive", "neverDefer", "deferredNames", "deferredPrefixes", "activeSkills", "toolPriority"]) {
+  for (const key of [
+    "alwaysActive",
+    "neverDefer",
+    "deferredNames",
+    "deferredPrefixes",
+    "blockedTools",
+    "blockedPrefixes",
+    "activeSkills",
+    "toolPriority",
+  ]) {
     const field = parseStringListField(raw[key], key, strict);
     if (!field.ok) return field;
     if (field.present) value[key] = field.value;
@@ -225,6 +260,52 @@ export function stripDeferredProtectedConflicts(alwaysActive, neverDefer, deferr
 }
 
 /**
+ * Block axis conflicts: spine cannot be blocked; block wins over pin/guard/defer name lists.
+ * Prefix overlaps are evaluated at runtime via isBlocked (not expanded here).
+ * @returns {{
+ *   blockedTools: string[],
+ *   alwaysActive: string[],
+ *   neverDefer: string[],
+ *   deferredNames: string[],
+ *   warnings: string[],
+ * }}
+ */
+export function stripBlockedConflicts(blockedTools, alwaysActive, neverDefer, deferredNames) {
+  const warnings = [];
+  const blockedKept = [];
+  for (const name of blockedTools || []) {
+    if (SPINE_NAMES.has(name)) {
+      warnings.push("blockedTools contains spine tool '" + name + "' — cannot be blocked; stripped from blockedTools");
+    } else {
+      blockedKept.push(name);
+    }
+  }
+  const blockedSet = new Set(blockedKept);
+
+  function stripFrom(list, label) {
+    const kept = [];
+    for (const name of list || []) {
+      if (blockedSet.has(name)) {
+        warnings.push(
+          "blockedTools wins over " + label + " for '" + name + "' — stripped from " + label,
+        );
+      } else {
+        kept.push(name);
+      }
+    }
+    return kept;
+  }
+
+  return {
+    blockedTools: blockedKept,
+    alwaysActive: stripFrom(alwaysActive, "alwaysActive"),
+    neverDefer: stripFrom(neverDefer, "neverDefer"),
+    deferredNames: stripFrom(deferredNames, "deferredNames"),
+    warnings,
+  };
+}
+
+/**
  * Merge defaults + closed user partial into a closed runtime Config.
  * Does not re-spread open `...user` (unknown keys cannot re-enter).
  * Package numeric/bool defaults come from config.default.json (via loadDefaults);
@@ -233,19 +314,25 @@ export function stripDeferredProtectedConflicts(alwaysActive, neverDefer, deferr
  * List semantics (kept distinct — not duals):
  * - alwaysActive: pin into active set on synchronize (replaceAlwaysActive controls merge)
  * - neverDefer: demote-guard + never auto-defer (replaceNeverDefer controls merge)
- * Defaults may list the same stock tools in both; that is composition of both roles, not dual representation.
+ * - blockedTools: hard deny — inactive, not searchable, promote refused (replaceBlockedTools)
+ * Defaults may list the same stock tools in both pin lists; that is composition of both roles, not dual representation.
  *
  * DCE-O6: deferredNames ∩ (alwaysActive ∪ neverDefer) is stripped from deferredNames
- * (protected role wins). Inspect strips via stripDeferredProtectedConflicts().warnings.
+ * (protected role wins). Block then wins over pin/guard/defer name lists.
  */
 export function mergeConfig(defaults, user = {}) {
   const replaceAlwaysActive = user.replaceAlwaysActive === true;
   const replaceNeverDefer = user.replaceNeverDefer === true;
+  const replaceBlockedTools = user.replaceBlockedTools === true;
 
-  const alwaysActive = mergeStringSetting(defaults, user, "alwaysActive", replaceAlwaysActive);
-  const neverDefer = mergeStringSetting(defaults, user, "neverDefer", replaceNeverDefer);
-  const deferredMerged = mergeStringSetting(defaults, user, "deferredNames");
-  const conflict = stripDeferredProtectedConflicts(alwaysActive, neverDefer, deferredMerged);
+  let alwaysActive = mergeStringSetting(defaults, user, "alwaysActive", replaceAlwaysActive);
+  let neverDefer = mergeStringSetting(defaults, user, "neverDefer", replaceNeverDefer);
+  let deferredMerged = mergeStringSetting(defaults, user, "deferredNames");
+  const deferConflict = stripDeferredProtectedConflicts(alwaysActive, neverDefer, deferredMerged);
+  deferredMerged = deferConflict.deferredNames;
+
+  const blockedMerged = mergeStringSetting(defaults, user, "blockedTools", replaceBlockedTools);
+  const blockConflict = stripBlockedConflicts(blockedMerged, alwaysActive, neverDefer, deferredMerged);
 
   return {
     enabled: userOrDefault(defaults, user, "enabled"),
@@ -255,13 +342,16 @@ export function mergeConfig(defaults, user = {}) {
     deduplicateContext: userOrDefault(defaults, user, "deduplicateContext"),
     replaceAlwaysActive,
     replaceNeverDefer,
+    replaceBlockedTools,
     promotionLifetime: promotionLifetime(defaults, user),
     maxSearchResults: positiveInteger(user.maxSearchResults, requiredDefaultPositiveInt(defaults, "maxSearchResults")),
     maxSkillBytes: positiveInteger(user.maxSkillBytes, requiredDefaultPositiveInt(defaults, "maxSkillBytes")),
-    alwaysActive,
-    neverDefer,
-    deferredNames: conflict.deferredNames,
+    alwaysActive: blockConflict.alwaysActive,
+    neverDefer: blockConflict.neverDefer,
+    deferredNames: blockConflict.deferredNames,
     deferredPrefixes: mergeStringSetting(defaults, user, "deferredPrefixes"),
+    blockedTools: blockConflict.blockedTools,
+    blockedPrefixes: mergeStringSetting(defaults, user, "blockedPrefixes"),
     activeSkills: mergeStringSetting(defaults, user, "activeSkills"),
     compactSchemas: { ...(defaults.compactSchemas || {}), ...(user.compactSchemas || {}) },
     // Ordered soft routing signal: user list replaces defaults wholesale when
@@ -304,6 +394,7 @@ export function loadConfig(configPath = userConfigPath(), { strict = false } = {
 /**
  * Auto-defer policy only. neverDefer blocks auto-deferral.
  * alwaysActive is NOT consulted here — pin force is synchronize's job (distinct DCE-D1 semantics).
+ * Blocked tools are handled separately via isBlocked (not deferred).
  */
 export function shouldDefer(name, config) {
   if (!config.enabled) return false;
@@ -312,6 +403,37 @@ export function shouldDefer(name, config) {
   if ((config.deferredNames || []).includes(name)) return true;
   if ((config.deferredPrefixes || []).some((prefix) => name.startsWith(prefix))) return true;
   return Boolean(config.deferByDefault);
+}
+
+/**
+ * Hard-deny policy. Stronger than defer: not searchable, promote refused.
+ * Spine is never blocked (defense in depth even if listed in config).
+ * Session exceptions (human /deferred unblock) are passed via sessionUnblocked.
+ * When DCE is disabled, block is inactive (same restore semantics as defer-off).
+ *
+ * @param {string} name
+ * @param {object} config
+ * @param {{ sessionUnblocked?: Set<string>|string[] }} [opts]
+ */
+export function isBlocked(name, config, opts = {}) {
+  if (!config || !config.enabled) return false;
+  if (typeof name !== "string" || name.length === 0) return false;
+  if (SPINE_NAMES.has(name)) return false;
+  const sessionUnblocked = opts.sessionUnblocked;
+  if (sessionUnblocked) {
+    const set = sessionUnblocked instanceof Set ? sessionUnblocked : new Set(sessionUnblocked);
+    if (set.has(name)) return false;
+  }
+  if ((config.blockedTools || []).includes(name)) return true;
+  if ((config.blockedPrefixes || []).some((prefix) => typeof prefix === "string" && prefix.length > 0 && name.startsWith(prefix))) {
+    return true;
+  }
+  return false;
+}
+
+/** True when any block list/prefix is configured (triggers CAUTION UX). */
+export function hasBlockedConfig(config) {
+  return (config.blockedTools || []).length > 0 || (config.blockedPrefixes || []).length > 0;
 }
 
 /**
@@ -332,6 +454,55 @@ export function emptyPinReplaceWarnings(config) {
     );
   }
   return warnings;
+}
+
+/**
+ * CAUTION copy when block lists are non-empty. Promote/search cannot recover blocked tools.
+ * @returns {string[]}
+ */
+export function blockedToolsCautionWarnings(config) {
+  if (!hasBlockedConfig(config)) return [];
+  const names = (config.blockedTools || []).slice().sort();
+  const prefixes = (config.blockedPrefixes || []).slice().sort();
+  const parts = [];
+  if (names.length > 0) parts.push("tools=[" + names.join(", ") + "]");
+  if (prefixes.length > 0) parts.push("prefixes=[" + prefixes.join(", ") + "]");
+  return [
+    "CAUTION: blocked " +
+      parts.join(" ") +
+      " — not searchable, promote refused. Escape: /deferred unblock <name> (session) or /deferred unblock <name> --persist. List copy-paste names: /deferred blocked",
+  ];
+}
+
+/**
+ * Remove names from user config blockedTools (persist break-glass). Creates file if missing.
+ * Does not edit blockedPrefixes (prefixes stay operator-owned; unblock exact names via session).
+ * @param {string[]} names
+ * @param {string} [configPath]
+ * @returns {{ removed: string[], missing: string[] }}
+ */
+export function removeBlockedTools(names, configPath = userConfigPath()) {
+  const clean = [...new Set(names)].filter((name) => typeof name === "string" && name.length > 0);
+  if (clean.length === 0) return { removed: [], missing: [] };
+  let raw = {};
+  if (fs.existsSync(configPath)) {
+    raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new Error("user config at " + configPath + " is not an object");
+    }
+  }
+  const existing = Array.isArray(raw.blockedTools) ? raw.blockedTools : [];
+  const existingSet = new Set(existing);
+  const removed = clean.filter((name) => existingSet.has(name));
+  const missing = clean.filter((name) => !existingSet.has(name));
+  if (removed.length === 0) return { removed: [], missing };
+  const removeSet = new Set(removed);
+  raw.blockedTools = existing.filter((name) => !removeSet.has(name));
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  const temp = configPath + "." + process.pid + ".tmp";
+  fs.writeFileSync(temp, JSON.stringify(raw, null, 2) + "\n", "utf8");
+  fs.renameSync(temp, configPath);
+  return { removed, missing };
 }
 
 /**

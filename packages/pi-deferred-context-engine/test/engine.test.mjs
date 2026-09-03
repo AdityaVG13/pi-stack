@@ -55,6 +55,33 @@ test("defers long-tail tools while preserving the search spine and configured co
   }
 });
 
+test("awaits Promise-returning setActiveTools (OMP host)", async () => {
+  const tools = [
+    { name: "search_tools", description: "Search" },
+    { name: "read", description: "Read" },
+    { name: "weather_lookup", description: "Weather" },
+  ];
+  let active = tools.map((t) => t.name);
+  const pi = {
+    getAllTools: () => tools,
+    getActiveTools: () => [...active],
+    setActiveTools: async (names) => {
+      await new Promise((r) => setTimeout(r, 1));
+      active = [...names];
+    },
+  };
+  const controller = createDeferredController(pi, {
+    ...config,
+    alwaysActive: ["read"],
+    neverDefer: ["read"],
+  });
+  await Promise.resolve(controller.synchronize({ resetPromotions: true }));
+  assert.ok(!active.includes("weather_lookup"));
+  const promotion = await Promise.resolve(controller.promote(["weather_lookup"]));
+  assert.deepEqual(promotion.added, ["weather_lookup"]);
+  assert.ok(active.includes("weather_lookup"));
+});
+
 test("native tools remain discoverable as crash-path fallbacks when deferred", () => {
   const pi = mockPi([{ name: "optional_tool", description: "Optional" }]);
   // Force-defer read via config for this test only
@@ -329,4 +356,64 @@ test("missing alwaysActive pins are reported by synchronize and status", () => {
   pi.register({ name: "preferred_reader", description: "Preferred file reader" });
   const healed = controller.synchronize();
   assert.ok(!(healed.missingPins || []).includes("preferred_reader"));
+});
+
+test("blocked tools stay inactive, refuse promote, catalog state blocked", () => {
+  const pi = mockPi([{ name: "grep", description: "Stock grep" }, { name: "asgrep", description: "AST grep" }]);
+  const controller = createDeferredController(pi, {
+    ...config,
+    alwaysActive: ["read", "bash", "asgrep", "grep"],
+    neverDefer: ["read", "bash", "asgrep"],
+    blockedTools: ["grep"],
+    blockedPrefixes: [],
+  });
+  controller.synchronize({ resetPromotions: true });
+  assert.ok(!pi.getActiveTools().includes("grep"));
+  assert.ok(pi.getActiveTools().includes("asgrep"));
+  assert.ok(pi.getActiveTools().includes("search_tools"));
+  const blockedRows = controller.catalog({ state: "blocked" }).map((r) => r.name);
+  assert.ok(blockedRows.includes("grep"));
+  const promotion = controller.promote(["grep", "weather_lookup"]);
+  assert.deepEqual(promotion.blocked, ["grep"]);
+  assert.ok(!pi.getActiveTools().includes("grep"));
+});
+
+test("sessionUnblock restores promotability until setConfig clears", () => {
+  const pi = mockPi([{ name: "grep", description: "Stock grep" }]);
+  const controller = createDeferredController(pi, {
+    ...config,
+    alwaysActive: ["read"],
+    neverDefer: ["read"],
+    blockedTools: ["grep"],
+    blockedPrefixes: [],
+  });
+  controller.synchronize({ resetPromotions: true });
+  assert.deepEqual(controller.promote(["grep"]).blocked, ["grep"]);
+  const session = controller.sessionUnblock(["grep"], { activate: true });
+  assert.ok(session.unblocked.includes("grep"));
+  assert.ok(pi.getActiveTools().includes("grep"));
+  assert.equal(controller.isNameBlocked("grep"), false);
+  controller.setConfig({
+    ...config,
+    alwaysActive: ["read"],
+    neverDefer: ["read"],
+    blockedTools: ["grep"],
+    blockedPrefixes: [],
+  }, { clearSessionUnblocks: true });
+  assert.equal(controller.isNameBlocked("grep"), true);
+  assert.ok(!pi.getActiveTools().includes("grep"));
+});
+
+test("blockedPrefixes deny without listing every name", () => {
+  const pi = mockPi([{ name: "mcp_bad_delete", description: "Danger" }]);
+  const controller = createDeferredController(pi, {
+    ...config,
+    alwaysActive: ["read"],
+    neverDefer: ["read"],
+    blockedTools: [],
+    blockedPrefixes: ["mcp_bad_"],
+  });
+  controller.synchronize({ resetPromotions: true });
+  assert.ok(controller.configuredBlockedNames().includes("mcp_bad_delete"));
+  assert.deepEqual(controller.promote(["mcp_bad_delete"]).blocked, ["mcp_bad_delete"]);
 });

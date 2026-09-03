@@ -44,14 +44,15 @@ Hard spine is always `search_tools`. Defaults also pin stock tools (`read`, `bas
 ## Commands
 
 ```text
-/deferred status | audit | apply | reload | config
+/deferred status | audit | apply | reload | config | blocked | unblock <tool>… [--persist]
 ```
 
 ## Config sketch
 
 `alwaysActive` **pins** (force active on sync).  
 `neverDefer` **guards demote** (never auto-deferred; demote refused).  
-Same name can be in one, both, or neither.
+`blockedTools` / `blockedPrefixes` **hard-deny** (inactive, not searchable, promote refused).  
+Same name can be in pin and guard; **blocked wins** over pin/guard/defer (conflicts strip with warnings).
 
 ```json
 {
@@ -64,7 +65,7 @@ Same name can be in one, both, or neither.
 
 | Setting | Default | Notes |
 |---------|---------|--------|
-| `enabled` | `true` | `false` turns deferral off and restores full tool set |
+| `enabled` | `true` | `false` turns deferral **and** blocking off and restores full tool set |
 | `deferByDefault` | `true` | Defer unpinned tools |
 | `deferSkills` | `true` | Skill index via search |
 | `deduplicateContext` | `true` | Identical context blocks once |
@@ -72,11 +73,34 @@ Same name can be in one, both, or neither.
 | `maxSearchResults` | `3` | Cap per search |
 | `maxSkillBytes` | `65536` | Skill body size limit |
 | `deferredPrefixes` | `["mcp_"]` | Prefix defer |
+| `blockedTools` | `[]` | Exact-name hard deny (opt-in; empty by default) |
+| `blockedPrefixes` | `[]` | Prefix hard deny |
+| `replaceBlockedTools` | `false` | When true, user `blockedTools` replaces defaults instead of merging |
 | `activeSkills` | `[]` | Skills kept in prompt |
 | `toolPriority` | `[]` | Ordered soft routing signal for active tools. User list replaces defaults wholesale. |
 | `compactSchemas` | `{ enabled: false }` | Tiered schema disclosure for active tools (see below) |
 
-Lists merge with defaults unless `replaceAlwaysActive` / `replaceNeverDefer` is true. After config edits: `/deferred reload`. After package order changes: Pi `/reload`.
+Lists merge with defaults unless `replaceAlwaysActive` / `replaceNeverDefer` / `replaceBlockedTools` is true. After config edits: `/deferred reload`. After package order changes: Pi `/reload`.
+
+### Blocked tools — read before using
+
+**CAUTION:** Blocked tools cannot be recovered by the agent via `search_tools` / `promote_tools`. Over-blocking can soft-brick a session (e.g. blocking every search tool). `search_tools` is **never** blockable.
+
+Use cases:
+
+- Dogfood `asgrep` by blocking stock `grep` / `glob` / `ast_grep`
+- Prefer one of two overlapping package tools without uninstalling the other
+
+Escape hatches (human-only; the agent has no unblock tool):
+
+| Command | Effect |
+|---------|--------|
+| `/deferred blocked` | Lists blocked names **one per line** for copy/paste |
+| `/deferred unblock` | Shows the same list + an example command |
+| `/deferred unblock grep glob` | Session exception + activate (cleared on `/deferred reload`) |
+| `/deferred unblock grep --persist` | Removes names from config `blockedTools`, then session-unblocks |
+
+**Caveat:** Blocking `grep` does not stop `bash` + `rg`. Treat shell as a separate escape path when designing experiments.
 
 ### Tool priority
 

@@ -122,7 +122,7 @@ test("parseSearchToolsParams closes kind/limit; empty query stays valid", () => 
   assert.equal(clamped.value.limit, 4);
 });
 
-test("parseDeferredCommand is closed status|audit|apply|reload|config", () => {
+test("parseDeferredCommand is closed status|audit|apply|reload|config|blocked|unblock", () => {
   assert.deepEqual(parseDeferredCommand(""), { ok: true, value: "status" });
   assert.deepEqual(parseDeferredCommand(undefined), { ok: true, value: "status" });
   assert.deepEqual(parseDeferredCommand(null), { ok: true, value: "status" });
@@ -130,12 +130,27 @@ test("parseDeferredCommand is closed status|audit|apply|reload|config", () => {
   assert.deepEqual(parseDeferredCommand("reload"), { ok: true, value: "reload" });
   assert.deepEqual(parseDeferredCommand("config"), { ok: true, value: "config" });
   assert.deepEqual(parseDeferredCommand("apply"), { ok: true, value: "apply" });
+  assert.deepEqual(parseDeferredCommand("blocked"), { ok: true, value: "blocked" });
+  assert.deepEqual(parseDeferredCommand("unblock"), {
+    ok: true,
+    value: "unblock",
+    names: [],
+    persist: false,
+  });
+  assert.deepEqual(parseDeferredCommand("unblock grep glob --persist"), {
+    ok: true,
+    value: "unblock",
+    names: ["grep", "glob"],
+    persist: true,
+  });
   const bad = parseDeferredCommand("nuke");
   assert.equal(bad.ok, false);
   assert.match(bad.error, /usage: \/deferred/);
   assert.equal(parseDeferredCommand("status extra").ok, false);
   assert.equal(parseDeferredCommand("apply now").ok, false);
+  assert.equal(parseDeferredCommand("blocked extra").ok, false);
   assert.equal(parseDeferredCommand("drop").ok, false);
+  assert.equal(parseDeferredCommand("unblock grep --force").ok, false);
   // Refuse non-string garbage (no String(["status"]) → "status" dual)
   assert.equal(parseDeferredCommand(42).ok, false);
   assert.equal(parseDeferredCommand({}).ok, false);

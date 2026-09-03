@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- **`blockedTools` / `blockedPrefixes`:** hard-deny axis (inactive, not searchable, promote refused). Opt-in; empty by default. `search_tools` is never blockable.
+- Human break-glass: `/deferred blocked` (copy/paste list), `/deferred unblock <tool>…` (session), `/deferred unblock <tool>… --persist` (edit config).
+- CAUTION banner on status/reload/session_start when any block list is non-empty.
+
+### Fixed / host compatibility
+
+- **Fix:** deferred-tools system blurb no longer embeds a live deferred-tool count (MCP connect/disconnect was rewriting the system prefix and breaking stable prompt cache).
+- **Fix:** `before_agent_start` no longer `String(string[])`-comma-joins system prompt blocks. Array prompts keep their blocks; deferred blurb appends as an extra block when that is the only change (OMP-compatible hosts).
+- **Fix:** `/deferred audit` guards missing `getSystemPromptOptions` / normalizes `getSystemPrompt()` arrays.
+- Hosts may expose Promise-returning `setActiveTools` (e.g. OMP) — promote/demote/synchronize await it so lean active sets actually apply.
+- `agent_end` aliases `agent_settled` for run-scoped promotion reset / keep-pin prompts on hosts that emit `agent_end`.
+- `deferSkills` searchable catalog includes `hide` / `disable-model-invocation` skills (prompt still strips them); activate via `search_tools` when the host supplies skills.
+- Config path: `PI_DEFERRED_TOOLS_CONFIG` or `OMP_DEFERRED_TOOLS_CONFIG`, else prefer `~/.omp/agent/deferred-tools.json` when present, then `~/.pi/agent/deferred-tools.json`.
+- Declare `omp.extensions` alongside `pi.extensions` for OMP plugin discovery.
+
 ## 0.3.0
 
 - Keep-promotion prompt: with `promotionLifetime: "session"`, the end of a task (agent_settled) now offers once per tool to pin session-promoted tools into the user config's `alwaysActive` (mirrored into `neverDefer` when that list is maintained). Accepted or declined tools are never re-asked in the same session; headless sessions and configs without a UI are unaffected.

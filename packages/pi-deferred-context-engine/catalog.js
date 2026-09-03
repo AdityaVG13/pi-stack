@@ -12,14 +12,21 @@ function terms(value) {
     .filter((term) => term && !STOP_TERMS.has(term));
 }
 
-export function formatCatalog(tools, deferred, active) {
+export function formatCatalog(tools, deferred, active, blocked = new Set()) {
   return tools
-    .map((tool) => ({
-      kind: "tool",
-      name: tool.name ?? "",
-      state: active.has(tool.name) ? "active" : deferred.has(tool.name) ? "deferred" : "registered",
-      description: (tool.description || "").replace(/\s+/g, " ").trim().slice(0, 120),
-    }))
+    .map((tool) => {
+      const name = tool.name ?? "";
+      let state = "registered";
+      if (active.has(name)) state = "active";
+      else if (blocked.has(name)) state = "blocked";
+      else if (deferred.has(name)) state = "deferred";
+      return {
+        kind: "tool",
+        name,
+        state,
+        description: (tool.description || "").replace(/\s+/g, " ").trim().slice(0, 120),
+      };
+    })
     .sort((left, right) => String(left.name).localeCompare(String(right.name)));
 }
 

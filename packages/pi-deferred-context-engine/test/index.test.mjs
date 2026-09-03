@@ -140,6 +140,56 @@ test("enabled false skips skill strip and deferred_tools injection", async () =>
   }
 });
 
+test("OMP before_agent_start preserves string[] prompt blocks (no comma-join)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deferred-omp-array-"));
+  const configPath = path.join(directory, "config.json");
+  fs.writeFileSync(configPath, JSON.stringify({
+    enabled: true,
+    deferByDefault: true,
+    deferSkills: true,
+    replaceAlwaysActive: true,
+    replaceNeverDefer: true,
+    alwaysActive: ["read"],
+    neverDefer: ["read"],
+  }), "utf8");
+  const previous = process.env.PI_DEFERRED_TOOLS_CONFIG;
+  process.env.PI_DEFERRED_TOOLS_CONFIG = configPath;
+  try {
+    const { default: extension } = await import(`../index.js?omp-array=${Date.now()}`);
+    const tools = [
+      { name: "read", description: "Read", parameters: {} },
+      { name: "weather_lookup", description: "Weather forecasts for cities", parameters: {} },
+    ];
+    let active = tools.map((t) => t.name);
+    const handlers = new Map();
+    const pi = {
+      getAllTools: () => tools,
+      getActiveTools: () => [...active],
+      setActiveTools: (names) => { active = [...new Set(names)]; },
+      registerTool: (tool) => { tools.push(tool); active.push(tool.name); },
+      registerCommand: () => {},
+      on: (name, handler) => handlers.set(name, handler),
+    };
+    extension(pi);
+    await handlers.get("session_start")();
+    const blocks = ["# system block A", "# system block B with AGENTS"];
+    const result = await handlers.get("before_agent_start")({
+      prompt: "weather",
+      systemPrompt: blocks,
+      // OMP often omits systemPromptOptions on the event
+    }, {});
+    assert.ok(Array.isArray(result.systemPrompt), "OMP return must be string[]");
+    assert.equal(result.systemPrompt[0], blocks[0]);
+    assert.equal(result.systemPrompt[1], blocks[1]);
+    assert.match(result.systemPrompt[2] || "", /deferred_tools/);
+    assert.doesNotMatch(result.systemPrompt.join("\n"), /block A,block B/);
+  } finally {
+    if (previous === undefined) delete process.env.PI_DEFERRED_TOOLS_CONFIG;
+    else process.env.PI_DEFERRED_TOOLS_CONFIG = previous;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("before_agent_start injects short deferred_tools guidance without full catalog", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deferred-blurb-"));
   const configPath = path.join(directory, "config.json");

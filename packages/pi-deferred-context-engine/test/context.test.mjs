@@ -52,6 +52,37 @@ test("strips the compressed skill index form", () => {
   assert.ok(optimized.stats.deferredSkillChars > 0);
 });
 
+test("deferSkills searchable catalog includes hide / disable-model-invocation skills", () => {
+  const skills = [
+    {
+      name: "design",
+      description: "High-taste frontend design",
+      filePath: "/skills/design/SKILL.md",
+      hide: true,
+    },
+    {
+      name: "oxlint-anti-slop",
+      description: "Wire anti-slop oxlint",
+      filePath: "/skills/oxlint-anti-slop/SKILL.md",
+      disableModelInvocation: true,
+    },
+    {
+      name: "visible-skill",
+      description: "Shown in prompt when not deferred",
+      filePath: "/skills/visible/SKILL.md",
+    },
+  ];
+  const prompt = "base" + formatSkillIndex(skills.filter((s) => !s.hide && !s.disableModelInvocation)) + "\nend";
+  const optimized = optimizeSystemPrompt(prompt, { skills }, { deferSkills: true });
+  assert.equal(optimized.skills.length, 3);
+  assert.deepEqual(
+    optimized.skills.map((s) => s.name).sort(),
+    ["design", "oxlint-anti-slop", "visible-skill"],
+  );
+  assert.ok(rankCapabilities("frontend design", [], optimized.skills, 1).some((m) => m.name === "design"));
+  assert.ok(rankCapabilities("anti-slop oxlint", [], optimized.skills, 1).some((m) => m.name === "oxlint-anti-slop"));
+});
+
 test("keeps activeSkills pinned in the prompt while deferring the rest", () => {
   const skills = [
     { name: "ask-user", description: "Ask questions", filePath: "/pkg/ask-user/SKILL.md" },

@@ -1,23 +1,25 @@
-import { shouldDefer } from "./config.js";
+import { isBlocked, shouldDefer, SPINE_NAMES as CONFIG_SPINE_NAMES } from "./config.js";
 import { pruneSchemaInPlace, restorePrunedSchema } from "./compact.js";
 import { formatCatalog } from "./catalog.js";
 
 /**
  * Hard spine: discovery loader only.
  * Keep third-party / stack tools out of the spine; users extend via
- * alwaysActive / neverDefer in ~/.pi/agent/deferred-tools.json.
+ * alwaysActive / neverDefer / blockedTools in deferred-tools.json.
  * (list_capabilities / promote_tools / demote_tools are registered tools,
  * not hard spine — pin via alwaysActive and/or demote-guard via neverDefer if desired.)
  *
  * Distinct config semantics (DCE-D1 Option A):
  * - alwaysActive: forced into the active set on every synchronize (pin)
  * - neverDefer: never auto-deferred; manual demote refuses (demote-guard)
- * Defaults may list stock tools in both; code paths must not treat the lists as identical duals.
+ * - blockedTools / blockedPrefixes: hard deny — inactive, not searchable, promote refused
+ * Defaults may list stock tools in both pin lists; code paths must not treat the lists as identical duals.
  *
  * Lifecycle (per name): promoted and manuallyDeferred are exclusive.
  * promote() clears manual demote; demote() clears promotion.
+ * Session unblock (human /deferred unblock) temporarily exempts names from isBlocked.
  */
-export const SPINE_NAMES = new Set(["search_tools"]);
+export const SPINE_NAMES = CONFIG_SPINE_NAMES;
 
 function uniqueNames(names) {
   return [...new Set(names.filter((name) => typeof name === "string" && name.length > 0))];
@@ -50,9 +52,20 @@ export function createDeferredController(pi, initialConfig) {
   const deferred = new Set();
   const manuallyDeferred = new Set();
   const promoted = new Set();
+  /** Human break-glass: names exempt from isBlocked until reload clears the set. */
+  const sessionUnblocked = new Set();
   // Tiered schema disclosure: name -> { undo, savedBytes }. A tool is either
   // compacted (entry present) or full (absent) — no third state.
   const compactedSchemas = new Map();
+
+  function nameIsBlocked(name) {
+    return isBlocked(name, config, { sessionUnblocked });
+  }
+
+  function blockedNameSet(registeredNames) {
+    const names = registeredNames ?? allNames();
+    return new Set(names.filter((name) => nameIsBlocked(name)));
+  }
 
   function applyCompaction() {
     const cc = config.compactSchemas || {};
@@ -123,6 +136,10 @@ export function createDeferredController(pi, initialConfig) {
     return config.enabled ? orderByPriority(names, config.toolPriority) : names;
   }
 
+  /**
+   * Apply active set. Hosts may expose sync or Promise-returning setActiveTools
+   * (OMP is async). Callers should `await Promise.resolve(...)` the result.
+   */
   function setActiveIfChanged(next) {
     lastSetError = null;
     const normalized = normalizeActiveNames(next);
@@ -134,7 +151,16 @@ export function createDeferredController(pi, initialConfig) {
       current.every((name, index) => name === normalized[index]);
     if (!identical) {
       try {
-        pi.setActiveTools(normalized);
+        const maybe = pi.setActiveTools(normalized);
+        if (maybe != null && typeof maybe.then === "function") {
+          return Promise.resolve(maybe).then(
+            () => activeNames(),
+            (error) => {
+              lastSetError = error instanceof Error ? error.message : String(error);
+              return activeNames();
+            },
+          );
+        }
       } catch (error) {
         lastSetError = error instanceof Error ? error.message : String(error);
       }
@@ -148,6 +174,21 @@ export function createDeferredController(pi, initialConfig) {
     return [...pinNames()].filter((name) => !names.includes(name)).sort();
   }
 
+  function finishSynchronize(active, names) {
+    applyCompaction();
+    const missingPins = missingPinNames(names);
+    const blocked = [...blockedNameSet(names)].sort();
+    return {
+      active,
+      deferred: [...deferred].sort(),
+      blocked,
+      promoted: [...promoted].sort(),
+      ...(sessionUnblocked.size > 0 ? { sessionUnblocked: [...sessionUnblocked].sort() } : {}),
+      ...(missingPins.length > 0 ? { missingPins } : {}),
+      ...(lastSetError ? { setActiveError: lastSetError } : {}),
+    };
+  }
+
   function synchronize({ resetPromotions = false } = {}) {
     if (resetPromotions) promoted.clear();
     deferred.clear();
@@ -158,18 +199,32 @@ export function createDeferredController(pi, initialConfig) {
       deferred.clear();
       manuallyDeferred.clear();
       const restored = setActiveIfChanged(names);
-      applyCompaction();
-      return {
-        active: restored,
-        deferred: [],
-        promoted: [...promoted],
-        ...(lastSetError ? { setActiveError: lastSetError } : {}),
+      const done = (active) => {
+        applyCompaction();
+        return {
+          active,
+          deferred: [],
+          blocked: [],
+          promoted: [...promoted],
+          ...(sessionUnblocked.size > 0 ? { sessionUnblocked: [...sessionUnblocked].sort() } : {}),
+          ...(lastSetError ? { setActiveError: lastSetError } : {}),
+        };
       };
+      return restored != null && typeof restored.then === "function"
+        ? restored.then(done)
+        : done(restored);
     }
 
     const pins = pinNames();
     const guards = demoteGuardNames();
+    const blocked = blockedNameSet(names);
     for (const name of names) {
+      if (blocked.has(name)) {
+        // Blocked is not deferred — clear promotion / manual-defer residue.
+        promoted.delete(name);
+        manuallyDeferred.delete(name);
+        continue;
+      }
       // Pins are re-forced active below; never auto-defer them even if only alwaysActive.
       // Guards (neverDefer) never auto-defer. Promoted stay active until lifetime ends.
       const configuredForDeferral = shouldDefer(name, config) || manuallyDeferred.has(name);
@@ -183,27 +238,22 @@ export function createDeferredController(pi, initialConfig) {
       }
     }
 
-    // Keep currently active non-deferred tools; force pins into the set.
-    const next = activeNames().filter((name) => !deferred.has(name));
+    // Keep currently active non-deferred, non-blocked tools; force pins into the set.
+    const next = activeNames().filter((name) => !deferred.has(name) && !blocked.has(name));
     for (const name of pins) {
-      if (names.includes(name)) next.push(name);
+      if (names.includes(name) && !blocked.has(name)) next.push(name);
     }
     // neverDefer alone does not force inactive tools active — that is alwaysActive's job.
 
     const active = setActiveIfChanged(next);
-    applyCompaction();
-    const missingPins = missingPinNames(names);
-    return {
-      active,
-      deferred: [...deferred].sort(),
-      promoted: [...promoted].sort(),
-      ...(missingPins.length > 0 ? { missingPins } : {}),
-      ...(lastSetError ? { setActiveError: lastSetError } : {}),
-    };
+    return active != null && typeof active.then === "function"
+      ? active.then((resolved) => finishSynchronize(resolved, names))
+      : finishSynchronize(active, names);
   }
 
-  function setConfig(nextConfig, { resetPromotions = true } = {}) {
+  function setConfig(nextConfig, { resetPromotions = true, clearSessionUnblocks = true } = {}) {
     config = nextConfig;
+    if (clearSessionUnblocks) sessionUnblocked.clear();
     return synchronize({ resetPromotions });
   }
 
@@ -215,24 +265,38 @@ export function createDeferredController(pi, initialConfig) {
     const added = [];
     const already = [];
     const unknown = [];
+    const blocked = [];
 
     for (const name of requested) {
       if (!registered.has(name)) unknown.push(name);
+      else if (nameIsBlocked(name)) blocked.push(name);
       else if (activeSet.has(name)) already.push(name);
       else added.push(name);
     }
 
+    const finish = () => {
+      for (const name of [...added, ...already]) {
+        // Exclusive lifecycle: promotion clears manual demote for this name.
+        promoted.add(name);
+        manuallyDeferred.delete(name);
+        deferred.delete(name);
+      }
+      applyCompaction();
+      return { added, already, unknown, blocked };
+    };
+
     // Keep promotion additive for Pi's deferred-loading fast path while also
     // placing every active tool according to the configured priority order.
-    if (added.length > 0) pi.setActiveTools(normalizeActiveNames([...active, ...added]));
-    for (const name of [...added, ...already]) {
-      // Exclusive lifecycle: promotion clears manual demote for this name.
-      promoted.add(name);
-      manuallyDeferred.delete(name);
-      deferred.delete(name);
+    if (added.length > 0) {
+      const maybe = pi.setActiveTools(normalizeActiveNames([...active, ...added]));
+      if (maybe != null && typeof maybe.then === "function") {
+        return Promise.resolve(maybe).then(finish, (error) => {
+          lastSetError = error instanceof Error ? error.message : String(error);
+          return finish();
+        });
+      }
     }
-    applyCompaction();
-    return { added, already, unknown };
+    return finish();
   }
 
   function demote(requestedNames) {
@@ -254,23 +318,34 @@ export function createDeferredController(pi, initialConfig) {
       else removed.push(name);
     }
 
+    const finish = () => {
+      for (const name of removed) {
+        // Exclusive lifecycle: demote clears promotion for this name.
+        promoted.delete(name);
+        manuallyDeferred.add(name);
+        deferred.add(name);
+      }
+      applyCompaction();
+      return { removed, alreadyInactive, protected: protectedTools, unknown };
+    };
+
     if (removed.length > 0) {
       const removeSet = new Set(removed);
-      pi.setActiveTools(normalizeActiveNames(active.filter((name) => !removeSet.has(name))));
+      const maybe = pi.setActiveTools(normalizeActiveNames(active.filter((name) => !removeSet.has(name))));
+      if (maybe != null && typeof maybe.then === "function") {
+        return Promise.resolve(maybe).then(finish, (error) => {
+          lastSetError = error instanceof Error ? error.message : String(error);
+          return finish();
+        });
+      }
     }
-    for (const name of removed) {
-      // Exclusive lifecycle: demote clears promotion for this name.
-      promoted.delete(name);
-      manuallyDeferred.add(name);
-      deferred.add(name);
-    }
-    applyCompaction();
-    return { removed, alreadyInactive, protected: protectedTools, unknown };
+    return finish();
   }
 
   function catalog({ filter, state } = {}) {
     const active = new Set(activeNames());
-    let rows = formatCatalog(allTools(), deferred, active);
+    const blocked = blockedNameSet();
+    let rows = formatCatalog(allTools(), deferred, active, blocked);
     if (filter) {
       const needle = filter.toLowerCase();
       rows = rows.filter(
@@ -281,16 +356,19 @@ export function createDeferredController(pi, initialConfig) {
     return rows;
   }
 
-
   function status() {
     const missingPins = missingPinNames();
+    const blocked = [...blockedNameSet()].sort();
     return {
       enabled: Boolean(config.enabled),
       compaction: compactionStats(),
       all: allNames().length,
       active: activeNames().length,
       deferred: deferred.size,
+      blocked: blocked.length,
+      blockedNames: blocked,
       promoted: promoted.size,
+      ...(sessionUnblocked.size > 0 ? { sessionUnblocked: [...sessionUnblocked].sort() } : {}),
       ...(missingPins.length > 0 ? { missingPins } : {}),
       ...(lastSetError ? { setActiveError: lastSetError } : {}),
     };
@@ -301,5 +379,78 @@ export function createDeferredController(pi, initialConfig) {
     return [...promoted].sort();
   }
 
-  return { applyCompaction, catalog, compactionStats, demote, promote, promotedNames, setConfig, status, synchronize };
+  /** Config+prefix blocked names among registered tools (ignores session unblock). */
+  function configuredBlockedNames() {
+    return allNames()
+      .filter((name) => isBlocked(name, config))
+      .sort();
+  }
+
+  /**
+   * Human break-glass: exempt names from isBlocked for this process.
+   * Optionally activate them immediately (same as a successful promote).
+   * @returns {{ unblocked: string[], already: string[], unknown: string[], notBlocked: string[] }}
+   */
+  function sessionUnblock(requestedNames, { activate = true } = {}) {
+    const requested = uniqueNames(requestedNames);
+    const registered = new Set(allNames());
+    const unblocked = [];
+    const already = [];
+    const unknown = [];
+    const notBlocked = [];
+
+    for (const name of requested) {
+      if (!registered.has(name)) {
+        unknown.push(name);
+        continue;
+      }
+      if (SPINE_NAMES.has(name)) {
+        already.push(name);
+        continue;
+      }
+      // Configured block (ignore current session exemption) — else nothing to unblock.
+      if (!isBlocked(name, config)) {
+        notBlocked.push(name);
+        continue;
+      }
+      if (sessionUnblocked.has(name)) already.push(name);
+      else {
+        sessionUnblocked.add(name);
+        unblocked.push(name);
+      }
+    }
+
+    let promotion = { added: [], already: [], unknown: [], blocked: [] };
+    if (activate) {
+      // Activate requested names that are now session-unblocked (or already were).
+      const activateNames = requested.filter(
+        (name) => registered.has(name) && sessionUnblocked.has(name),
+      );
+      if (activateNames.length > 0) {
+        promotion = promote(activateNames);
+      }
+    }
+
+    return { unblocked, already, unknown, notBlocked, promotion };
+  }
+
+  function clearSessionUnblocks() {
+    sessionUnblocked.clear();
+  }
+
+  return {
+    applyCompaction,
+    catalog,
+    clearSessionUnblocks,
+    compactionStats,
+    configuredBlockedNames,
+    demote,
+    isNameBlocked: nameIsBlocked,
+    promote,
+    promotedNames,
+    sessionUnblock,
+    setConfig,
+    status,
+    synchronize,
+  };
 }

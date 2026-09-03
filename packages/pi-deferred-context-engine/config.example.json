@@ -8,20 +8,42 @@
   "maxSkillBytes": 65536,
   "replaceAlwaysActive": true,
   "replaceNeverDefer": true,
+  "replaceBlockedTools": true,
   "alwaysActive": [
-    "my_critical_tool"
+    "search_tools",
+    "asgrep",
+    "read",
+    "edit",
+    "write",
+    "bash"
   ],
   "neverDefer": [
-    "my_critical_tool"
+    "search_tools",
+    "asgrep",
+    "read",
+    "edit",
+    "write",
+    "bash"
   ],
   "deferredNames": [],
   "deferredPrefixes": [
     "mcp_",
     "experimental_"
   ],
+  "blockedTools": [
+    "grep",
+    "glob",
+    "ast_grep"
+  ],
+  "blockedPrefixes": [],
   "activeSkills": [],
   "toolPriority": [
-    "my_critical_tool"
+    "search_tools",
+    "asgrep",
+    "read",
+    "edit",
+    "write",
+    "bash"
   ],
   "compactSchemas": {
     "enabled": true,

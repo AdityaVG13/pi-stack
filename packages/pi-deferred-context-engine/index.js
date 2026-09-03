@@ -17,8 +17,16 @@ try {
 }
 
 import { rankCapabilities } from "./catalog.js";
-import { addAlwaysActive, emptyPinReplaceWarnings, loadConfig,
-  packageDefaults, userConfigPath } from "./config.js";
+import {
+  addAlwaysActive,
+  blockedToolsCautionWarnings,
+  emptyPinReplaceWarnings,
+  hasBlockedConfig,
+  loadConfig,
+  packageDefaults,
+  removeBlockedTools,
+  userConfigPath,
+} from "./config.js";
 import { optimizeSystemPrompt, readSkill, schemaAudit } from "./context.js";
 import { createDeferredController, SPINE_NAMES } from "./engine.js";
 
@@ -28,9 +36,10 @@ const SEARCH_KINDS = new Set(SEARCH_KIND_VALUES);
 /** Absolute ceiling on search limit — Typebox maximum + parse clamp share this only (not dual 20). */
 const SEARCH_LIMIT_HARD_CAP = 20;
 /** Closed list_capabilities state filter (Typebox sole source for this tool). */
-const LIST_CAPABILITY_STATES = ["active", "deferred", "registered", "all"];
-const DEFERRED_COMMANDS = new Set(["status", "audit", "apply", "reload", "config"]);
-const DEFERRED_USAGE = "usage: /deferred status | audit | apply | reload | config";
+const LIST_CAPABILITY_STATES = ["active", "deferred", "registered", "blocked", "all"];
+const DEFERRED_COMMANDS = new Set(["status", "audit", "apply", "reload", "config", "blocked", "unblock"]);
+const DEFERRED_USAGE =
+  "usage: /deferred status | audit | apply | reload | config | blocked | unblock <tool>… [--persist]";
 
 function result(text, details) {
   return { content: [{ type: "text", text }], details };
@@ -92,7 +101,13 @@ export function parseSearchToolsParams(params, opts = {}) {
 
 /**
  * /deferred command trust edge: closed union of verbs.
- * @returns {{ ok: true, value: string } | { ok: false, error: string }}
+ * `unblock` may take tool name tokens and optional `--persist`.
+ * @returns {{
+ *   ok: true,
+ *   value: string,
+ *   names?: string[],
+ *   persist?: boolean,
+ * } | { ok: false, error: string }}
  */
 export function parseDeferredCommand(args) {
   // null/undefined/"" → status. Non-strings refused (no String(array)→"status" dual).
@@ -102,8 +117,30 @@ export function parseDeferredCommand(args) {
   if (typeof args !== "string") {
     return { ok: false, error: DEFERRED_USAGE };
   }
-  const command = args.trim().toLowerCase() || "status";
+  const trimmed = args.trim();
+  if (!trimmed) return { ok: true, value: "status" };
+  const tokens = trimmed.split(/\s+/);
+  const command = tokens[0].toLowerCase();
   if (!DEFERRED_COMMANDS.has(command)) {
+    return { ok: false, error: DEFERRED_USAGE };
+  }
+  if (command === "unblock") {
+    let persist = false;
+    const names = [];
+    for (const token of tokens.slice(1)) {
+      if (token === "--persist") {
+        persist = true;
+        continue;
+      }
+      if (token.startsWith("-")) {
+        return { ok: false, error: DEFERRED_USAGE };
+      }
+      names.push(token);
+    }
+    return { ok: true, value: "unblock", names, persist };
+  }
+  // Other verbs take no arguments (keeps the closed parser strict).
+  if (tokens.length > 1) {
     return { ok: false, error: DEFERRED_USAGE };
   }
   return { ok: true, value: command };
@@ -152,6 +189,15 @@ function partitionMatches(matches) {
 function promotionSection(promotion) {
   if (promotion.added.length > 0) return "Promoted tools: " + promotion.added.join(", ");
   if (promotion.already.length > 0) return "Matching tools already active: " + promotion.already.join(", ");
+  if (promotion.blocked && promotion.blocked.length > 0) {
+    return (
+      "Matched tools are blocked by deferred-tools.json: " +
+      promotion.blocked.join(", ") +
+      " (human: /deferred unblock " +
+      promotion.blocked.join(" ") +
+      ")"
+    );
+  }
   return "";
 }
 
@@ -179,6 +225,44 @@ function skillSection(topSkill, skillNames, maxSkillBytes) {
     text: skillNames.length > 0 ? "Related deferred skills: " + skillNames.join(", ") : "",
     loadedSkill: null,
   };
+}
+
+/** OMP passes string[]; Pi passes string. Never String(array) — that comma-joins blocks. */
+function normalizeSystemPromptText(systemPrompt) {
+  if (Array.isArray(systemPrompt)) return systemPrompt.filter((p) => typeof p === "string").join("\n");
+  return String(systemPrompt || "");
+}
+
+/**
+ * Prompt options for optimizeSystemPrompt / skill catalog.
+ * Pi: event.systemPromptOptions. OMP: often absent on the event; try ctx.getSystemPromptOptions.
+ */
+function resolveSystemPromptOptions(event, ctx) {
+  if (event?.systemPromptOptions && typeof event.systemPromptOptions === "object") {
+    return event.systemPromptOptions;
+  }
+  if (ctx && typeof ctx.getSystemPromptOptions === "function") {
+    try {
+      const options = ctx.getSystemPromptOptions();
+      if (options && typeof options === "object") return options;
+    } catch {
+      // Host without options — searchable skills stay empty until slash/Jeffrey.
+    }
+  }
+  return {};
+}
+
+// Stable bytes for Anthropic tools/system cache: do NOT embed a changing
+ // deferred-tool count (MCP connect would rewrite the system prefix).
+const DEFERRED_TOOLS_BLURB =
+  "<deferred_tools>\n" +
+  "Some registered tools are deferred (schemas hidden). " +
+  "Call search_tools with the capability you need; matching tools are promoted for this run. " +
+  "Use promote_tools / list_capabilities only when those tools are in the active set.\n" +
+  "</deferred_tools>";
+
+function deferredToolsBlurb(_count) {
+  return DEFERRED_TOOLS_BLURB;
 }
 
 export default function piDeferredContextEngine(pi) {
@@ -229,7 +313,12 @@ export default function piDeferredContextEngine(pi) {
       const active = new Set(pi.getActiveTools());
       const searchableTools = kind === "skill"
         ? []
-        : pi.getAllTools().filter((tool) => !active.has(tool.name) && !SPINE_NAMES.has(tool.name));
+        : pi.getAllTools().filter(
+          (tool) =>
+            !active.has(tool.name) &&
+            !SPINE_NAMES.has(tool.name) &&
+            !controller.isNameBlocked(tool.name),
+        );
       const searchableSkills = kind === "tool" ? [] : skills;
       const matches = rankCapabilities(query, searchableTools, searchableSkills, limit);
       if (matches.length === 0) {
@@ -237,7 +326,7 @@ export default function piDeferredContextEngine(pi) {
       }
 
       const partition = partitionMatches(matches);
-      const promotion = controller.promote(partition.toolNames);
+      const promotion = await Promise.resolve(controller.promote(partition.toolNames));
       const skill = skillSection(partition.topSkill, partition.skillNames, config.maxSkillBytes);
       const sections = [promotionSection(promotion), skill.text].filter(Boolean);
       const publicMatches = matches.map(({ item: _item, ...match }) => match);
@@ -257,7 +346,7 @@ export default function piDeferredContextEngine(pi) {
     async execute(_id, params) {
       const parsed = parseToolNames(params?.names);
       if (!parsed.ok) return result(parsed.error, { error: parsed.error });
-      const promotion = controller.promote(parsed.value);
+      const promotion = await Promise.resolve(controller.promote(parsed.value));
       return result(JSON.stringify(promotion, null, 2), promotion);
     },
   });
@@ -270,13 +359,13 @@ export default function piDeferredContextEngine(pi) {
     async execute(_id, params) {
       const parsed = parseToolNames(params?.names);
       if (!parsed.ok) return result(parsed.error, { error: parsed.error });
-      const demotion = controller.demote(parsed.value);
+      const demotion = await Promise.resolve(controller.demote(parsed.value));
       return result(JSON.stringify(demotion, null, 2), demotion);
     },
   });
 
   pi.registerCommand("deferred", {
-    description: "Deferred context: status | audit | apply | reload | config",
+    description: "Deferred context: status | audit | apply | reload | config | blocked | unblock",
     handler: async (args, ctx) => {
       const parsed = parseDeferredCommand(args);
       if (!parsed.ok) {
@@ -291,22 +380,111 @@ export default function piDeferredContextEngine(pi) {
           for (const warning of emptyPinReplaceWarnings(config)) {
             ctx.ui.notify(warning, "warning");
           }
-          const state = controller.setConfig(config, { resetPromotions: true });
-          ctx.ui.notify("deferred reloaded. active=" + state.active.length + " deferred=" + state.deferred.length, "info");
+          for (const warning of blockedToolsCautionWarnings(config)) {
+            ctx.ui.notify(warning, "warning");
+          }
+          const state = await Promise.resolve(
+            controller.setConfig(config, { resetPromotions: true, clearSessionUnblocks: true }),
+          );
+          ctx.ui.notify(
+            "deferred reloaded. active=" + state.active.length +
+              " deferred=" + state.deferred.length +
+              " blocked=" + (state.blocked?.length ?? 0),
+            "info",
+          );
           return;
         }
         if (command === "apply") {
-          const state = controller.synchronize({ resetPromotions: true });
-          ctx.ui.notify("deferred applied. active=" + state.active.length + " deferred=" + state.deferred.length, "info");
+          const state = await Promise.resolve(controller.synchronize({ resetPromotions: true }));
+          ctx.ui.notify(
+            "deferred applied. active=" + state.active.length +
+              " deferred=" + state.deferred.length +
+              " blocked=" + (state.blocked?.length ?? 0),
+            "info",
+          );
           return;
         }
         if (command === "config") {
           ctx.ui.notify("config: " + userConfigPath(), "info");
           return;
         }
+        if (command === "blocked") {
+          // One name per line for easy copy/paste into `/deferred unblock …`
+          const names = controller.configuredBlockedNames();
+          const session = controller.status().sessionUnblocked || [];
+          if (names.length === 0 && session.length === 0) {
+            ctx.ui.notify("no blocked tools (blockedTools/blockedPrefixes empty)", "info");
+            return;
+          }
+          const lines = [];
+          if (names.length > 0) {
+            lines.push("# blocked (copy names into: /deferred unblock <name>… [--persist])");
+            lines.push(...names);
+            lines.push("# example: /deferred unblock " + names.join(" "));
+          }
+          if (session.length > 0) {
+            lines.push("# session-unblocked (reload clears): " + session.join(", "));
+          }
+          ctx.ui.notify(lines.join("\n"), "info");
+          return;
+        }
+        if (command === "unblock") {
+          const names = parsed.names || [];
+          if (names.length === 0) {
+            const listed = controller.configuredBlockedNames();
+            ctx.ui.notify(
+              listed.length === 0
+                ? "usage: /deferred unblock <tool>… [--persist]\n(no blocked tools right now — /deferred blocked)"
+                : "usage: /deferred unblock <tool>… [--persist]\n# blocked names (copy/paste):\n" +
+                  listed.join("\n") +
+                  "\n# example: /deferred unblock " + listed.join(" "),
+              "warning",
+            );
+            return;
+          }
+          if (parsed.persist) {
+            const persisted = removeBlockedTools(names, userConfigPath());
+            config = loadConfig(userConfigPath(), { strict: true });
+            await Promise.resolve(
+              controller.setConfig(config, { resetPromotions: false, clearSessionUnblocks: false }),
+            );
+            // Also session-unblock so activation works even if still matched by a prefix.
+            const session = controller.sessionUnblock(names, { activate: true });
+            ctx.ui.notify(
+              "persist removed from blockedTools: " +
+                (persisted.removed.join(", ") || "(none)") +
+                (persisted.missing.length ? " | not in blockedTools: " + persisted.missing.join(", ") : "") +
+                " | session: " + JSON.stringify({
+                  unblocked: session.unblocked,
+                  already: session.already,
+                  notBlocked: session.notBlocked,
+                  unknown: session.unknown,
+                }),
+              "info",
+            );
+            return;
+          }
+          const session = controller.sessionUnblock(names, { activate: true });
+          ctx.ui.notify(
+            "session unblock " +
+              JSON.stringify({
+                unblocked: session.unblocked,
+                already: session.already,
+                notBlocked: session.notBlocked,
+                unknown: session.unknown,
+                activated: session.promotion?.added || [],
+              }) +
+              " (reload clears; --persist to edit config)",
+            "info",
+          );
+          return;
+        }
         if (command === "audit") {
-          const options = ctx.getSystemPromptOptions();
-          const optimized = optimizeSystemPrompt(ctx.getSystemPrompt(), options, config);
+          const options = typeof ctx.getSystemPromptOptions === "function"
+            ? (ctx.getSystemPromptOptions() || {})
+            : {};
+          const rawPrompt = typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : "";
+          const optimized = optimizeSystemPrompt(normalizeSystemPromptText(rawPrompt), options, config);
           const schemas = schemaAudit(pi.getAllTools(), pi.getActiveTools());
           ctx.ui.notify(
             "prompt=" + optimized.stats.beforeChars + "→" + optimized.stats.afterChars +
@@ -319,12 +497,22 @@ export default function piDeferredContextEngine(pi) {
         }
         // command === "status" (closed by parseDeferredCommand)
         const state = controller.status();
+        for (const warning of blockedToolsCautionWarnings(config)) {
+          ctx.ui.notify(warning, "warning");
+        }
         ctx.ui.notify(
           "deferred " + (state.enabled ? "on" : "off") +
           " | all=" + state.all + " active=" + state.active + " deferred=" + state.deferred +
+          " blocked=" + state.blocked +
           " promoted=" + state.promoted + " lifetime=" + config.promotionLifetime +
+          (state.blockedNames?.length
+            ? " | blockedNames=" + state.blockedNames.join(",") + " (see /deferred blocked)"
+            : "") +
+          (state.sessionUnblocked?.length
+            ? " | sessionUnblocked=" + state.sessionUnblocked.join(",")
+            : "") +
           (state.missingPins ? " | MISSING PINS: " + state.missingPins.join(", ") : ""),
-          state.missingPins ? "warning" : "info",
+          state.missingPins || hasBlockedConfig(config) ? "warning" : "info",
         );
       } catch (error) {
         ctx.ui.notify("deferred error: " + (error instanceof Error ? error.message : String(error)), "error");
@@ -332,40 +520,58 @@ export default function piDeferredContextEngine(pi) {
     },
   });
 
-  pi.on("session_start", () => {
-    if (config.enabled) controller.synchronize({ resetPromotions: true });
+  pi.on("session_start", async () => {
+    if (config.enabled) await Promise.resolve(controller.synchronize({ resetPromotions: true }));
+    // Surface block CAUTION once per session so operators notice deny-lists.
+    if (typeof pi.ui?.notify === "function") {
+      for (const warning of blockedToolsCautionWarnings(config)) {
+        pi.ui.notify(warning, "warning");
+      }
+    }
   });
-  pi.on("before_agent_start", (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
+    const promptWasArray = Array.isArray(event.systemPrompt);
+    const promptText = normalizeSystemPromptText(event.systemPrompt);
+    const promptOptions = resolveSystemPromptOptions(event, ctx);
+
     if (!config.enabled) {
-      skills = (event.systemPromptOptions?.skills || []).filter((s) => !s.disableModelInvocation);
+      // Prompt-visible only when deferral is off.
+      skills = (promptOptions.skills || []).filter(
+        (s) => !s.disableModelInvocation && s.hide !== true,
+      );
       return {};
     }
-    controller.synchronize();
-    const optimized = optimizeSystemPrompt(event.systemPrompt, event.systemPromptOptions, config);
+    await Promise.resolve(controller.synchronize());
+    const optimized = optimizeSystemPrompt(promptText, promptOptions, config);
+    // Searchable catalog includes hide / disable-model-invocation skills so
+    // lean installs can still activate them via search_tools — when the host
+    // supplies skills (Pi systemPromptOptions or OMP getSystemPromptOptions).
     skills = optimized.skills;
     let systemPrompt = optimized.systemPrompt;
     // Fixed guidance only — do not dump the full deferred catalog (that undoes schema savings).
     // Admin tools (promote_tools, list_capabilities) may themselves be deferred; search_tools is the spine.
     const deferredCount = controller.catalog({ state: "deferred" }).length;
-    if (deferredCount > 0) {
-      systemPrompt +=
-        "\n\n<deferred_tools>\n" +
-        deferredCount + " registered tools are deferred (schemas hidden). " +
-        "Call search_tools with the capability you need; matching tools are promoted for this run. " +
-        "Do not call promote_tools or list_capabilities unless they are already active.\n" +
-        "</deferred_tools>";
+    const blurb = deferredCount > 0 ? deferredToolsBlurb(deferredCount) : "";
+    if (blurb) systemPrompt += "\n\n" + blurb;
+    if (systemPrompt === promptText) return {};
+
+    // Preserve OMP multi-block prompts when we only appended the deferred blurb
+    // (common when skill/context options are unavailable on the host event).
+    if (promptWasArray && optimized.systemPrompt === promptText && blurb) {
+      return { systemPrompt: [...event.systemPrompt, blurb] };
     }
-    if (systemPrompt === event.systemPrompt) return {};
-    return { systemPrompt };
+    // Pi expects a string; OMP accepts string | string[] (string is wrapped).
+    return { systemPrompt: promptWasArray ? [systemPrompt] : systemPrompt };
   });
   // Session-lifetime promotions survive across runs; at the end of a task the
   // user is offered ONCE per tool to keep it pinned (alwaysActive) for future
   // sessions. Declined or accepted names are never re-asked this session.
+  // OMP has agent_end (not agent_settled); listen to both.
   const promotionKeepAsked = new Set();
-  pi.on("agent_settled", async (_event, ctx) => {
+  async function onAgentSettled(_event, ctx) {
     if (!config.enabled) return;
     if (config.promotionLifetime === "run") {
-      controller.synchronize({ resetPromotions: true });
+      await Promise.resolve(controller.synchronize({ resetPromotions: true }));
       return;
     }
     if (typeof ctx?.ui?.confirm !== "function") return;
@@ -383,7 +589,7 @@ export default function piDeferredContextEngine(pi) {
       if (!keep) return;
       const added = addAlwaysActive(candidates);
       config = loadConfig();
-      controller.setConfig(config, { resetPromotions: false });
+      await Promise.resolve(controller.setConfig(config, { resetPromotions: false }));
       ctx.ui.notify(
         added.length > 0
           ? "pinned alwaysActive: " + added.join(", ")
@@ -396,5 +602,7 @@ export default function piDeferredContextEngine(pi) {
         "error",
       );
     }
-  });
+  }
+  pi.on("agent_settled", onAgentSettled);
+  pi.on("agent_end", onAgentSettled);
 }

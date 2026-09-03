@@ -40,6 +40,7 @@ Pi cannot install monorepo subpaths over git alone ([pi#4530](https://github.com
 | `promotionLifetime: "run"` (default) | Promotions cleared on `agent_settled` |
 | `promotionLifetime: "session"` | Promotions stick until reload / reset |
 | `replaceAlwaysActive: true` + empty list | Soft-lock: only hard spine `search_tools` (plus any still-active names). Pin stock tools yourself |
+| `blockedTools` / `blockedPrefixes` non-empty | **Hard deny** — not searchable, promote refused. Stronger than empty-pin soft-lock. Escape: human `/deferred unblock` (session) or `--persist` / config edit. `search_tools` cannot be blocked. |
 
 Hard spine is always `search_tools` only. Admin tools (`list_capabilities`, `promote_tools`, `demote_tools`) are deferred by default — use `search_tools`.
 
@@ -58,13 +59,14 @@ Log path must be a **regular file** (or not exist yet). Directories, FIFOs, and 
 ## Known footguns (ranked)
 
 1. **Empty `replaceAlwaysActive`** under DCE — only `search_tools` left active. Recovery: fix config, `/deferred reload`, or restart Pi.
-2. **MCP at scale** — not an auto-router; agent must call `search_tools` with intent; default `maxSearchResults` is 3.
-3. **Papercuts is habit, not a sensor** — empty log means the agent never filed, not that nothing went wrong.
-4. **Non-git cwd** — cuts go to `~/.papercuts/log.jsonl` unless `PAPERCUTS_FILE` is set (CI hazard).
-5. **Secrets in papercuts** — no redaction; never log tokens/env dumps; mistakes persist in append-only history.
-6. **Skill index strip** — exact match of Pi stock (and a known compressed form). If another extension rewrites the index, strip may no-op; skills still searchable.
-7. **Provider differences** — native deferred tools (some Anthropic/OpenAI models) vs Pi’s active-set fallback; debug with `/deferred audit`.
-8. **`enabled: false` naming** — means “deferral off”, not “package uninstalled”.
+2. **Over-broad `blockedTools` / `blockedPrefixes`** — agent cannot self-recover via promote. Recovery: `/deferred blocked` (copy names) → `/deferred unblock <name>…` or `--persist`. Prefixes like `search_` cannot block spine `search_tools` (spine wins). Blocking `grep` does **not** stop `bash`+`rg`.
+3. **MCP at scale** — not an auto-router; agent must call `search_tools` with intent; default `maxSearchResults` is 3.
+4. **Papercuts is habit, not a sensor** — empty log means the agent never filed, not that nothing went wrong.
+5. **Non-git cwd** — cuts go to `~/.papercuts/log.jsonl` unless `PAPERCUTS_FILE` is set (CI hazard).
+6. **Secrets in papercuts** — no redaction; never log tokens/env dumps; mistakes persist in append-only history.
+7. **Skill index strip** — exact match of Pi stock (and a known compressed form). If another extension rewrites the index, strip may no-op; skills still searchable.
+8. **Provider differences** — native deferred tools (some Anthropic/OpenAI models) vs Pi’s active-set fallback; debug with `/deferred audit`.
+9. **`enabled: false` naming** — means “deferral off” (and block off), not “package uninstalled”.
 
 ## Hardened in 0.1.0 (was residual, now fixed)
 

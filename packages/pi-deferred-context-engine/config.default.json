@@ -8,6 +8,7 @@
   "maxSkillBytes": 65536,
   "replaceAlwaysActive": false,
   "replaceNeverDefer": false,
+  "replaceBlockedTools": false,
   "alwaysActive": [
     "read",
     "bash",
@@ -32,6 +33,8 @@
   "deferredPrefixes": [
     "mcp_"
   ],
+  "blockedTools": [],
+  "blockedPrefixes": [],
   "activeSkills": [],
   "toolPriority": [],
   "compactSchemas": {
