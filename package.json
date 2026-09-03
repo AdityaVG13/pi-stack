@@ -2,13 +2,14 @@
   "name": "pi-stack",
   "private": true,
   "type": "module",
-  "description": "Composable Pi packages: deferred context engine and papercuts.",
+  "description": "Composable Pi packages: deferred context engine, papercuts, and supernova CodeMode.",
   "scripts": {
-    "test": "npm test --prefix packages/pi-papercuts && npm test --prefix packages/pi-deferred-context-engine",
+    "test": "npm test --prefix packages/pi-papercuts && npm test --prefix packages/pi-deferred-context-engine && npm test --prefix packages/pi-supernova",
     "test:papercuts": "npm test --prefix packages/pi-papercuts",
     "test:deferred": "npm test --prefix packages/pi-deferred-context-engine",
+    "test:supernova": "npm test --prefix packages/pi-supernova",
     "release-check": "node scripts/release-check.mjs",
-    "pack:all": "npm pack --prefix packages/pi-papercuts && npm pack --prefix packages/pi-deferred-context-engine"
+    "pack:all": "npm pack --prefix packages/pi-papercuts && npm pack --prefix packages/pi-deferred-context-engine && npm pack --prefix packages/pi-supernova"
   },
   "keywords": [
     "pi-package",
@@ -17,6 +18,14 @@
   ],
   "pi": {
     "extensions": [
+      "./packages/pi-supernova/index.js",
+      "./packages/pi-papercuts/index.js",
+      "./packages/pi-deferred-context-engine/index.js"
+    ]
+  },
+  "omp": {
+    "extensions": [
+      "./packages/pi-supernova/index.js",
       "./packages/pi-papercuts/index.js",
       "./packages/pi-deferred-context-engine/index.js"
     ]
@@ -25,5 +34,9 @@
     "type": "git",
     "url": "git+https://github.com/AdityaVG13/pi-stack.git"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@oxlint/plugins": "^1.81.0",
+    "oxlint": "^1.81.0"
+  }
 }

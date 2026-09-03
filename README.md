@@ -6,20 +6,26 @@ Pi packages for [pi.dev](https://pi.dev). Each folder under `packages/` is its o
 |---------|------|---------|
 | [pi-papercuts](./packages/pi-papercuts) | Agent files friction notes into `.papercuts.jsonl` and keeps going | `pi install npm:pi-papercuts` |
 | [pi-deferred-context-engine](./packages/pi-deferred-context-engine) | Hides inactive tool/skill noise; promotes matches for one run via `search_tools` | `pi install npm:pi-deferred-context-engine` |
+| [pi-supernova](./packages/pi-supernova) | Dual-host CodeMode (`nova.search` / `describe` / `call`) for Pi **and** OMP | `pi install npm:pi-supernova` · `omp install npm:pi-supernova` |
 
-If you use both, install deferred-context-engine last so it sees tools other extensions registered.
+If you use deferred-context-engine, install it **last** so it sees tools other extensions registered. Load **pi-supernova early** so it can capture `registerTool` executors.
 
 ```bash
+pi install npm:pi-supernova
 pi install npm:pi-papercuts
 pi install npm:pi-deferred-context-engine
+
+# OMP
+omp install npm:pi-supernova
 ```
 
-Needs Pi and Node 22+. Package details live in each folder's README.
+Needs Pi (or OMP) and Node 22+. Package details live in each folder's README.
 
 ## Clone install
 
 ```bash
 git clone https://github.com/AdityaVG13/pi-stack.git
+pi install ./pi-stack/packages/pi-supernova
 pi install ./pi-stack/packages/pi-papercuts
 pi install ./pi-stack/packages/pi-deferred-context-engine
 ```
@@ -45,7 +51,8 @@ npm profile: [adityavg13](https://www.npmjs.com/~adityavg13). Gallery search: [k
 ```bash
 cd packages/pi-papercuts && npm test
 cd packages/pi-deferred-context-engine && npm install && npm test
-# both from repo root:
+cd packages/pi-supernova && npm test
+# all from repo root:
 npm test
 ```
 
@@ -54,9 +61,10 @@ Publish (each package on its own):
 ```bash
 cd packages/pi-papercuts && npm test && npm publish --access public
 cd packages/pi-deferred-context-engine && npm test && npm publish --access public
+cd packages/pi-supernova && npm test && npm publish --access public
 ```
 
-`node scripts/release-check.mjs` runs a preflight for both.
+`node scripts/release-check.mjs` runs a preflight for published packages.
 
 ## Gotchas
 

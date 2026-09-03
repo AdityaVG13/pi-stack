@@ -1,0 +1,14 @@
+{
+  "timeoutMs": 60000,
+  "maxCodeChars": 48000,
+  "maxBridgeCalls": 256,
+  "maxCallResultChars": 65536,
+  "maxReturnChars": 200000,
+  "maxLogLines": 100,
+  "maxLogLineChars": 4096,
+  "maxSearchResults": 12,
+  "spillDir": null,
+  "excludeTools": ["supernova", "search_tools", "promote_tools", "demote_tools", "list_capabilities"],
+  "mutatingTools": ["write", "edit", "bash", "apply_patch", "replace_in_file"],
+  "mutatingPrefixes": ["mcp_"]
+}

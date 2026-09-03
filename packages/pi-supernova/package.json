@@ -1,0 +1,89 @@
+{
+  "name": "pi-supernova",
+  "version": "0.0.1",
+  "description": "Dual-host CodeMode for Pi/OMP: progressive tool discovery, result bottleneck, and Amdahl Auto parallel.",
+  "type": "module",
+  "author": "AdityaVG13",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "omp",
+    "oh-my-pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "extension",
+    "codemode",
+    "supernova",
+    "progressive-discovery"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "main": "./index.js",
+  "exports": "./index.js",
+  "files": [
+    "index.js",
+    "catalog.js",
+    "host-bridge.js",
+    "bottleneck.js",
+    "parallel.js",
+    "runtime.js",
+    "config.js",
+    "config.default.json",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "snap.js",
+    "diff.js",
+    "render.js",
+    "surface.js",
+    "decode.js"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm test && node ../../scripts/preflight.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "omp": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typebox": "^1.0.0",
+    "@earendil-works/pi-tui": "^0.84.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AdityaVG13/pi-stack.git",
+    "directory": "packages/pi-supernova"
+  },
+  "bugs": {
+    "url": "https://github.com/AdityaVG13/pi-stack/issues"
+  },
+  "homepage": "https://github.com/AdityaVG13/pi-stack/tree/main/packages/pi-supernova#readme"
+}

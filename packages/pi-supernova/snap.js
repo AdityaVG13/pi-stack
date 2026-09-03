@@ -1,0 +1,225 @@
+
+import * as path from "node:path";
+import { isString } from "./decode.js";
+import { extractStructuralSurface } from "./surface.js";
+
+const STOP_WORDS = new Set([
+  "the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "of", "with",
+  "by", "from", "is", "it", "this", "that", "where", "how", "what", "which",
+  "file", "code", "function", "class", "method", "find", "get", "look",
+]);
+
+export function tokenizeQuery(query) {
+  if (!isString(query) || !query.trim()) {
+    return { tokens: [], wantsTest: false, wantsType: false, wantsDoc: false };
+  }
+
+  const raw = query
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-zA-Z0-9_]+/);
+
+  const tokens = raw.filter((t) => t.length > 1 && !STOP_WORDS.has(t));
+  const queryLower = query.toLowerCase();
+
+  return {
+    tokens: [...new Set(tokens)],
+    wantsTest: queryLower.includes("test") || queryLower.includes("spec"),
+    wantsType: queryLower.includes("type") || queryLower.includes("interface") || queryLower.includes("schema"),
+    wantsDoc: queryLower.includes("doc") || queryLower.includes("readme"),
+  };
+}
+
+export function scorePathTopology(filePath, tokens, { wantsTest, wantsDoc, wantsType }) {
+  const norm = filePath.replace(/\\/g, "/").toLowerCase();
+  const basename = path.basename(norm);
+  const ext = path.extname(norm);
+
+  const isTest = norm.includes("test") || norm.includes("spec") || norm.includes("__tests__");
+  if (isTest && !wantsTest) return -50;
+  if (!isTest && wantsTest) return -20;
+
+  if (norm.includes("node_modules/") || norm.includes("dist/") || norm.includes("target/")) {
+    return -100;
+  }
+
+  let score = 0;
+  const pathParts = norm.split(/[^a-zA-Z0-9]+/);
+
+  for (const token of tokens) {
+    if (basename === token || basename.startsWith(token + ".")) score += 60;
+    else if (basename.includes(token)) score += 30;
+    else if (pathParts.includes(token)) score += 15;
+    else if (norm.includes(token)) score += 5;
+  }
+
+  if ([".ts", ".js", ".mjs", ".rs", ".py", ".go"].includes(ext) && !wantsDoc) {
+    score += 5;
+  }
+  if (wantsType && [".ts", ".d.ts", ".rs", ".go"].includes(ext)) {
+    score += 10;
+  }
+
+  return score;
+}
+
+function scoreContentDefinitions(content, tokens) {
+  const lines = content.split("\n");
+  let score = 0;
+  let bestLine = 1;
+  let bestLineScore = 0;
+
+  const defRegex = /^(?:pub\s+)?(?:export\s+)?(?:async\s+)?(?:default\s+)?(function|class|def|fn|const|let|interface|type|struct|enum)\s+([a-zA-Z0-9_$]+)/;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith("//") || line.startsWith("#") || line.startsWith("*")) continue;
+
+    let lineScore = 0;
+    const isDef = defRegex.test(line);
+
+    for (const token of tokens) {
+      if (line.toLowerCase().includes(token)) {
+        lineScore += isDef ? 40 : 5;
+      }
+    }
+
+    if (lineScore > bestLineScore) {
+      bestLineScore = lineScore;
+      bestLine = i + 1;
+    }
+    score += lineScore;
+  }
+
+  return { totalScore: score, bestLine, bestLineScore };
+}
+
+export async function executeSnap({ query, searchDir, vfs, runCommand }) {
+  const { tokens, wantsTest, wantsType, wantsDoc } = tokenizeQuery(query);
+  if (tokens.length === 0) {
+    throw new Error("snap requires at least one searchable concept keyword");
+  }
+
+  const dir = searchDir || process.cwd();
+  let fileList = [];
+  try {
+    const res = await runCommand(["rg", "--files", dir], { timeoutMs: 15_000 });
+    fileList = res.stdout.split("\n").map((f) => f.trim()).filter(Boolean);
+  } catch {
+    fileList = [];
+  }
+
+  if (fileList.length === 0) {
+    throw new Error(`no files found to search in ${dir}`);
+  }
+
+  const scoredPaths = [];
+  for (const f of fileList) {
+    const score = scorePathTopology(f, tokens, { wantsTest, wantsDoc, wantsType });
+    if (score > 0) scoredPaths.push({ path: f, score });
+  }
+
+  scoredPaths.sort((a, b) => b.score - a.score);
+
+  let candidates = scoredPaths.filter((p) => p.score >= 25).slice(0, 10).map((p) => p.path);
+
+  if (candidates.length < 5) {
+    try {
+      const grepArgs = ["-l", "--max-count=1"];
+      if (!wantsTest) {
+        grepArgs.push("-g", "!test/**", "-g", "!tests/**", "-g", "!*.test.*", "-g", "!*.spec.*");
+      }
+      const salient = tokens.filter((t) => t.length > 2).slice(0, 4);
+      for (const t of salient) grepArgs.push("-e", t);
+      const res = await runCommand(["rg", ...grepArgs, dir], { timeoutMs: 15_000 });
+      const grepHits = res.stdout.split("\n").map((f) => f.trim()).filter(Boolean);
+      const seen = new Set(candidates);
+      for (const h of grepHits) {
+        if (!seen.has(h)) {
+          seen.add(h);
+          candidates.push(h);
+          if (candidates.length >= 15) break;
+        }
+      }
+    } catch {
+      if (candidates.length === 0) candidates = fileList.slice(0, 5);
+    }
+  }
+
+  const candidateScores = [];
+
+  for (const filePath of candidates) {
+    let content = "";
+    try {
+      content = await vfs.read(filePath);
+    } catch {
+      continue;
+    }
+
+    const { totalScore, bestLine, bestLineScore } = scoreContentDefinitions(content, tokens);
+    const ext = path.extname(filePath);
+    const surface = extractStructuralSurface(content, ext);
+
+    let surfaceBonus = 0;
+    let signature = "";
+    let anchorLine = bestLine;
+
+    for (const item of surface.items) {
+      const nameLower = item.name.toLowerCase();
+      for (const token of tokens) {
+        if (nameLower.includes(token)) {
+          surfaceBonus += item.isExport ? 80 : 50;
+          if (!signature) {
+            signature = item.signature;
+            anchorLine = item.line;
+          }
+        }
+      }
+    }
+
+    const isTestFile = filePath.toLowerCase().includes("test") || filePath.toLowerCase().includes("spec");
+    const testAdjustment = isTestFile && !wantsTest ? -200 : (isTestFile && wantsTest ? 100 : 0);
+    const finalScore = totalScore + surfaceBonus + (bestLineScore * 2) + testAdjustment;
+    candidateScores.push({
+      path: filePath,
+      score: finalScore,
+      anchorLine,
+      signature,
+      content,
+    });
+  }
+
+  candidateScores.sort((a, b) => b.score - a.score);
+
+  if (candidateScores.length === 0 || candidateScores[0].score <= 0) {
+    const fallbackPath = candidates[0] || fileList[0];
+    return {
+      path: fallbackPath,
+      line: 1,
+      signature: "",
+      confidence: 0.3,
+      context: [],
+    };
+  }
+
+  const best = candidateScores[0];
+  const lines = best.content.split("\n");
+  const startLine = Math.max(1, best.anchorLine - 3);
+  const endLine = Math.min(lines.length, best.anchorLine + 8);
+
+  const contextLines = [];
+  for (let l = startLine; l <= endLine; l++) {
+    const marker = l === best.anchorLine ? "►" : " ";
+    contextLines.push(`${marker} ${String(l).padStart(4)} │ ${lines[l - 1]}`);
+  }
+
+  const confidence = Math.min(0.98, Math.max(0.65, best.score / 150));
+
+  return {
+    path: best.path,
+    line: best.anchorLine,
+    signature: best.signature,
+    confidence: Number(confidence.toFixed(2)),
+    context: contextLines,
+  };
+}
