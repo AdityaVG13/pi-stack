@@ -1,5 +1,5 @@
 /**
- * Width / truncate primitives shared by render.js and omp-frame.js.
+ * Width / truncate primitives used by the compact renderer.
  * Self-contained so path-install never depends on a host truncate that can
  * append ellipsis after cutting to maxWidth (Pi 92>91 crash class).
  */

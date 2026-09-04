@@ -8,9 +8,7 @@ import {
   clampLine,
   hardTruncate,
   measureWidth,
-  paintNovaRow,
   wrapPlainToWidth,
-  NOVA_CHROME,
   normalizeCallRenderArgs,
 } from "../render.js";
 import { stripVTControlCharacters } from "node:util";
@@ -102,7 +100,7 @@ describe("supernova UI rendering", () => {
     assert.equal(ops[1].tool, "write");
   });
 
-  it("renders call with bordered-tool aesthetic (title · timing, aligned ops)", () => {
+  it("renders a compact call ledger without owning host chrome", () => {
     const args = {
       code: 'await nova.call("read", { path: "package.json" });',
     };
@@ -118,17 +116,9 @@ describe("supernova UI rendering", () => {
     assert.match(rendered, /\[muted\]package\.json\[\/muted\]/);
     assert.ok(rendered.includes("[accent]▤ [/accent]"));
     assert.doesNotMatch(rendered, /\{/);
-    // Self-framed card: purple bg wash like Pi's Box (no side-rail chars).
-    assert.match(rendered, /\x1b\[48;2;/);
+    assert.doesNotMatch(rendered, /\x1b\[48;2;|╭|╰/);
     assert.doesNotMatch(rendered, /"code":/);
     assert.doesNotMatch(rendered, /▌/);
-  });
-
-  it("paints muted violet/grey-blue chrome within terminal width", () => {
-    const row = paintNovaRow("nova · 12ms", 91, "success");
-    assert.ok(piVisibleWidth(row) <= 91);
-    assert.match(row, /\x1b\[48;2;24;30;46m/); // successBg
-    assert.equal(NOVA_CHROME.successBg[2], 46);
   });
 
   it("accepts OMP renderCall signature (args, options, theme) without throwing", () => {
@@ -147,17 +137,15 @@ describe("supernova UI rendering", () => {
     assert.match(text, /nova/);
     assert.match(text, /package\.json/);
     assert.doesNotMatch(text, /"code":/);
-    // OMP uses rounded framedBlock chrome (same geometry as native write/edit).
-    assert.match(text, /╭/);
-    assert.match(text, /╰/);
-    assert.doesNotMatch(text, /\x1b\[48;2;/); // not the Pi violet wash
+    assert.doesNotMatch(text, /╭|╰|\x1b\[48;2;/);
     const norm = normalizeCallRenderArgs(args, options, theme);
     assert.equal(norm.host, "omp");
     assert.equal(norm.theme, theme);
-    assertLinesFit(lines, 80, "omp framed call");
+    assert.equal(lines.length, 2);
+    assertLinesFit(lines, 80, "compact OMP call");
   });
 
-  it("OMP result cards frame diffs like native write/edit", () => {
+  it("OMP result cards use the same compact ledger without nested framing", () => {
     const theme = {
       fg: (_t, text) => text,
       bold: (text) => text,
@@ -187,10 +175,11 @@ describe("supernova UI rendering", () => {
       code: 'await write("a.ts", "hi");',
     }).render(80);
     const text = lines.join("\n");
-    assert.match(text, /╭/);
+    assert.doesNotMatch(text, /╭|╰|\x1b\[48;2;/);
     assert.match(text, /nova/);
     assert.match(text, /a\.ts/);
-    assertLinesFit(lines, 80, "omp framed result");
+    assert.equal(lines.length, 2);
+    assertLinesFit(lines, 80, "compact OMP result");
   });
 
   it("still accepts Pi renderCall signature (args, theme, context)", () => {
@@ -497,7 +486,7 @@ describe("supernova UI rendering", () => {
       plainTheme,
       { code: `await snap("auth token", "src");` },
     ).render(80).join("\n");
-    assert.match(omp, /nova: 1 call · running/);
+    assert.match(omp, /nova · 1 call · running/);
     assert.match(omp, /snap/);
     assert.match(omp, /"auth token" → src/);
 

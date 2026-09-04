@@ -6,8 +6,8 @@
  * so every width/truncate path here is self-contained and must never trust a host
  * truncate that appends ellipsis after cutting to maxWidth.
  *
- * OMP path uses rounded framedBlock chrome (same as native write/edit). Pi path
- * keeps the muted violet SafeText wash (no side rails).
+ * Both Pi and OMP receive compact text content. The host owns the surrounding
+ * tool chrome; drawing another background or frame here creates nested panels.
  */
 
 import { stripVTControlCharacters } from "node:util";
@@ -19,7 +19,6 @@ import {
 	wrapPlainToWidth,
 	fitPath,
 } from "./render-measure.js";
-import { novaFramedBlock, novaStatusLine } from "./omp-frame.js";
 
 export { measureWidth, hardTruncate, clampLine, wrapPlainToWidth, fitPath };
 
@@ -43,83 +42,18 @@ function fitOutputLines(text, width) {
 	return out.length > 0 ? out : [""];
 }
 
-/**
- * Soft violet / grey-blue wash — same structure as Pi's standard tool Box
- * (padding + background), just purple-tinted instead of green.
- * Tuned for dark themes (tokyo-night and friends).
- */
-export const NOVA_CHROME = {
-	pendingBg: [26, 28, 42], // deep grey-blue
-	successBg: [24, 30, 46], // muted blue-purple
-	errorBg: [40, 26, 34], // muted rose-purple
-};
-
-function bgRgb(rgb, text) {
-	const [r, g, b] = rgb;
-	return `\x1b[48;2;${r};${g};${b}m${text}\x1b[49m`;
-}
-
-function chromeBg(tone) {
-	if (tone === "error") return NOVA_CHROME.errorBg;
-	if (tone === "success") return NOVA_CHROME.successBg;
-	return NOVA_CHROME.pendingBg;
-}
-
-/**
- * Paint one row like Pi's Box: 1-col pad + content, washed to full width.
- * No side-rail characters — the background block is the "border".
- * Final visible width is always ≤ `width` (Pi crash contract).
- */
-export function paintNovaRow(content, width, tone = "pending") {
-	const w = Math.max(1, width | 0);
-	const bg = chromeBg(tone);
-	const padX = 1;
-	const inner = Math.max(1, w - padX * 2);
-	const body = clampLine(content, inner);
-	const row = `${" ".repeat(padX)}${body}`;
-	const pad = Math.max(0, w - measureWidth(row));
-	const painted = bgRgb(bg, row + " ".repeat(pad));
-	if (measureWidth(painted) <= w) return painted;
-	return clampLine(stripVTControlCharacters(painted), w);
-}
-
-/**
- * Framed Text for supernova. Uses renderShell: "self" so we own the chrome
- * color (muted purple/grey-blue) instead of the host's green tool panels.
- * Structure matches Pi's standard Box (pad + bg), without side-rail characters.
- */
+/** Compact bounded text; the host supplies the card background and borders. */
 export class SafeText {
 	constructor(text = "") {
 		this.text = text;
-		this.tone = "pending";
-		this.framing = true;
 	}
 	setText(text) {
 		this.text = text;
 	}
-	setTone(tone) {
-		if (tone === "error" || tone === "success" || tone === "pending") this.tone = tone;
-	}
-	setFraming(enabled) {
-		this.framing = !!enabled;
-	}
 	invalidate() {}
 	render(width = 80) {
-		const w = Math.max(1, width | 0);
 		const raw = String(this.text ?? "");
-		if (!raw.trim()) return [];
-
-		if (!this.framing) {
-			return fitOutputLines(raw, w);
-		}
-
-		// Match Pi Box: 1-col horizontal pad, 1-row vertical pad, purple bg wash.
-		const padX = 1;
-		const inner = Math.max(1, w - padX * 2);
-		const bodyLines = fitOutputLines(raw, inner);
-		const empty = paintNovaRow("", w, this.tone);
-		const painted = bodyLines.map((line) => paintNovaRow(line, w, this.tone));
-		return [empty, ...painted, empty];
+		return raw.trim() ? fitOutputLines(raw, Math.max(1, width | 0)) : [];
 	}
 }
 
@@ -341,8 +275,8 @@ export function normalizeCallRenderArgs(a, b, c) {
  *   Pi:  (result, {expanded,isPartial}, theme, context)
  *   OMP: (result, {expanded,isPartial}, theme, args)  — 4th is args, not context
  *
- * Call shapes share the first three positions, so host is inferred from the 4th
- * arg / whether the OMP tui framedBlock import resolved.
+ * Call shapes share the first three positions, so host is inferred from the
+ * fourth argument's context-versus-args shape.
  */
 function detectResultHost(options, ctxOrArgs) {
 	if (isTheme(options)) return "pi";
@@ -470,99 +404,11 @@ function formatOpBodyLine(theme, op) {
 	return `${bullet}${toolName}${target}`;
 }
 
-function shouldUseOmpFrame(host) {
-	return host === "omp";
-}
-
-/**
- * OMP write/edit look: rounded framedBlock + status-line header.
- * Pending call has no hourglass on the head row (same as native Write/Edit).
- */
-function renderOmpCallCard(theme, { ops, timeStr, expanded, code }) {
-	const opSummary = ops.length === 0 ? "composing" : `${ops.length} call${ops.length === 1 ? "" : "s"}`;
-	const description = timeStr ? `${opSummary} · ${timeStr}` : opSummary;
-	// No pending icon on the framed head row — matches native Write/Edit.
-	const header = novaStatusLine(theme, {
-		title: "nova",
-		description,
-	});
-	return novaFramedBlock(theme, (width) => {
-		const bodyLines = ops.map((op) => formatOpBodyLine(theme, op));
-		if (expanded && code) {
-			bodyLines.push(theme.fg("dim", "── source ──"));
-			const sourceLines = cleanBlockText(code).trim().split("\n");
-			for (const line of sourceLines.slice(0, 24)) bodyLines.push(theme.fg("toolOutput", line));
-			if (sourceLines.length > 24) bodyLines.push(theme.fg("dim", `… ${sourceLines.length - 24} more lines`));
-		}
-		return {
-			header,
-			sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
-			state: "pending",
-			borderColor: "borderMuted",
-			width,
-		};
-	});
-}
-
-function renderOmpResultCard(theme, { isErr, payload, expanded, bodyText, isPartial, spinnerFrame, opCount = 0 }) {
-	if (isErr) {
-		const errLines = String(bodyText || "").trim() ? String(bodyText).split("\n") : [];
-		if (payload?.error) errLines.push(theme.fg("error", cleanBlockText(payload.error)));
-		if (expanded && payload?.logs?.length) {
-			errLines.push(theme.fg("dim", "── logs ──"));
-			for (const log of payload.logs.slice(0, 24)) errLines.push(theme.fg("dim", cleanBlockText(log)));
-		}
-		const wall = payload?.wallMs != null ? `${payload.wallMs}ms` : "";
-		const calls = opCount > 0 ? `${opCount} call${opCount === 1 ? "" : "s"}` : "";
-		const header = novaStatusLine(theme, {
-			icon: "error",
-			title: "nova",
-			description: [calls, "failed", wall].filter(Boolean).join(" · "),
-		});
-		return novaFramedBlock(theme, (width) => ({
-			header,
-			sections: errLines.length > 0 ? [{ lines: errLines }] : [],
-			state: "error",
-			borderColor: "error",
-			width,
-		}));
-	}
-
-	const wall = payload?.wallMs != null ? `${payload.wallMs}ms` : "";
-	const calls = opCount > 0 ? `${opCount} call${opCount === 1 ? "" : "s"}` : "";
-	const description = [calls, isPartial ? "running" : "", wall].filter(Boolean).join(" · ");
-	const header = novaStatusLine(theme, {
-		icon: isPartial ? "running" : undefined,
-		spinnerFrame,
-		title: "nova",
-		description: description || undefined,
-	});
-	const bodyLines = String(bodyText || "").split("\n");
-	while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
-	while (bodyLines.length > 0 && bodyLines[bodyLines.length - 1].trim() === "") bodyLines.pop();
-	return novaFramedBlock(theme, (width) => ({
-		header,
-		sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
-		state: isPartial ? "pending" : "success",
-		borderColor: "borderMuted",
-		width,
-	}));
-}
-
 export function renderSupernovaCall(a, b, c) {
-	const { args, theme, context, options, host } = normalizeCallRenderArgs(a, b, c);
+	const { args, theme, context, options } = normalizeCallRenderArgs(a, b, c);
 	tickCallTimer(context);
 	const ops = collectCallOps(args, context);
 	const timeStr = formatElapsed(context?.state);
-
-	if (shouldUseOmpFrame(host)) {
-		return renderOmpCallCard(theme, {
-			ops,
-			timeStr,
-			expanded: !!context?.expanded,
-			code: args?.code,
-		});
-	}
 
 	const comp = context?.lastComponent instanceof SafeText ? context.lastComponent : new SafeText();
 	if (options) options.lastComponent = comp;
@@ -570,9 +416,7 @@ export function renderSupernovaCall(a, b, c) {
 
 	// Compact aesthetic — never dump raw JSON args (the stock tool fallback).
 	let out = theme.fg("toolTitle", theme.bold("nova"));
-	if (timeStr) {
-		out += " " + theme.fg("dim", `· ${timeStr}`);
-	}
+	out += " " + theme.fg("dim", `· running${timeStr ? ` · ${timeStr}` : ""}`);
 
 	if (ops.length === 0) {
 		out += " " + theme.fg("dim", "· composing");
@@ -587,10 +431,6 @@ export function renderSupernovaCall(a, b, c) {
 		out += "\n" + theme.fg("toolOutput", cleanBlockText(args.code).trim());
 	}
 
-	if (context?.isError) comp.setTone("error");
-	else if (context?.isPartial) comp.setTone("pending");
-	else comp.setTone("success");
-	comp.setFraming(true);
 	comp.setText(out);
 	return comp;
 }
@@ -663,7 +503,7 @@ function buildResultBody(theme, { payload, context, args, expanded, isPartial, i
 }
 
 export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextArg) {
-	const { result, expanded, isPartial, theme, context, args, options, host } = normalizeResultRenderArgs(
+	const { result, expanded, isPartial, theme, context, args, options } = normalizeResultRenderArgs(
 		resultArg,
 		optionsArg,
 		themeArg,
@@ -691,26 +531,15 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 	const isErr = result?.isError || payload?.ok === false;
 	const view = buildResultBody(theme, { payload, context, args, expanded, isPartial, isError: isErr });
 
-	if (shouldUseOmpFrame(host)) {
-		return renderOmpResultCard(theme, {
-			isErr,
-			payload,
-			expanded,
-			bodyText: view.body,
-			isPartial: isPartial && !isErr,
-			spinnerFrame: options?.spinnerFrame,
-			opCount: view.opCount,
-		});
-	}
-
 	const comp = context?.lastComponent instanceof SafeText ? context.lastComponent : new SafeText();
 	if (options) options.lastComponent = comp;
 	else if (context) context.lastComponent = comp;
 
 	const wall = payload?.wallMs != null ? `${payload.wallMs}ms` : "";
-	const calls = view.opCount > 0 ? `${view.opCount} call${view.opCount === 1 ? "" : "s"}` : "complete";
+	const calls = view.opCount > 0 ? `${view.opCount} call${view.opCount === 1 ? "" : "s"}` : "";
+	const status = isErr ? "failed" : isPartial ? "running" : calls ? "" : "complete";
 	let out = theme.fg("toolTitle", theme.bold("nova"));
-	out += " " + theme.fg("dim", `· ${[calls, isErr ? "failed" : isPartial ? "running" : "", wall].filter(Boolean).join(" · ")}`);
+	out += " " + theme.fg("dim", `· ${[calls, status, wall].filter(Boolean).join(" · ")}`);
 	if (view.body) out += `\n  ${view.body.replaceAll("\n", "\n  ")}`;
 
 	if (isErr) {
@@ -719,11 +548,7 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 			out += `\n${theme.fg("dim", "── logs ──")}`;
 			for (const log of payload.logs.slice(0, 24)) out += `\n  ${theme.fg("dim", cleanBlockText(log))}`;
 		}
-		comp.setTone("error");
-	} else {
-		comp.setTone(isPartial ? "pending" : "success");
 	}
-	comp.setFraming(true);
 	comp.setText(out);
 	return comp;
 }

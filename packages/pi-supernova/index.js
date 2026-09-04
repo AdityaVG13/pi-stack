@@ -30,6 +30,18 @@ try {
 function result(text, details) {
   return { content: [{ type: "text", text }], details };
 }
+function unwrapStructuredResult(response, operation) {
+  if (response?.ok === false) {
+    throw new Error(response.value || response.error || `${operation} failed`);
+  }
+  const value = response && typeof response === "object" && "value" in response ? response.value : response;
+  if (!isString(value)) return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
 
 const TOOL_DESCRIPTION = `Execute JavaScript that orchestrates host tools in one shot (Code Mode).
 
@@ -101,10 +113,10 @@ export default function piSupernova(pi) {
         }
       },
       async surface(filePath) {
-        return bridge.call("surface", { path: filePath });
+        return unwrapStructuredResult(await bridge.call("surface", { path: filePath }), "surface");
       },
       async snap(query, targetPath) {
-        return bridge.call("snap", { query, path: targetPath });
+        return unwrapStructuredResult(await bridge.call("snap", { query, path: targetPath }), "snap");
       },
       has(name) {
         return bridge.hasExecutor(name) || catalog.some((t) => t.name === name);
@@ -134,8 +146,8 @@ export default function piSupernova(pi) {
         }),
       ),
     }),
-    // "self" = we own chrome. OMP uses native framedBlock (write/edit look);
-    // Pi keeps the muted violet SafeText wash. "default" falls back to raw JSON.
+    // Return compact content while suppressing the host's raw JSON fallback.
+    // The surrounding tool container remains host-owned.
     renderShell: "self",
     mergeCallAndResult: true,
     renderCall: renderSupernovaCall,

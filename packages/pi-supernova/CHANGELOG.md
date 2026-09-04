@@ -4,6 +4,10 @@
 
 ## [0.0.5] - 2026-09-03
 
+### Changed
+
+- Pi and OMP now render one compact command ledger and leave backgrounds and borders to the host, avoiding nested frames and oversized padded panels.
+
 ### Fixed
 
 - Native adapters are now included in `nova.search` / `nova.describe` with schemas matching the callable adapter, even when the host catalog omits parameters or the adapter name.

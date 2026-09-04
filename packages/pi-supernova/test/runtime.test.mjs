@@ -101,6 +101,33 @@ describe("guest runtime", () => {
     assert.equal(recovered.details.result, "recovered");
   });
 
+  it("returns structured values from direct nova.snap and nova.surface helpers", async () => {
+    let supernovaTool;
+    const pi = {
+      getAllTools: () => [],
+      registerTool(tool) {
+        if (tool.name === "supernova") supernovaTool = tool;
+      },
+      registerCommand() {},
+      on() {},
+    };
+    piSupernova(pi);
+
+    const response = await supernovaTool.execute(
+      "structured-nova-helpers",
+      {
+        code: `const hit = await nova.snap("syntax errors roll back outer VFS transaction", "."); const outline = await nova.surface(hit.path); return { path: hit.path, line: hit.line, items: outline.items.length };`,
+      },
+      new AbortController().signal,
+      undefined,
+      { cwd: process.cwd(), state: {} },
+    );
+    assert.equal(response.details.ok, true);
+    assert.match(response.details.result.path, /host-bridge\.js$/);
+    assert.ok(response.details.result.line > 0);
+    assert.ok(response.details.result.items > 0);
+  });
+
   it("exposes the real process to guest code", async () => {
     const outcome = await runGuestProgram({
       code: `
