@@ -1,32 +1,31 @@
 # pi-supernova
 
 [![npm](https://img.shields.io/npm/v/pi-supernova.svg)](https://www.npmjs.com/package/pi-supernova)
-[![license](https://img.shields.io/npm/l/pi-supernova.svg)](./LICENSE)
+[![license](https://img.shields.io/npm/l/pi-supernova.svg)](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/LICENSE)
 [![node](https://img.shields.io/node/v/pi-supernova.svg)](https://nodejs.org)
 [![pi-package](https://img.shields.io/badge/pi--package-extension-7aa2f7)](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md)
 
-**CodeMode for [Pi](https://pi.dev) and [OMP](https://omp.sh).** One tool. One program. Progressive discovery, a hard result bottleneck, and Amdahl-aware parallel waves.
+**CodeMode for [Pi](https://pi.dev) and [OMP](https://omp.sh).** One tool, one guest program: progressive discovery, a hard result bottleneck, and Amdahl-aware parallel waves.
 
 ```bash
 pi install npm:pi-supernova
 omp install npm:pi-supernova
 ```
 
+Load **before** other tool-owning packages so `registerTool` capture works. Restart the host after install.
+
 ---
 
-## TL;DR
+## Why
 
-**The problem.** Coding agents drown in tool schemas. Dumping every tool into the system prompt wastes context, slows turns, and still leaves the model stitching fragile multi-step workflows by hand.
+| | Stock multi-tool prompt | **pi-supernova** |
+|--|-------------------------|------------------|
+| Schema tax | Every tool in context | Thin catalog + on-demand `describe` |
+| Multi-step | Model stitches turns | One in-process program |
+| Parallel reads | Ad hoc | `callMany` Auto / `parallel()` |
+| Hosts | Separate packages | Same tarball for Pi **and** OMP |
 
-**The solution.** `supernova` exposes a single tool. Inside the guest program the model searches a thin catalog, describes only what it needs, then orchestrates host tools with `nova.call` / `nova.callMany` — intermediates stay in-process; only a shaped return comes back.
-
-| Why use it | What you get |
-|------------|--------------|
-| Progressive discovery | `search` → `describe` → `call` — no megaschema tax |
-| Result bottleneck | Hard caps on host-call and return size; optional private spill |
-| Amdahl Auto | `callMany` parallelizes independent reads; serializes mutations |
-| Dual-host | Same package for Pi and OMP (`pi` + `omp` extension keys) |
-| Quiet TUI | Muted violet/grey-blue card — not a raw JSON args dump |
+Guest code is an in-process `AsyncFunction` (same trust class as host `bash`) — not an OS/VM sandbox. Tool calls still go through `nova.call`.
 
 ---
 
@@ -41,19 +40,15 @@ async () => {
   const wave = await nova.callMany([
     { name: "read", args: { path: "a.ts" } },
     { name: "read", args: { path: "b.ts" } },
-  ]); // Auto → parallel for independent reads
+  ]);
 
-  return {
-    preview: a.value.slice(0, 200),
-    mode: wave.mode,
-    n: wave.length,
-  };
+  return { preview: a.value.slice(0, 200), mode: wave.mode, n: wave.length };
 }
 ```
 
-Guest globals: `nova` / `tools`, `parallel`, `pipeline`, `console`, plus shorthand `read` / `write` / `edit` / `bash` / …
+Globals: `nova` / `tools`, `parallel`, `pipeline`, `console`, plus shorthand `read` / `write` / `edit` / `bash` / …
 
-Terminal card (narrow-safe, width-clamped):
+Terminal card (muted violet / grey-blue — not a raw JSON args dump):
 
 ```text
   nova · 84ms
@@ -63,77 +58,16 @@ Terminal card (narrow-safe, width-clamped):
 
 ---
 
-## Design philosophy
-
-1. **One tool in the prompt.** Discovery happens inside the program, not in the system prompt.
-2. **Bottleneck the boundary.** Host results and the final return are capped; oversized payloads can spill privately.
-3. **Parallel when it is free.** Independent reads fan out; anything mutating forces a serial wave.
-4. **Same package, two hosts.** `package.json` declares both `"pi"` and `"omp"` entrypoints.
-5. **Honest chrome.** Custom TUI framing — not a fake sandbox story. Guest code is in-process `AsyncFunction`.
-
----
-
-## Comparison
-
-| | Stock multi-tool prompt | MCP-only orchestration | **pi-supernova** |
-|--|-------------------------|------------------------|------------------|
-| Schema tax | All tools in context | Per-server schemas | Thin catalog + on-demand describe |
-| Multi-step | Model stitches turns | External client | One guest program |
-| Parallel reads | Ad hoc | Client-dependent | `callMany` Auto / `parallel()` |
-| Host support | Pi or OMP separately | N/A | Pi **and** OMP |
-| Result size | Unbounded | Unbounded | Hard caps + optional spill |
-
----
-
-## Installation
-
-### npm (recommended)
-
-```bash
-pi install npm:pi-supernova
-omp install npm:pi-supernova
-```
-
-### Path / symlink dogfood
-
-```bash
-pi install /path/to/pi-stack/packages/pi-supernova
-omp install /path/to/pi-stack/packages/pi-supernova
-```
-
-### From this monorepo clone
-
-```bash
-git clone https://github.com/AdityaVG13/pi-stack.git
-pi install ./pi-stack/packages/pi-supernova
-```
-
-**Load order:** install supernova **before** other tool-owning packages so `registerTool` wrapping can capture executors. Put DCE last if you use it.
-
----
-
-## Quick start
-
-1. Install (Pi or OMP) as above.
-2. Restart the host.
-3. Ask the model to compose a multi-step task with `supernova`.
-4. Optional: `/supernova` for catalog size + captured executors.
-5. Optional: pin `supernova` (and `search_tools` if using DCE) in deferred-tools config.
-
----
-
-## API surface (guest program)
+## API
 
 | API | Role |
 |-----|------|
-| `nova.search(query, limit?)` | Thin catalog hits (name + one-liner) |
-| `nova.describe(name)` | Full parameter summary on demand |
-| `nova.call(name, args)` | Invoke a host tool (or native adapter) |
-| `nova.callMany([{name,args}])` | Auto parallel wave; return is iterable and has `.mode` / `.results` |
-| `parallel(thunks)` | `Promise.all` over thunks |
-| `pipeline(items, ...stages)` | Map stages across items |
+| `nova.search(query, limit?)` | Thin catalog hits |
+| `nova.describe(name)` | Parameter summary on demand |
+| `nova.call(name, args)` | Host tool or native adapter |
+| `nova.callMany([{name,args}])` | Auto parallel wave — iterable array with `.mode` / `.results` |
+| `parallel(thunks)` / `pipeline(items, …stages)` | Raw `Promise.all` helpers |
 | `nova.speculate(fn)` | Counterfactual branch (rollback / commit) |
-| `read` / `write` / `edit` / `bash` / … | Shorthand globals over the bridge |
 
 ---
 
@@ -149,39 +83,31 @@ Optional `~/.pi/agent/supernova.json` or `~/.omp/agent/supernova.json`
   "maxBridgeCalls": 256,
   "maxCallResultChars": 65536,
   "maxReturnChars": 200000,
-  "maxLogLines": 100,
-  "maxLogLineChars": 4096,
   "maxSearchResults": 12,
   "spillDir": null
 }
 ```
 
-Defaults also set `excludeTools` to `["supernova", "search_tools", "promote_tools", "demote_tools", "list_capabilities"]` — do **not** override with `[]` unless you intend to clear that list (empty array replaces defaults). Same for `mutatingTools` / `mutatingPrefixes`.
+Defaults also set `excludeTools` (includes `supernova` and DCE helpers). An empty `"excludeTools": []` **replaces** those defaults — omit the key unless you mean that.
 
-Paths resolve from `$HOME` + install location — **no hardcoded usernames**. Dual-install picks the host that loaded the package (`~/.pi/...` vs `~/.omp/...`).
-
-Slash command: `/supernova` — catalog size + captured executors.
+Slash: `/supernova` — catalog size + captured executors.
 
 ---
 
-## Architecture
+## Install variants
 
-```text
-┌─────────────────────────────────────────────────────────┐
-│  Host (Pi or OMP)                                       │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │  supernova tool (renderCall / renderResult)       │  │
-│  └───────────────────────┬───────────────────────────┘  │
-│                          │                              │
-│  ┌───────────────────────▼───────────────────────────┐  │
-│  │  Guest AsyncFunction                              │  │
-│  │  nova.search → catalog                            │  │
-│  │  nova.describe → schema summary                   │  │
-│  │  nova.call / callMany → host-bridge (+ natives)   │  │
-│  │  bottleneck ← packageHostResult / packageFinal    │  │
-│  └───────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
+```bash
+# Path / dogfood
+pi install /path/to/pi-stack/packages/pi-supernova
+omp install /path/to/pi-stack/packages/pi-supernova
+
+# Monorepo clone
+git clone https://github.com/AdityaVG13/pi-stack.git
+pi install ./pi-stack/packages/pi-supernova
+omp install ./pi-stack/packages/pi-supernova
 ```
+
+Pair with DCE last if you use it: `omp install npm:pi-deferred-context-engine`.
 
 ---
 
@@ -189,41 +115,19 @@ Slash command: `/supernova` — catalog size + captured executors.
 
 | Symptom | Fix |
 |---------|-----|
-| `no executor for tool "…"` | Install supernova **before** other tool packages; restart host; `/supernova` to inspect capture |
-| `Rendered line exceeds terminal width` | Update to ≥0.0.1; restart host so path-install reloads `render.js` |
-| `callMany` / `not iterable` | Use ≥0.0.1 — return is an array with `.mode` / `.results` |
-| OMP does not load the extension | Confirm `"omp": { "extensions": ["./index.js"] }` in the installed package; `omp install npm:pi-supernova` |
-| Config not applied | Check `~/.pi/agent/supernova.json` or `~/.omp/agent/supernova.json`, or set `PI_SUPERNOVA_CONFIG` |
+| `no executor for tool "…"` | Install supernova **first**; restart; `/supernova` |
+| `Rendered line exceeds terminal width` | ≥0.0.1 and restart so `render.js` reloads |
+| `callMany` / not iterable | ≥0.0.1 — return is an array with `.mode` / `.results` |
+| Extension missing on OMP | `omp install npm:pi-supernova` (needs `"omp".extensions`) |
 
 ---
 
 ## Limitations
 
-- Guest JavaScript is **intentionally unsandboxed** (in-process). Same class of trust as host `bash`. Adapter path jails are **not** a security boundary against `await import("node:fs")` inside the guest.
-- Every `supernova` execute begins a speculative overlay; `bash` / mutating host tools **flush** pending writes to disk (transaction barrier). After that, error-path “rollback” cannot undo durable mutations.
-- Nested `nova.speculate` rejects irreversible external mutations rather than promising rollback.
-- Native adapters cover core file/shell tools; exotic host tools need successful `registerTool` capture.
+- Guest JS is **unsandboxed**. Adapter path jails are not a boundary against `import("node:fs")`.
+- `bash` / mutating tools flush speculative writes (transaction barrier); error rollback cannot undo that.
 - First public cut (`0.0.1`) — APIs and TUI will iterate.
-
----
-
-## FAQ
-
-**Does this replace normal tools?**  
-No. It adds one composition tool. Direct tools still exist unless you defer them (e.g. with DCE).
-
-**Pi and OMP both?**  
-Yes. The same tarball declares `"pi"` and `"omp"` extension entrypoints.
-
-**Is guest code sandboxed?**  
-No. In-process `AsyncFunction`. Authority is the tool boundary (`nova.call`), not an OS/VM jail.
-
-**Why is my tool missing inside nova?**  
-Load order. Supernova must wrap `registerTool` before other packages register. Restart after install.
-
-**Can I parallelize writes?**  
-`callMany` Auto will serialize when any call is mutating. Use `parallel()` only when you accept raw `Promise.all` semantics.
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
+MIT · [AdityaVG13/pi-stack](https://github.com/AdityaVG13/pi-stack/tree/main/packages/pi-supernova)
