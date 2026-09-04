@@ -1,7 +1,7 @@
 
 import { isString, isObject } from "./decode.js";
 
-export const NATIVE_TOOL_DEFINITIONS = [
+const NATIVE_TOOL_DEFINITIONS = [
   {
     name: "read",
     description: "Read UTF-8 workspace files by path, or resolve a concept query to source. Supports path arrays, offset, and limit.",
@@ -18,9 +18,9 @@ export const NATIVE_TOOL_DEFINITIONS = [
     parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
   },
   {
-    name: "edit", description: "Apply unique text replacements, or a unified diff, to a workspace file.",
+    name: "edit", description: "Apply unique text replacements to a workspace file; returns the post-edit lines, a structural check, and references to changed declarations.",
     parameters: { type: "object", properties: {
-      path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" }, edits: { type: "array" }, patch: { type: "string" },
+      path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" }, edits: { type: "array", description: "[{oldText, newText}] for several replacements in one call" },
     }, required: ["path"] },
   },
   {
@@ -201,7 +201,7 @@ function editDistance(a, b) {
 }
 
 /** Closest tool names for a mistyped name: substring hits first, then a length-scaled edit distance. */
-export function suggestNames(name, candidates, limit = 3) {
+function suggestNames(name, candidates, limit = 3) {
   const needle = String(name || "").toLowerCase();
   if (!needle) return [];
   const maxDistance = Math.max(1, Math.floor(needle.length / 3));

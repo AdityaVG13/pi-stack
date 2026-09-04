@@ -12,124 +12,11 @@
 
 import { stripVTControlCharacters } from "node:util";
 import { isString, isObject, isFunction } from "./decode.js";
-import {
-	measureWidth,
-	hardTruncate,
-	clampLine,
-	wrapPlainToWidth,
-	fitPath,
-} from "./render-measure.js";
+import { measureWidth, hardTruncate, clampLine, fitPath } from "./render-measure.js";
 import { novaFramedBlock, novaStatusLine } from "./omp-frame.js";
 import { formatValue } from "./format.js";
 
-export { measureWidth, hardTruncate, clampLine, wrapPlainToWidth, fitPath };
-
-function fitOutputLines(text, width) {
-	const w = Math.max(1, width | 0);
-	const out = [];
-	for (const line of String(text ?? "")
-		.replace(/\t/g, "   ")
-		.split("\n")) {
-		if (measureWidth(line) <= w) {
-			out.push(line);
-			continue;
-		}
-		// Wrap on plain text so long paths continue on the next line instead of
-		// dying as `packages/pi-supern…`. ANSI is dropped on wrap (crash-safety).
-		const plain = stripVTControlCharacters(line);
-		for (const chunk of wrapPlainToWidth(plain, w)) {
-			out.push(clampLine(chunk, w));
-		}
-	}
-	return out.length > 0 ? out : [""];
-}
-
-/** Compact bounded text; the host supplies the card background and borders. */
-export class SafeText {
-	constructor(text = "") {
-		this.text = text;
-	}
-	setText(text) {
-		this.text = text;
-	}
-	invalidate() {}
-	render(width = 80) {
-		const raw = String(this.text ?? "");
-		return raw.trim() ? fitOutputLines(raw, Math.max(1, width | 0)) : [];
-	}
-}
-
-// Keep names some tests / older call sites may import.
-export const visibleWidth = measureWidth;
-export const truncateToWidth = hardTruncate;
-
-export function extractOperationsFromCode(code) {
-	const trimmed = String(code || "").trim();
-	if (!trimmed) return [];
-
-	const ops = [];
-	const seen = new Set();
-
-	const addOp = (tool, target) => {
-		const key = `${tool}:${target}`;
-		if (!seen.has(key)) {
-			seen.add(key);
-			ops.push({ tool, target });
-		}
-	};
-
-	const callRegex = /nova\.call\s*\(\s*["'`]([a-zA-Z0-9_-]+)["'`](?:\s*,\s*(\{[\s\S]*?\}))?/g;
-	let match;
-	while ((match = callRegex.exec(trimmed)) !== null) {
-		const tool = match[1];
-		let target = "";
-		if (match[2]) {
-			const pathMatch = /path\s*:\s*["'`]([^"'`]+)["'`]/.exec(match[2]);
-			const cmdMatch = /command\s*:\s*["'`]([^"'`]+)["'`]/.exec(match[2]);
-			const patMatch = /pattern\s*:\s*["'`]([^"'`]+)["'`]/.exec(match[2]);
-			if (pathMatch) target = pathMatch[1];
-			else if (cmdMatch) target = cmdMatch[1].length > 30 ? cmdMatch[1].slice(0, 27) + "…" : cmdMatch[1];
-			else if (patMatch) target = patMatch[1];
-		}
-		addOp(tool, target);
-	}
-
-	const callManyRegex = /nova\.callMany\s*\(\s*\[([\s\S]*?)\]\s*\)/g;
-	while ((match = callManyRegex.exec(trimmed)) !== null) {
-		const inner = match[1];
-		const subCalls = inner.matchAll(/name\s*:\s*["'`]([a-zA-Z0-9_-]+)["'`]/g);
-		for (const sub of subCalls) addOp(sub[1], "");
-	}
-
-	const namedCalls = [
-		{ regex: /(?:^|[^\w$.])(?:nova\.)?read\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "read", wrap: (p) => p },
-		{ regex: /(?:^|[^\w$.])(?:nova\.)?write\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "write", wrap: (p) => p },
-		{ regex: /(?:^|[^\w$.])(?:nova\.)?edit\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "edit", wrap: (p) => p },
-		{ regex: /(?:^|[^\w$.])(?:nova\.)?patch\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "patch", wrap: (p) => p },
-		{
-			regex: /(?:^|[^\w$.])(?:nova\.)?bash\s*\(\s*["'`]([^"'`]+)["'`]/gm,
-			tool: "bash",
-			wrap: (c) => (c.length > 32 ? c.slice(0, 29) + "…" : c),
-		},
-		{ regex: /(?:^|[^\w$.])(?:nova\.)?exec\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "exec", wrap: (c) => c },
-		{ regex: /(?:^|[^\w$.])(?:nova\.)?search\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "search", wrap: (q) => `"${q}"` },
-		{ regex: /(?:^|[^\w$.])nova\.describe\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "describe", wrap: (name) => name },
-		{ regex: /(?:^|[^\w$.])nova\.has\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "has", wrap: (name) => name },
-		{ regex: /(?:^|[^\w$.])(?:nova\.)?surface\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "surface", wrap: (p) => p },
-		{ regex: /(?:^|[^\w$.])(?:nova\.)?snap\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "snap", wrap: (q) => `"${q}"` },
-	];
-	for (const item of namedCalls) {
-		while ((match = item.regex.exec(trimmed)) !== null) {
-			addOp(item.tool, item.wrap(match[1]));
-		}
-	}
-
-	if (/nova\.speculate\s*\(/.test(trimmed)) {
-		addOp("speculate", "(branch foam)");
-	}
-
-	return ops;
-}
+export { measureWidth, hardTruncate, clampLine };
 
 function formatDiffRows(diff, theme, maxShown = 6) {
 	if (!diff || !Array.isArray(diff.lines) || diff.lines.length === 0) return [];
@@ -237,7 +124,7 @@ function detectResultHost(options, ctxOrArgs) {
 	return "pi";
 }
 
-export function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs) {
+function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs) {
 	if (isTheme(themeOrCtx)) {
 		const opts = isObject(options) ? options : {};
 		const context = contextFrom(opts, ctxOrArgs);
@@ -333,20 +220,21 @@ function operationsFromTrace(trace) {
 		.filter(Boolean);
 }
 
+// The call slot is always empty: the result card owns the whole lifecycle in both hosts.
+const EMPTY_CALL = { render: () => [], invalidate() {} };
+
 export function renderSupernovaCall(a, b, c) {
 	const { context, options } = normalizeCallRenderArgs(a, b, c);
-	const comp = context?.lastComponent instanceof SafeText ? context.lastComponent : new SafeText();
-	if (options) options.lastComponent = comp;
-	else if (context) context.lastComponent = comp;
-	comp.setText("");
-	return comp;
+	if (options) options.lastComponent = EMPTY_CALL;
+	else if (context) context.lastComponent = EMPTY_CALL;
+	return EMPTY_CALL;
 }
 
 const TOOL_COL = 7;
 const DURATION_COL = 6;
 const PREVIEW_LINES = 24;
 
-export function formatDuration(ms) {
+function formatDuration(ms) {
 	if (!Number.isFinite(ms) || ms < 0) return "";
 	if (ms < 1000) return `${Math.round(ms)}ms`;
 	if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
@@ -418,11 +306,8 @@ function formatOpRow(theme, op, width, isPartial, isError) {
 	return prefix.trimEnd();
 }
 
-function operationsFor(payload, context, args) {
-	const trace = payload?.trace || context?.state?.trace || [];
-	const traced = operationsFromTrace(trace);
-	if (traced.length > 0) return traced;
-	return extractOperationsFromCode(args?.code).map((op) => displayOperation(op.tool, op.target)).filter(Boolean);
+function operationsFor(payload, context) {
+	return operationsFromTrace(payload?.trace || context?.state?.trace || []);
 }
 
 function resultLines(value, maxLines) {
@@ -475,38 +360,34 @@ class UnifiedResultCard {
 	set(theme, model) {
 		this.theme = theme;
 		this.model = model;
-		this.frame = undefined;
+		this.cache = undefined;
 	}
 	invalidate() {
-		this.frame = undefined;
+		this.cache = undefined;
 	}
 	render(width = 80) {
 		const { theme, model } = this;
 		if (!theme || !model) return [];
+		if (this.cache?.width === width) return this.cache.lines;
+		const view = buildBodyLines(theme, Math.max(1, width - 4), model);
+		const header = novaStatusLine(theme, {
+			icon: model.isError ? "error" : model.isPartial ? "running" : undefined,
+			title: "nova",
+			description: describeCard(model, view.opCount),
+		});
 		// A program with no host calls has nothing to frame: one status line, no empty box.
-		const probe = buildBodyLines(theme, Math.max(1, width - 4), model);
-		if (probe.lines.length === 0) {
-			return [clampLine(novaStatusLine(theme, { icon: model.isError ? "error" : model.isPartial ? "running" : undefined, title: "nova", description: describeCard(model, 0) }), width)];
-		}
-		if (!this.frame) {
-			this.frame = novaFramedBlock(theme, (frameWidth) => {
-				const contentWidth = Math.max(1, frameWidth - 4);
-				const view = buildBodyLines(theme, contentWidth, model);
-				return {
-					header: novaStatusLine(theme, {
-						icon: model.isError ? "error" : model.isPartial ? "running" : undefined,
-						title: "nova",
-						description: describeCard(model, view.opCount),
-					}),
+		const lines = view.lines.length === 0
+			? [clampLine(header, width)]
+			: novaFramedBlock(theme, () => ({
+					header,
 					sections: [{ lines: view.lines }],
 					state: model.isError ? "error" : model.isPartial ? "pending" : "success",
 					// borderMuted is invisible on OMP's card background; dim matches the duration column.
 					borderColor: model.isError ? "error" : "dim",
-					width: frameWidth,
-				};
-			});
-		}
-		return this.frame.render(width);
+					width,
+				})).render(width);
+		this.cache = { width, lines };
+		return lines;
 	}
 }
 

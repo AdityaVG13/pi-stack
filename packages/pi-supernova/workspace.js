@@ -41,6 +41,20 @@ async function realpathNearest(target) {
   }
 }
 
+/** Workspace-relative path with "/" separators — the form every model-facing surface uses. */
+export function relativeSlash(root, absolute) {
+  return (path.relative(root, absolute) || absolute).split(path.sep).join("/");
+}
+
+const TEST_SEGMENTS = new Set(["test", "tests", "__tests__", "spec"]);
+
+/** One rule for "is this a test file" across snap, evidence, and outlines. */
+export function isTestPath(filePath) {
+  const segments = filePath.split(/[\\/]/);
+  const base = segments[segments.length - 1];
+  return segments.some((s) => TEST_SEGMENTS.has(s)) || /\.(test|spec)\./.test(base);
+}
+
 export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = false) {
   if (inputPath == null || !isString(inputPath) || !inputPath.trim()) {
     throw new Error(`${opName} requires path`);

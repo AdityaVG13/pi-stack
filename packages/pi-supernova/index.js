@@ -4,14 +4,9 @@ import { buildCatalog, searchCatalog, describeTool, mergeNativeToolDefinitions }
 import { loadConfig } from "./config.js";
 import { createHostBridge } from "./host-bridge.js";
 import { runGuestProgram, warmGuestWorker } from "./runtime.js";
-import {
-  extractOperationsFromCode,
-  renderSupernovaCall,
-  renderSupernovaResult,
-  SafeText,
-} from "./render.js";
+import { renderSupernovaCall, renderSupernovaResult } from "./render.js";
 
-export { extractOperationsFromCode, renderSupernovaCall, renderSupernovaResult, SafeText };
+export { renderSupernovaCall, renderSupernovaResult };
 
 // Sync only — never top-level await. Dynamic import of host/deps hung OMP plugin load.
 const require = createRequire(import.meta.url);
@@ -90,19 +85,6 @@ function successText(outcome, call) {
   const hint = outcome.undefinedReturn ? " (no return statement — add \`return\` to get a value)" : "";
   return `ok #${call} ${outcome.wallMs}ms${truncated}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
 }
-function unwrapStructuredResult(response, operation) {
-  if (response?.ok === false) {
-    throw new Error(response.value || response.error || `${operation} failed`);
-  }
-  const value = isObject(response) && "value" in response ? response.value : response;
-  if (!isString(value)) return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
-  }
-}
-
 const TOOL_DESCRIPTION = `Run one JavaScript program that composes host tools. Async body or arrow; \`return\` a small shaped value (compact literal, capped; strings raw; console.log is captured).
 
 Globals (async):
@@ -172,12 +154,6 @@ export default function piSupernova(pi) {
       names() {
         const cat = catalog.length ? catalog : refreshCatalog();
         return [...new Set([...cat.map((t) => t.name), ...bridge.executors.keys(), ...Object.keys(bridge.natives)])];
-      },
-      async surface(filePath) {
-        return unwrapStructuredResult(await bridge.call("surface", { path: filePath }), "surface");
-      },
-      async snap(query, targetPath) {
-        return unwrapStructuredResult(await bridge.call("snap", { query, path: targetPath }), "snap");
       },
     };
   }

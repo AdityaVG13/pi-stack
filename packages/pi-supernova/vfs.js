@@ -129,11 +129,6 @@ export class CausalVfs {
     this.cache.clear();
   }
 
-  clear() {
-    this.invalidateCache();
-    this.overlays.length = 0;
-  }
-
   getCacheSize() {
     return this.cache.size;
   }

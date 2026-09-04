@@ -1,14 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  extractOperationsFromCode,
   renderSupernovaCall,
   renderSupernovaResult,
-  SafeText,
   clampLine,
   hardTruncate,
   measureWidth,
-  wrapPlainToWidth,
   normalizeCallRenderArgs,
 } from "../render.js";
 import { stripVTControlCharacters } from "node:util";
@@ -53,59 +50,6 @@ function assertLinesFit(lines, width, label) {
 }
 
 describe("supernova UI rendering", () => {
-  it("extracts tool operations from JS code statically", () => {
-    const code = `
-      const f = await nova.call("read", { path: "package.json" });
-      const b = await nova.call("bash", { command: "git status" });
-      const hits = await nova.search("testing");
-      const d = await nova.describe("read");
-    `;
-    const ops = extractOperationsFromCode(code);
-    assert.equal(ops.length, 4);
-    assert.equal(ops[0].tool, "read");
-    assert.equal(ops[0].target, "package.json");
-    assert.equal(ops[1].tool, "bash");
-    assert.equal(ops[1].target, "git status");
-    assert.equal(ops[2].tool, "search");
-    assert.equal(ops[2].target, '"testing"');
-    assert.equal(ops[3].tool, "describe");
-    assert.equal(ops[3].target, "read");
-  });
-
-  it("renders canonical direct globals instead of a generic script row", () => {
-    const code = `
-      const text = await read("package.json");
-      await edit("a.js", "old", "new");
-      await bash("npm test");
-      return text.length;
-    `;
-    const ops = extractOperationsFromCode(code);
-    assert.deepEqual(ops.map((op) => op.tool), ["read", "edit", "bash"]);
-    const rendered = renderSupernovaResult(
-      { details: { trace: [], running: true } },
-      { expanded: false, isPartial: true },
-      mockTheme,
-      { state: {}, args: { code } },
-    ).render(160).join("\n");
-    assert.doesNotMatch(rendered, /script/);
-    assert.match(rendered, /package\.json/);
-    assert.match(rendered, /a\.js/);
-    assert.match(rendered, /npm test/);
-  });
-
-  it("extracts callMany operations", () => {
-    const code = `
-      await nova.callMany([
-        { name: "read", args: { path: "a.txt" } },
-        { name: "write", args: { path: "b.txt" } }
-      ]);
-    `;
-    const ops = extractOperationsFromCode(code);
-    assert.equal(ops.length, 2);
-    assert.equal(ops[0].tool, "read");
-    assert.equal(ops[1].tool, "write");
-  });
-
   it("keeps renderCall empty for both Pi and OMP so only the result slot is visible", () => {
     const args = { code: 'await read("package.json");' };
     const piContext = { args, state: { trace: [{ name: "read", args: { path: "package.json" } }] } };
@@ -332,8 +276,6 @@ describe("supernova UI rendering", () => {
       const out = clampLine(line, w);
       assert.ok(piVisibleWidth(out) <= w, `clampLine(${w}) => ${piVisibleWidth(out)}`);
       assert.ok(piVisibleWidth(hardTruncate(line, w)) <= w, `hardTruncate(${w})`);
-      const safe = new SafeText(`  ENOENT: ${"p".repeat(300)}`);
-      assertLinesFit(safe.render(w), w, `SafeText(${w})`);
     }
     // Exact prior crash shape at width 91 (synthetic path — same length class).
     const crash = `  ENOENT: no such file or directory, open '${LONG_ENOENT_PATH}'`;
@@ -342,9 +284,6 @@ describe("supernova UI rendering", () => {
     assert.ok(piVisibleWidth(fixed) <= 91);
     assert.notEqual(piVisibleWidth(fixed), 92);
     assert.equal(measureWidth("🚀"), 2);
-    const wrappedEmoji = wrapPlainToWidth("a🚀b", 1);
-    assert.deepEqual(wrappedEmoji, ["a", "…", "b"]);
-    assert.ok(wrappedEmoji.every((line) => measureWidth(line) <= 1));
   });
 
   it("renders diff card with added/removed stats and gutter matching Screenshot 2", () => {

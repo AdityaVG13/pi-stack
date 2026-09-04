@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { extractStructuralSurface } from "./surface.js";
 import { Frecency } from "./fuzzy.js";
+import { relativeSlash } from "./workspace.js";
 
 // In-process workspace index: the gitignore-aware file list comes from one
 // \`rg --files\` spawn and is then reused; file text, lowercase text, and the
@@ -29,7 +30,7 @@ export function declaredName(line) {
   return DEF_PATTERN.exec(String(line).trim())?.[2] ?? "";
 }
 
-export function isTextCandidate(filePath) {
+function isTextCandidate(filePath) {
   return !BINARY_EXT.has(path.extname(filePath).toLowerCase());
 }
 
@@ -187,13 +188,13 @@ export class WorkspaceIndex {
       return null;
     }
     if (text.includes("\0")) return null;
-    const created = { text, lower: text.toLowerCase(), mtimeMs: stat.mtimeMs, size: stat.size, ext: path.extname(filePath), surface: undefined, lines: undefined };
+    const created = { text, lower: text.toLowerCase(), mtimeMs: stat.mtimeMs, size: stat.size, ext: path.extname(filePath), surface: undefined, lines: undefined, spans: undefined };
     this.entries.set(filePath, created);
     return created;
   }
 
   static fromText(filePath, text) {
-    return { text, lower: text.toLowerCase(), ext: path.extname(filePath), surface: undefined, lines: undefined };
+    return { text, lower: text.toLowerCase(), ext: path.extname(filePath), surface: undefined, lines: undefined, spans: undefined };
   }
 
   /** Per-line raw text, lowercase text, declared identifier (or ""), and identifier tokens — computed once per entry. */
@@ -211,6 +212,25 @@ export class WorkspaceIndex {
     }
     entry.lines = { raw, lower, defNames, idents };
     return entry.lines;
+  }
+
+  /**
+   * Declaration spans [start, end] (1-based, inclusive) in file order, trailing blank lines trimmed.
+   * A span runs to the line before the next declaration; the file's leading header is not a span.
+   */
+  static spansOf(entry) {
+    if (entry.spans) return entry.spans;
+    const { items, lineCount } = WorkspaceIndex.surfaceOf(entry);
+    const { lower } = WorkspaceIndex.linesOf(entry);
+    const spans = [];
+    for (let i = 0; i < items.length; i++) {
+      const start = items[i].line;
+      let end = Math.min(i + 1 < items.length ? items[i + 1].line - 1 : lineCount, lineCount);
+      while (end > start && lower[end - 1] === "") end--;
+      spans.push({ start, end, name: items[i].name, kind: items[i].kind, isExport: items[i].isExport === true });
+    }
+    entry.spans = spans;
+    return spans;
   }
 
   static surfaceOf(entry) {
@@ -243,7 +263,7 @@ export class WorkspaceIndex {
       const e = this.entry(filePath);
       if (!e || !regex.test(e.text)) continue;
       const { raw, defNames } = WorkspaceIndex.linesOf(e);
-      const rel = (path.relative(root, filePath) || filePath).split(path.sep).join("/");
+      const rel = relativeSlash(root, filePath);
       for (let i = 0; i < raw.length; i++) {
         if (regex.test(raw[i])) out.push({ rel, line: i + 1, text: raw[i], def: defNames[i] !== "" && nameRegex.test(defNames[i]) });
       }

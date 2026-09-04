@@ -316,6 +316,23 @@ describe("guest runtime", () => {
     assert.equal(calls.length, 1);
   });
 
+  it("nova.speculate rolls a failed branch back and commits a successful one", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "speculate-e2e-"));
+    let supernovaTool;
+    const pi = { getAllTools: () => [], registerTool(tool) { if (tool.name === "supernova") supernovaTool = tool; }, registerCommand() {}, on() {} };
+    piSupernova(pi);
+    const run = async (code) => (await supernovaTool.execute("spec", { code }, new AbortController().signal, undefined, { cwd: tmpDir, state: {} })).details;
+    try {
+      const failed = await run('const r = await nova.speculate(async () => { await write("a.txt", "x"); throw new Error("nope"); }); let exists = true; try { await read("a.txt"); } catch { exists = false; } return { ok: r.ok, error: r.error, exists };');
+      assert.deepEqual(failed.result, { ok: false, error: "nope", exists: false });
+      const committed = await run('const r = await nova.speculate(async () => { await write("b.txt", "y"); return 1; }); return { ok: r.ok, value: r.value, text: await read("b.txt") };');
+      assert.deepEqual(committed.result, { ok: true, value: 1, text: "y" });
+      assert.equal(await fs.readFile(path.join(tmpDir, "b.txt"), "utf8"), "y");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("turns guest ReferenceError into a tool error, not a crash", async () => {
     const outcome = await runGuestProgram({
       code: `return totallyUndefinedGlobal.foo;`,

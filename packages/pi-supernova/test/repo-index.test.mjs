@@ -52,7 +52,7 @@ describe("workspace index", () => {
     frecency.record("test/render.test.mjs");
     frecency.record("test/render.test.mjs");
     frecency.record("test/render.test.mjs");
-    assert.equal(rankPaths("render", paths, { frecency })[0].path, "test/render.test.mjs", "recently opened files rank first");
+    assert.equal(rankPaths("render", paths, { frecency, mtimeOf: () => 0 })[0].path, "test/render.test.mjs", "recently opened files rank first");
     assert.equal(rankPaths("render", paths, { modified: new Set(["src/util/render-measure.js"]) })[0].path, "src/util/render-measure.js", "git-modified boost");
     assert.deepEqual(rankPaths("zzqq", paths), []);
   });

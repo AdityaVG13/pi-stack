@@ -49,9 +49,9 @@ async function fixtureBridge() {
 
 describe("zero-token evidence selection", () => {
   it("routes identifier questions to the graph view and plain questions to the hierarchy", () => {
-    assert.equal(profileQuery("how does verifySession work", "/r").route, "relational");
-    assert.equal(profileQuery("who calls verifySession", "/r").answerType, "usage");
-    assert.equal(profileQuery("where is the request handled", "/r").route, "local");
+    assert.equal(profileQuery("how does verifySession work").route, "relational");
+    assert.equal(profileQuery("who calls verifySession").answerType, "usage");
+    assert.equal(profileQuery("where is the request handled").route, "local");
     assert.equal(stem("terminated"), stem("terminate"));
   });
 

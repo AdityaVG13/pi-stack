@@ -120,7 +120,7 @@ export function smartCase(query) {
 }
 
 /** fff distance penalty: directory hops from the current file's directory, floor −20. */
-export function distancePenalty(currentDir, candidateDir) {
+function distancePenalty(currentDir, candidateDir) {
   if (!currentDir) return 0;
   const a = currentDir.split("/").filter(Boolean);
   const b = candidateDir.split("/").filter(Boolean);
@@ -132,7 +132,7 @@ export function distancePenalty(currentDir, candidateDir) {
 
 /**
  * Rank file paths for a query the fff way. paths are workspace-relative "/"-joined.
- * ctx: { frecency: Frecency, mtimes: Map(path→sec), modified: Set(path), currentFile?: string, maxTypos }
+ * ctx: { frecency: Frecency, mtimeOf: (path) => sec, modified: Set(path), currentFile?: string, maxTypos }
  */
 export function rankPaths(query, paths, ctx = {}) {
   const parts = query.trim().split(/\s+/).filter((p) => p.length >= 2);
@@ -176,7 +176,7 @@ function filenameBonus(base, rel, filenameStart, first, needle) {
 
 /** fff: frecency boost base·f/100 and +15% for git-modified files. */
 function contextBoost(base, rel, ctx) {
-  const frecency = ctx.frecency ? ctx.frecency.score(rel, ctx.mtimes?.get(rel)) : 0;
+  const frecency = ctx.frecency ? ctx.frecency.score(rel, ctx.mtimeOf?.(rel)) : 0;
   const gitBoost = ctx.modified?.has(rel) ? Math.floor((base * 15) / 100) : 0;
   return Math.floor((base * frecency) / 100) + gitBoost;
 }

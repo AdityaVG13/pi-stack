@@ -120,33 +120,6 @@ export function clampLine(line, width) {
 }
 
 /**
- * Wrap plain text to width, preferring breaks after `/` or space so paths stay readable.
- * Every returned chunk is ≤ width (no ellipsis — caller clamps if needed).
- */
-export function wrapPlainToWidth(plain, width) {
-	const w = Math.max(1, width | 0);
-	const text = String(plain ?? "");
-	if (text.length === 0) return [""];
-	if (measureWidth(text) <= w) return [text];
-	const lines = [];
-	let i = 0;
-	while (i < text.length) {
-		const { end, lastBreak } = takeChunk(text, i, w);
-		if (end === i) {
-			const ch = text.codePointAt(i) > 0xffff ? text.slice(i, i + 2) : text[i];
-			lines.push(hardTruncate(ch, w));
-			i += ch.length;
-			continue;
-		}
-		let cut = end;
-		if (end < text.length && lastBreak > i + Math.floor(w * 0.35)) cut = lastBreak;
-		lines.push(text.slice(i, cut));
-		i = cut;
-	}
-	return lines;
-}
-
-/**
  * Fit a filesystem path into `budget` columns, keeping the basename visible.
  */
 export function fitPath(pathText, budget) {
@@ -160,4 +133,3 @@ export function fitPath(pathText, budget) {
 	return hardTruncate(base, w);
 }
 
-export { ELLIPSIS };

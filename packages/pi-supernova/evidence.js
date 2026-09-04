@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { WorkspaceIndex } from "./repo-index.js";
 import { tokenizeQuery, scorePathTopology } from "./snap.js";
+import { isTestPath } from "./workspace.js";
 
 // Zero-token evidence selection over source code, after Zero-Mem (arXiv:2607.29377).
 // The codebase is the interaction history H; declared spans are the context units;
@@ -21,7 +22,7 @@ import { tokenizeQuery, scorePathTopology } from "./snap.js";
 //   eq.14 C(q) = Dedup(M ∪ Ng(M) ∪ Nh(M))    closure: bridges + neighbours
 //   eq.15 R(q) = Rank_ϕ(Filter(C, ϕ))         deterministic calibration
 
-export const EVIDENCE_DEFAULTS = {
+const EVIDENCE_DEFAULTS = {
   k: 5,               // paper: Top-5 within 0.65 F1 of Top-10 at half the candidates
   rho: 0.7,           // primary-view weight
   gamma: 0.85,        // PPR damping
@@ -36,12 +37,6 @@ const IDENT = /[A-Za-z_$][\w$]*/g;
 const RELATION_WORDS = new Set(["calls", "caller", "callers", "uses", "usages", "used", "using", "imports", "imported", "depends", "references", "referenced", "invokes", "invoked"]);
 const HUB_FRACTION = 0.25;
 const HUB_MIN = 8;
-const TYPE_CUES = [
-  ["test", /\b(test|tests|spec)\b/],
-  ["doc", /\b(doc|docs|readme|documentation)\b/],
-  ["config", /\b(config|configuration|settings|option|options|default|defaults)\b/],
-  ["type", /\b(type|types|interface|schema|struct)\b/],
-];
 
 /** Light suffix stripping so "terminated" ⊇ "terminat" matches "terminate"; deterministic, no dictionary. */
 export function stem(token) {
@@ -53,23 +48,20 @@ function splitIdentifier(name) {
   return name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 }
 
-/** eq.6 — query profile from the query text and the call's boundary. */
-export function profileQuery(query, root) {
+/** eq.6 — query profile: subjects, keywords/stems, answer type, test/doc flags, route. */
+export function profileQuery(query) {
   const { tokens, wantsTest, wantsType, wantsDoc } = tokenizeQuery(query);
   const words = query.match(IDENT) || [];
   // Subjects are identifier-shaped words (camelCase / snake_case): they anchor the graph view.
   const subjects = words.filter((w) => /[a-z][A-Z]|_/.test(w));
   const usage = words.some((w) => RELATION_WORDS.has(w.toLowerCase()));
   const relational = usage || subjects.length > 0;
-  let answerType = usage ? "usage" : "definition";
-  for (const [type, re] of TYPE_CUES) if (re.test(query.toLowerCase())) answerType = type;
   return {
     subjects: [...new Set(subjects)],
     keywords: tokens,
     stems: [...new Set(tokens.map(stem))],
-    answerType,
+    answerType: usage ? "usage" : "definition",
     flags: { wantsTest, wantsType, wantsDoc },
-    boundary: root,
     route: relational ? "relational" : "local", // eq.7
   };
 }
@@ -77,21 +69,13 @@ export function profileQuery(query, root) {
 // ---- substrate: spans (context units) from the structural surface ----
 
 function spansOf(entry, filePath, maxSpanLines) {
-  const { items, lineCount } = WorkspaceIndex.surfaceOf(entry);
   const lines = WorkspaceIndex.linesOf(entry);
-  const lower = lines.lower;
-  if (items.length === 0) {
-    return [{ id: filePath + ":1", path: filePath, start: 1, end: Math.min(lineCount, maxSpanLines), name: path.basename(filePath), kind: "file", entry, lower, lines }];
+  const base = { path: filePath, entry, lower: lines.lower, lines };
+  const declared = WorkspaceIndex.spansOf(entry);
+  if (declared.length === 0) {
+    return [{ ...base, id: filePath + ":1", start: 1, end: Math.min(lines.raw.length, maxSpanLines), name: path.basename(filePath), kind: "file" }];
   }
-  const spans = [];
-  for (let i = 0; i < items.length; i++) {
-    const start = items[i].line;
-    const nextStart = i + 1 < items.length ? items[i + 1].line : lineCount + 1;
-    let end = Math.min(nextStart - 1, start + maxSpanLines - 1, lineCount);
-    while (end > start && lower[end - 1] === "") end--;
-    spans.push({ id: filePath + ":" + start, path: filePath, start, end, name: items[i].name, kind: items[i].kind, isExport: items[i].isExport === true, entry, lower, lines, index: i });
-  }
-  return spans;
+  return declared.map((s, i) => ({ ...base, ...s, id: filePath + ":" + s.start, end: Math.min(s.end, s.start + maxSpanLines - 1), index: i }));
 }
 
 function spanLines(span) {
@@ -403,7 +387,7 @@ function render(spans, picks, fused, opts, root) {
  */
 export async function selectEvidence({ query, root, searchDir, index, overlayText = () => undefined, options = {} }) {
   const opts = { ...EVIDENCE_DEFAULTS, ...options };
-  const profile = profileQuery(query, root);
+  const profile = profileQuery(query);
   if (profile.keywords.length === 0) throw new Error("evidence requires at least one searchable concept keyword");
   const files = await index.files(searchDir || root);
   if (files.length === 0) throw new Error(`no files found to search in ${searchDir || root}`);
@@ -432,9 +416,8 @@ export async function selectEvidence({ query, root, searchDir, index, overlayTex
   const usage = profile.answerType === "usage";
   const admissible = spans.map((s, i) => i).filter((i) => {
     const p = spans[i].path;
-    const isTestSpan = /(^|[\\/])(test|tests)[\\/]|\.(test|spec)\./.test(p);
     const isDoc = /\.(md|mdx|rst|txt)$/i.test(p);
-    return spans[i].support > 0 && (profile.flags.wantsTest || !isTestSpan) && (profile.flags.wantsDoc || !isDoc);
+    return spans[i].support > 0 && (profile.flags.wantsTest || !isTestPath(p)) && (profile.flags.wantsDoc || !isDoc);
   });
   for (const i of admissible) {
     if (usage && profile.subjects.includes(spans[i].name)) fused[i] *= 0.5; // a usage question is answered by callers

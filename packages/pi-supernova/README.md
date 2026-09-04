@@ -46,7 +46,7 @@ async () => {
 }
 ```
 
-Globals: `nova` / `tools`, `parallel`, `pipeline`, `console`, plus shorthand `read` (path or path array), `write`, `edit`, `patch`, `evidence`, `surface`, `snap`, `bash`, and `exec`.
+Globals: `nova`, `parallel`, `pipeline`, `console`, plus shorthand `read` (path or path array), `write`, `edit`, `patch`, `evidence`, `surface`, `snap`, `bash`, and `exec`.
 
 Read discipline that keeps context small: `evidence(question)` across the repo, or `read(path, {about: question})` for one file (full structure, only relevant bodies expanded, ~65% fewer tokens than the file) → `read(path, offset, limit)` only for the lines you will edit.
 

@@ -94,15 +94,6 @@ export function warmGuestWorker(config) {
   return handle.ready;
 }
 
-/** Terminate every guest worker (tests, shutdown). */
-export async function shutdownGuestWorkers() {
-  if (!idleWorker) return;
-  const handle = idleWorker;
-  idleWorker = null;
-  handle.dead = true;
-  await handle.worker.terminate();
-}
-
 const RPC_METHODS = {
   call: (nova, args) => {
     if (!isFunction(nova?.call)) throw new Error("nova.call unavailable");
@@ -122,17 +113,9 @@ const RPC_METHODS = {
     if (!isFunction(nova?.describe)) throw new Error("nova.describe unavailable");
     return nova.describe(args[0]);
   },
-  surface: (nova, args) => {
-    if (isFunction(nova?.surface)) return nova.surface(args[0]);
-    return nova.call("surface", { path: args[0] });
-  },
-  snap: (nova, args) => {
-    if (isFunction(nova?.snap)) return nova.snap(args[0], args[1]);
-    return nova.call("snap", { query: args[0], path: args[1] });
-  },
-  speculateBegin: (nova) => (isFunction(nova?.speculateBegin) ? nova.speculateBegin() : undefined),
-  speculateCommit: (nova) => (isFunction(nova?.speculateCommit) ? nova.speculateCommit() : undefined),
-  speculateRollback: (nova) => (isFunction(nova?.speculateRollback) ? nova.speculateRollback() : undefined),
+  speculateBegin: (nova) => nova?.speculateBegin?.(),
+  speculateCommit: (nova) => nova?.speculateCommit?.(),
+  speculateRollback: (nova) => nova?.speculateRollback?.(),
 };
 
 async function dispatchRpc(nova, method, args) {

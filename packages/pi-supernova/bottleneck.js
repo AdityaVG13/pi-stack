@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { isString, isObject } from "./decode.js";
 import { truncateChars, formatValue } from "./format.js";
 
-export function serializeBounded(value, maxChars, label = "value") {
+function serializeBounded(value, maxChars, label = "value") {
   let serialized;
   try {
     serialized = isString(value) ? value : JSON.stringify(value);

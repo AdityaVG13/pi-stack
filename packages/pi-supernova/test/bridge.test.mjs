@@ -392,30 +392,4 @@ describe("host bridge and adapters", () => {
     assert.match(sDetails.path, /vfs\.js$/);
   });
 
-  it("supports polymorphic edit with unified diff patch directly", async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "bridge-poly-edit-"));
-    try {
-      const filePath = path.join(tmpDir, "poly.txt");
-      await fs.writeFile(filePath, "hello old world\n", "utf8");
-      const bridge = createHostBridge({
-        pi: null,
-        config,
-        getCwd: () => tmpDir,
-      });
-
-      const patchDiff = `--- a/poly.txt
-+++ b/poly.txt
-@@ -1,1 +1,1 @@
--hello old world
-+hello polymorphic world`;
-
-      const editRes = await bridge.call("edit", { path: "poly.txt", oldText: patchDiff });
-      assert.equal(editRes.ok, true);
-      const readRes = await bridge.call("read", { path: "poly.txt" });
-      assert.equal(readRes.value, "hello polymorphic world\n");
-    } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true });
-    }
-  });
-
 });

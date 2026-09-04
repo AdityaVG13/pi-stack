@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.0.15] - 2026-09-04
+
+### Removed
+
+- Dead code (−638 lines net): the static `extractOperationsFromCode` source-regex preview (the live trace superseded it), `SafeText`/`fitOutputLines`/`wrapPlainToWidth` (the call slot is always empty), `shutdownGuestWorkers`, `decode.js` helpers nobody imported, `vfs.clear`, the `tools` alias for `nova`, unused bridge methods (`hasExecutor`, `clearVfsCache`, `isMutating`), `test/verify-width-crash.mjs`, and unused status-header knobs (`spinnerFrame`, `iconOverride`).
+- `edit` no longer accepts a unified diff (`patch`/`oldText` starting with `@@`); `apply_patch` / `patch()` is the one way to apply a diff.
+- `nova.surface`/`nova.snap` host-side unwrapping and their dedicated RPC methods: both route through `nova.call` and the guest unwraps once.
+
+### Changed
+
+- One `relativeSlash`, one `isTestPath`, one declaration-span computation (`WorkspaceIndex.spansOf`, cached per file) instead of three copies each; search adapters (fuzzy find, grep, glob listing) live in `search.js`; internal-only names are no longer exported.
+- Render computes the card body once per width (was twice); fuzzy find stats only matched paths (was every file); results shorter than a collapsible run skip ledger hashing.
+
+### Fixed
+
+- `nova.speculate` end-to-end (an end-to-end test now covers rollback and commit through the worker RPC).
+
 ## [0.0.14] - 2026-09-04
 
 ### Added

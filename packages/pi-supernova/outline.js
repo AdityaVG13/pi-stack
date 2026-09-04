@@ -7,20 +7,8 @@ import { stem } from "./evidence.js";
 // spans that match the question, within a character budget. The model reads a 600-line file
 // in ~15% of its tokens and knows the exact read(path, offset, limit) to issue for anything folded.
 
-export const OUTLINE_DEFAULTS = { maxChars: 8000, maxExpanded: 6, headerLines: 30, maxRefs: 5, references: null };
+const OUTLINE_DEFAULTS = { maxChars: 8000, maxExpanded: 6, headerLines: 30, maxRefs: 5, references: null };
 
-function spansFor(entry, lineCount) {
-  const { items } = WorkspaceIndex.surfaceOf(entry);
-  const { lower, raw } = WorkspaceIndex.linesOf(entry);
-  const spans = [];
-  for (let i = 0; i < items.length; i++) {
-    const start = items[i].line;
-    let end = Math.min(i + 1 < items.length ? items[i + 1].line - 1 : lineCount, lineCount);
-    while (end > start && lower[end - 1] === "") end--;
-    spans.push({ start, end, name: items[i].name, kind: items[i].kind, signature: raw[start - 1].trim() });
-  }
-  return spans;
-}
 
 function relevance(span, lower, stems) {
   if (stems.length === 0) return 0;
@@ -74,7 +62,7 @@ export function outlineFile(entry, relPath, about, options = {}) {
   const opts = { ...OUTLINE_DEFAULTS, ...options };
   const { raw, lower } = WorkspaceIndex.linesOf(entry);
   const lineCount = raw.length;
-  const spans = spansFor(entry, lineCount);
+  const spans = WorkspaceIndex.spansOf(entry).map((s) => ({ ...s, signature: raw[s.start - 1].trim() }));
   if (spans.length === 0) return null; // no structure: caller falls back to plain text
   const stems = [...new Set(tokenizeQuery(about || "").tokens.map(stem))];
   const expanded = chooseExpanded(spans, lower, stems, raw, opts);

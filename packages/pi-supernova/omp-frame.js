@@ -43,30 +43,15 @@ function borderPaint(theme, state, borderColor) {
 	return (text) => text;
 }
 
-function resolveStatusIcon({ icon, iconOverride, state }) {
-	if (iconOverride !== undefined) return undefined;
-	if (icon !== undefined) return icon;
-	return state === "error" ? "error" : undefined;
-}
+const STATUS_PREFIX = { error: ["error", "✗ "], running: ["dim", "… "] };
 
-const STATUS_GLYPH = { error: "✗ ", running: "… " };
-const STATUS_COLOR = { error: "error", running: "dim" };
-
-function statusPrefix(theme, resolvedIcon, iconOverride, spinnerFrame) {
-	if (iconOverride) return `${iconOverride} `;
-	const key = resolvedIcon === "error" ? "error" : resolvedIcon === "running" || spinnerFrame ? "running" : undefined;
-	const glyph = STATUS_GLYPH[key];
-	if (!glyph) return "";
-	return theme?.fg ? theme.fg(STATUS_COLOR[key], glyph) : glyph;
-}
-
-function statusHeader(theme, { title, description, state, spinnerFrame, icon, iconOverride }) {
-	const resolvedIcon = resolveStatusIcon({ icon, iconOverride, state });
+function statusHeader(theme, { title, description, state, icon }) {
+	const resolved = icon ?? (state === "error" ? "error" : undefined);
+	const prefixSpec = STATUS_PREFIX[resolved];
+	const prefix = prefixSpec ? (theme?.fg ? theme.fg(prefixSpec[0], prefixSpec[1]) : prefixSpec[1]) : "";
 	const titleText = theme?.fg ? theme.fg("accent", title) : title;
 	const descText = description ? (theme?.fg ? theme.fg("muted", description) : description) : "";
-	const prefix = statusPrefix(theme, resolvedIcon, iconOverride, spinnerFrame);
-	if (!descText) return `${prefix}${titleText}`;
-	return `${prefix}${titleText}: ${descText}`;
+	return descText ? `${prefix}${titleText}: ${descText}` : `${prefix}${titleText}`;
 }
 
 function padLine(line, width, bgFn) {

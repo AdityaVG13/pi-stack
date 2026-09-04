@@ -14,7 +14,7 @@ const MAX_CANDIDATES = 8;
 const DEFAULT_WINDOW = 40;
 const MAX_STORED_LINES = 200_000;
 
-export function hashLine(line) {
+function hashLine(line) {
   let h = 0x811c9dc5;
   for (let i = 0; i < line.length; i++) {
     h ^= line.charCodeAt(i);
@@ -128,6 +128,11 @@ export class SeenLedger {
    */
   dedupe(text, call) {
     const lines = text.split("\n");
+    if (lines.length < MIN_RUN) {
+      this.stats.returnedChars += text.length;
+      this.remember(call, lines);
+      return text;
+    }
     const hashes = new Uint32Array(lines.length);
     for (let i = 0; i < lines.length; i++) hashes[i] = hashLine(lines[i]);
     const out = [];

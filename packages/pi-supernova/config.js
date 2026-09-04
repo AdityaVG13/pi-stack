@@ -82,4 +82,3 @@ export function loadConfig() {
   return mergeConfig(packageDefaults(), user ?? null);
 }
 
-export { userConfigPath, KNOWN_KEYS };

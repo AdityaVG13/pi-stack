@@ -10,7 +10,7 @@ const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const compiledCache = new Map();
 const COMPILED_CACHE_MAX = 256;
 const PARAMS = [
-  "nova", "tools", "console", "parallel", "pipeline",
+  "nova", "console", "parallel", "pipeline",
   "read", "write", "edit", "patch", "surface", "snap", "evidence", "bash", "exec", "speculate",
 ];
 // V8 and JSC both place the body on the line after the synthesized header.
@@ -228,9 +228,9 @@ function buildGuestApi(available) {
         return { ok: false, committed: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
-    surface: async (filePath) => unwrapJsonValue(await rpc("surface", [filePath])),
+    surface: async (filePath) => unwrapJsonValue(await rpc("call", ["surface", { path: filePath }])),
     evidence: async (query, opts) => unwrapJsonValue(await rpc("call", ["evidence", { query, ...opts }])),
-    snap: async (query, targetPath) => unwrapJsonValue(await rpc("snap", [query, targetPath])),
+    snap: async (query, targetPath) => unwrapJsonValue(await rpc("call", ["snap", { query, path: targetPath }])),
     has: (name) => availableSet.has(name),
   };
 
@@ -314,7 +314,7 @@ async function handleRun(msg) {
   const scopedConsole = makeConsole(runId, limits);
   try {
     const value = await compiled(
-      api.nova, api.nova, scopedConsole, runParallel, runPipeline,
+      api.nova, scopedConsole, runParallel, runPipeline,
       api.read, api.write, api.edit, api.patch, api.surface, api.snap, api.evidence, api.bash, api.exec, api.speculate,
     );
     if (runId !== activeRunId) return;

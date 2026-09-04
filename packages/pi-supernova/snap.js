@@ -2,6 +2,7 @@
 import * as path from "node:path";
 import { isString } from "./decode.js";
 import { WorkspaceIndex } from "./repo-index.js";
+import { isTestPath } from "./workspace.js";
 
 const STOP_WORDS = new Set([
   "the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "of", "with",
@@ -135,12 +136,6 @@ function mergeGrepHits(candidates, grepHits) {
     if (candidates.length >= 15) break;
   }
   return candidates;
-}
-
-function isTestPath(filePath) {
-  const segments = filePath.split(path.sep);
-  const base = segments[segments.length - 1];
-  return segments.includes("test") || segments.includes("tests") || base.includes(".test.") || base.includes(".spec.");
 }
 
 function expandCandidatesWithGrep(candidates, fileList, tokens, flags, index) {
