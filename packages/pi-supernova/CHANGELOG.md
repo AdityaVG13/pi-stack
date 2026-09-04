@@ -9,6 +9,9 @@
 - Native adapters are now included in `nova.search` / `nova.describe` with schemas matching the callable adapter, even when the host catalog omits parameters or the adapter name.
 - `snap` discovers hidden paths outside `.git` and sees files written earlier in the same speculative invocation.
 - Top-level `snap()` and `surface()` helpers return structured objects, enabling an immediate `edit(hit.path, ...)` handoff.
+- Live command activity remains visible across partial updates and final merged cards.
+- Collapsed cards show a compact, correctly labeled call ledger with paths and change counts; diff hunks are bounded and shown only when expanded.
+- Multi-replacement edits report only the changed hunks instead of presenting the entire file as replaced.
 
 ## [0.0.4] - 2026-09-03
 

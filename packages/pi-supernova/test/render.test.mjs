@@ -66,7 +66,7 @@ describe("supernova UI rendering", () => {
     assert.equal(ops[0].target, "package.json");
     assert.equal(ops[1].tool, "bash");
     assert.equal(ops[1].target, "git status");
-    assert.equal(ops[2].tool, "read");
+    assert.equal(ops[2].tool, "search");
     assert.equal(ops[2].target, '"testing"');
   });
 
@@ -216,11 +216,11 @@ describe("supernova UI rendering", () => {
     const comp = renderSupernovaCall(args, mockTheme, context);
     const rendered = comp.render(91).join("\n");
     assert.match(rendered, /read/);
-    assert.match(rendered, /edit/);
+    assert.match(rendered, /patch/);
     assert.match(rendered, /foo\.txt/);
   });
 
-  it("keeps collapsed result completely quiet when no file edits occurred", () => {
+  it("keeps a compact completion card when no file edits occurred", () => {
     const result = {
       content: [{ type: "text", text: "ok" }],
       details: {
@@ -230,7 +230,10 @@ describe("supernova UI rendering", () => {
       },
     };
     const comp = renderSupernovaResult(result, { expanded: false, isPartial: false }, mockTheme, {});
-    assert.equal(comp.render(91).join("\n"), "");
+    const collapsed = comp.render(91).join("\n");
+    assert.match(collapsed, /nova/);
+    assert.match(collapsed, /complete/);
+    assert.doesNotMatch(collapsed, /lengths/);
 
     const compExp = renderSupernovaResult(result, { expanded: true, isPartial: false }, mockTheme, {});
     const textExp = compExp.render(91).join("\n");
@@ -275,7 +278,7 @@ describe("supernova UI rendering", () => {
     };
     const comp = renderSupernovaResult(result, { expanded: false, isPartial: false }, mockTheme, {});
     const rendered = comp.render(91).join("\n");
-    assert.match(rendered, /✗ error/);
+    assert.match(rendered, /nova/);
     assert.match(rendered, /read path escapes workspace/);
   });
 
@@ -372,12 +375,18 @@ describe("supernova UI rendering", () => {
     const lines = comp.render(140);
     assertLinesFit(lines, 140, "diff card");
     const rendered = lines.join("\n");
-    assert.match(rendered, /✎/);
-    assert.match(rendered, /Edit/);
+    assert.match(rendered, /nova.*1 call/);
+    assert.match(rendered, /edit/);
     assert.match(rendered, /host-bridge\.js/);
     assert.match(rendered, /\+2/);
     assert.match(rendered, /-1/);
-    assert.match(rendered, /143/);
+    assert.doesNotMatch(rendered, /resolveWorkspacePath|143/);
+
+    const expanded = renderSupernovaResult(result, { expanded: true, isPartial: false }, plainTheme, {}).render(140).join("\n");
+    assert.match(expanded, /── changes ──/);
+    assert.match(expanded, /✎/);
+    assert.match(expanded, /143/);
+
     // Stats survive narrow width because they precede the path.
     const narrow = comp.render(40).join("\n");
     assert.match(narrow, /\+2/);
@@ -435,7 +444,9 @@ describe("supernova UI rendering", () => {
     const textCollapsed = collapsedLines.join("\n");
     assert.match(textCollapsed, /file1\.ts/);
     assert.match(textCollapsed, /file2\.ts/);
-    assert.match(textCollapsed, /… 2 more file edits \(press Enter to expand\)/);
+    assert.match(textCollapsed, /file3\.ts/);
+    assert.match(textCollapsed, /file4\.ts/);
+    assert.doesNotMatch(textCollapsed, /added|── changes ──/);
 
     const compExpanded = renderSupernovaResult(result, { expanded: true, isPartial: false }, plainTheme, {});
     const expandedLines = compExpanded.render(140);
@@ -445,7 +456,32 @@ describe("supernova UI rendering", () => {
     assert.match(textExpanded, /file2\.ts/);
     assert.match(textExpanded, /file3\.ts/);
     assert.match(textExpanded, /file4\.ts/);
-    assert.doesNotMatch(textExpanded, /press Enter to expand/);
+    assert.match(textExpanded, /── changes ──/);
+  });
+
+  it("keeps partial execution visible when live trace updates replace the call card", () => {
+    const result = {
+      content: [{ type: "text", text: "" }],
+      details: { trace: [{ name: "snap", args: { query: "auth token", path: "src" } }], running: true },
+    };
+    const omp = renderSupernovaResult(
+      result,
+      { expanded: false, isPartial: true },
+      plainTheme,
+      { code: `await snap("auth token", "src");` },
+    ).render(80).join("\n");
+    assert.match(omp, /nova: 1 call · running/);
+    assert.match(omp, /snap/);
+    assert.match(omp, /"auth token" → src/);
+
+    const pi = renderSupernovaResult(
+      result,
+      { expanded: false, isPartial: true },
+      plainTheme,
+      { state: {}, args: { code: `await snap("auth token", "src");` } },
+    ).render(80).join("\n");
+    assert.match(pi, /nova · 1 call · running/);
+    assert.match(pi, /snap/);
   });
 
 });

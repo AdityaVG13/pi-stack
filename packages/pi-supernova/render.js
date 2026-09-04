@@ -185,18 +185,18 @@ export function extractOperationsFromCode(code) {
 
 	const namedCalls = [
 		{ regex: /(?:^|[^\w$.])(?:nova\.)?read\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "read", wrap: (p) => p },
-		{ regex: /(?:^|[^\w$.])(?:nova\.)?write\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "edit", wrap: (p) => p },
+		{ regex: /(?:^|[^\w$.])(?:nova\.)?write\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "write", wrap: (p) => p },
 		{ regex: /(?:^|[^\w$.])(?:nova\.)?edit\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "edit", wrap: (p) => p },
-		{ regex: /(?:^|[^\w$.])(?:nova\.)?patch\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "edit", wrap: (p) => p },
+		{ regex: /(?:^|[^\w$.])(?:nova\.)?patch\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "patch", wrap: (p) => p },
 		{
 			regex: /(?:^|[^\w$.])(?:nova\.)?bash\s*\(\s*["'`]([^"'`]+)["'`]/gm,
 			tool: "bash",
 			wrap: (c) => (c.length > 32 ? c.slice(0, 29) + "…" : c),
 		},
-		{ regex: /(?:^|[^\w$.])(?:nova\.)?exec\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "bash", wrap: (c) => c },
-		{ regex: /(?:nova\.)?search\s*\(\s*["'`]([^"'`]+)["'`]/g, tool: "read", wrap: (q) => `"${q}"` },
-		{ regex: /(?:nova\.)?surface\s*\(\s*["'`]([^"'`]+)["'`]/g, tool: "read", wrap: (p) => p },
-		{ regex: /(?:nova\.)?snap\s*\(\s*["'`]([^"'`]+)["'`]/g, tool: "read", wrap: (q) => `"${q}"` },
+		{ regex: /(?:^|[^\w$.])(?:nova\.)?exec\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "exec", wrap: (c) => c },
+		{ regex: /(?:nova\.)?search\s*\(\s*["'`]([^"'`]+)["'`]/g, tool: "search", wrap: (q) => `"${q}"` },
+		{ regex: /(?:nova\.)?surface\s*\(\s*["'`]([^"'`]+)["'`]/g, tool: "surface", wrap: (p) => p },
+		{ regex: /(?:nova\.)?snap\s*\(\s*["'`]([^"'`]+)["'`]/g, tool: "snap", wrap: (q) => `"${q}"` },
 	];
 	for (const item of namedCalls) {
 		while ((match = item.regex.exec(trimmed)) !== null) {
@@ -238,7 +238,7 @@ export function renderDiffBox(diff, theme, width = 60) {
 	const divWidth = Math.min(w, Math.max(20, Math.min(70, w)));
 	const divider = theme.fg("borderMuted", "─".repeat(divWidth));
 
-	const maxShown = 8;
+	const maxShown = 6;
 	const shownLines = diff.lines.slice(0, maxShown);
 	const body = [];
 
@@ -272,12 +272,12 @@ export function renderDiffBox(diff, theme, width = 60) {
 	return `${header}\n${divider}\n${body.join("\n")}\n${divider}`;
 }
 
-function displayOperation(tool, target) {
-	if (["write", "edit", "apply_patch", "patch"].includes(tool)) return { tool: "edit", target };
-	if (["bash", "exec"].includes(tool)) return { tool: "bash", target };
-	if (["read", "surface", "snap", "search", "grep", "find", "ls"].includes(tool))
-		return { tool: "read", target };
-	return null;
+function displayOperation(tool, target, diff) {
+	const normalized = tool === "apply_patch" ? "patch" : tool;
+	if (!["write", "edit", "patch", "bash", "exec", "read", "surface", "snap", "search", "grep", "find", "ls", "speculate"].includes(normalized)) {
+		return null;
+	}
+	return { tool: normalized, target, diff };
 }
 
 function formatOpTarget(raw, tool) {
@@ -372,6 +372,7 @@ export function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs
 			isPartial: !!opts.isPartial,
 			theme: themeOrCtx,
 			context,
+			args: ctxOrArgs?.code ? ctxOrArgs : context.args,
 			host: detectResultHost(options, ctxOrArgs),
 			options: opts,
 		};
@@ -386,6 +387,7 @@ export function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs
 			isPartial: !!context.isPartial,
 			theme: options,
 			context,
+			args: context.args,
 			host: "pi",
 			options: {},
 		};
@@ -393,20 +395,33 @@ export function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs
 	throw new Error("supernova renderResult: theme missing (expected Pi or OMP signature)");
 }
 
-function collectCallOps(args, context) {
-	const stateTrace = context?.state?.trace;
-	if (Array.isArray(stateTrace) && stateTrace.length > 0) {
-		return stateTrace
-			.map((item) => {
-				const tool = item?.name || "tool";
-				let target = "";
-				if (item?.args?.path) target = String(item.args.path);
-				else if (item?.args?.command) target = String(item.args.command);
-				else if (item?.args?.pattern) target = String(item.args.pattern);
-				return displayOperation(tool, target);
-			})
-			.filter(Boolean);
+function operationTarget(item) {
+	const args = item?.args || {};
+	const name = item?.name;
+	if (name === "snap") {
+		const query = args.query ? `"${args.query}"` : "";
+		return args.path ? `${query} → ${args.path}` : query;
 	}
+	if (name === "search") return args.query ? `"${args.query}"` : "";
+	if (args.path) return String(args.path);
+	if (item?.diff?.path) return String(item.diff.path);
+	if (args.target && isString(args.target)) return args.target;
+	if (args.command) return String(args.command);
+	if (args.pattern) return String(args.pattern);
+	if (args.query) return String(args.query);
+	return "";
+}
+
+function operationsFromTrace(trace) {
+	if (!Array.isArray(trace)) return [];
+	return trace
+		.map((item) => displayOperation(item?.name || "tool", operationTarget(item), item?.diff))
+		.filter(Boolean);
+}
+
+function collectCallOps(args, context) {
+	const traced = operationsFromTrace(context?.state?.trace);
+	if (traced.length > 0) return traced;
 	return extractOperationsFromCode(args?.code)
 		.map((op) => displayOperation(op.tool, op.target))
 		.filter(Boolean);
@@ -437,7 +452,7 @@ function tickCallTimer(context) {
 function formatOpBodyLine(theme, op) {
 	const icon = ACTION_ICONS[op.tool] || "✦ ";
 	const bullet = theme.fg("accent", icon);
-	const toolName = theme.fg("syntaxFunction", op.tool.padEnd(4, " "));
+	const toolName = theme.fg("syntaxFunction", op.tool.padEnd(7, " "));
 	const rawTarget = formatOpTarget(op.target, op.tool);
 	const target = rawTarget ? " " + theme.fg("muted", rawTarget) : "";
 	return `${bullet}${toolName}${target}`;
@@ -452,10 +467,7 @@ function shouldUseOmpFrame(host) {
  * Pending call has no hourglass on the head row (same as native Write/Edit).
  */
 function renderOmpCallCard(theme, { ops, timeStr, expanded, code }) {
-	const opSummary =
-		ops.length === 0
-			? "composing"
-			: ops.map((op) => op.tool).join(theme.sep?.dot ? ` ${theme.sep.dot} ` : " · ");
+	const opSummary = ops.length === 0 ? "composing" : `${ops.length} call${ops.length === 1 ? "" : "s"}`;
 	const description = timeStr ? `${opSummary} · ${timeStr}` : opSummary;
 	// No pending icon on the framed head row — matches native Write/Edit.
 	const header = novaStatusLine(theme, {
@@ -480,9 +492,9 @@ function renderOmpCallCard(theme, { ops, timeStr, expanded, code }) {
 	});
 }
 
-function renderOmpResultCard(theme, { isErr, payload, expanded, bodyText, isPartial, spinnerFrame }) {
+function renderOmpResultCard(theme, { isErr, payload, expanded, bodyText, isPartial, spinnerFrame, opCount = 0 }) {
 	if (isErr) {
-		const errLines = [];
+		const errLines = String(bodyText || "").trim() ? String(bodyText).split("\n") : [];
 		if (payload?.error) errLines.push(theme.fg("error", String(payload.error)));
 		if (expanded && payload?.logs?.length) {
 			errLines.push(theme.fg("dim", "── logs ──"));
@@ -503,11 +515,13 @@ function renderOmpResultCard(theme, { isErr, payload, expanded, bodyText, isPart
 	}
 
 	const wall = payload?.wallMs != null ? `${payload.wallMs}ms` : "";
+	const calls = opCount > 0 ? `${opCount} call${opCount === 1 ? "" : "s"}` : "";
+	const description = [calls, isPartial ? "running" : "", wall].filter(Boolean).join(" · ");
 	const header = novaStatusLine(theme, {
 		icon: isPartial ? "running" : undefined,
 		spinnerFrame,
 		title: "nova",
-		description: wall || undefined,
+		description: description || undefined,
 	});
 	const bodyLines = String(bodyText || "").split("\n");
 	while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
@@ -567,51 +581,69 @@ export function renderSupernovaCall(a, b, c) {
 	return comp;
 }
 
-function buildResultBody(theme, { payload, context, expanded }) {
+function formatDiffStats(theme, diff) {
+	if (!diff || !isObject(diff)) return "";
+	return " " + theme.fg("toolDiffAdded", `+${diff.added || 0}`) + theme.fg("dim", "/") + theme.fg("toolDiffRemoved", `-${diff.removed || 0}`);
+}
+
+function formatResultOperation(theme, op, isPartial) {
+	const marker = isPartial ? theme.fg("dim", "· ") : theme.fg("success", "✓ ");
+	const tool = theme.fg("syntaxFunction", op.tool.padEnd(7, " "));
+	const targetText = formatOpTarget(op.target, op.tool);
+	const target = targetText ? theme.fg("muted", targetText) : theme.fg("dim", "done");
+	return `${marker}${tool} ${target}${formatDiffStats(theme, op.diff)}`;
+}
+
+function boundedResult(value) {
+	let text;
+	try {
+		text = isString(value) ? value : JSON.stringify(value, null, 2);
+	} catch {
+		text = String(value);
+	}
+	const lines = String(text).split("\n");
+	const clipped = lines.slice(0, 24).join("\n");
+	const suffix = lines.length > 24 ? `\n… ${lines.length - 24} more lines` : "";
+	return (clipped + suffix).slice(0, 4000);
+}
+
+function buildResultBody(theme, { payload, context, args, expanded, isPartial }) {
 	let out = "";
 	const trace = payload?.trace || context?.state?.trace || [];
-	const diffs = trace.filter((t) => t?.diff && isObject(t.diff)).map((t) => t.diff);
-
-	if (diffs.length > 0) {
-		const maxDiffsShown = expanded ? diffs.length : 2;
-		const shownDiffs = diffs.slice(0, maxDiffsShown);
-		for (const diff of shownDiffs) {
-			const box = renderDiffBox(diff, theme, 120);
-			if (box) out += (out ? "\n\n" : "") + box;
-		}
-		if (!expanded && diffs.length > maxDiffsShown) {
-			const remaining = diffs.length - maxDiffsShown;
-			out +=
-				"\n\n" +
-				theme.fg(
-					"dim",
-					`… ${remaining} more file edit${remaining === 1 ? "" : "s"} (press Enter to expand)`,
-				);
-		}
+	const tracedOps = operationsFromTrace(trace);
+	const ops = tracedOps.length > 0
+		? tracedOps
+		: extractOperationsFromCode(args?.code).map((op) => displayOperation(op.tool, op.target)).filter(Boolean);
+	const maxOps = expanded ? 12 : 8;
+	for (const op of ops.slice(0, maxOps)) {
+		out += (out ? "\n" : "") + formatResultOperation(theme, op, isPartial);
 	}
+	if (ops.length > maxOps) out += `\n${theme.fg("dim", `… ${ops.length - maxOps} more calls`)}`;
 
 	if (expanded) {
-		const resVal = payload?.result;
-		if (resVal !== undefined) {
-			let formatted;
-			try {
-				formatted = isString(resVal) ? resVal : JSON.stringify(resVal, null, 2);
-			} catch {
-				formatted = String(resVal);
-			}
+		const diffs = ops.filter((op) => op.diff && isObject(op.diff)).map((op) => op.diff);
+		const maxDiffs = 4;
+		if (diffs.length > 0) out += (out ? "\n" : "") + theme.fg("dim", "── changes ──");
+		for (const diff of diffs.slice(0, maxDiffs)) {
+			const box = renderDiffBox(diff, theme, 120);
+			if (box) out += "\n" + box;
+		}
+		if (diffs.length > maxDiffs) out += `\n${theme.fg("dim", `… ${diffs.length - maxDiffs} more changed files`)}`;
+
+		if (payload?.result !== undefined) {
 			out += (out ? "\n" : "") + theme.fg("dim", "── result ──");
-			out += "\n" + theme.fg("toolOutput", formatted);
+			out += "\n" + theme.fg("toolOutput", boundedResult(payload.result));
 		}
 		if (payload?.logs?.length) {
 			out += (out ? "\n" : "") + theme.fg("dim", "── logs ──");
-			for (const log of payload.logs) out += `\n  ${theme.fg("dim", String(log))}`;
+			for (const log of payload.logs.slice(0, 24)) out += `\n  ${theme.fg("dim", String(log))}`;
 		}
 	}
-	return out;
+	return { body: out, opCount: ops.length };
 }
 
 export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextArg) {
-	const { result, expanded, isPartial, theme, context, options, host } = normalizeResultRenderArgs(
+	const { result, expanded, isPartial, theme, context, args, options, host } = normalizeResultRenderArgs(
 		resultArg,
 		optionsArg,
 		themeArg,
@@ -637,51 +669,17 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 	}
 
 	const isErr = result?.isError || payload?.ok === false;
-	const useOmp = shouldUseOmpFrame(host);
+	const view = buildResultBody(theme, { payload, context, args, expanded, isPartial });
 
-	if (useOmp) {
-		if (isPartial && !isErr) {
-			// Streaming partials stay quiet until body content exists — same as Pi.
-			const partialBody = buildResultBody(theme, { payload, context, expanded });
-			if (!partialBody.trim()) {
-				return {
-					render: () => [],
-					invalidate() {},
-				};
-			}
-			return renderOmpResultCard(theme, {
-				isErr: false,
-				payload,
-				expanded,
-				bodyText: partialBody,
-				isPartial: true,
-				spinnerFrame: options?.spinnerFrame,
-			});
-		}
-		if (isErr) {
-			return renderOmpResultCard(theme, {
-				isErr: true,
-				payload,
-				expanded,
-				bodyText: "",
-				isPartial: false,
-				spinnerFrame: options?.spinnerFrame,
-			});
-		}
-		const out = buildResultBody(theme, { payload, context, expanded });
-		if (!out.trim()) {
-			return {
-				render: () => [],
-				invalidate() {},
-			};
-		}
+	if (shouldUseOmpFrame(host)) {
 		return renderOmpResultCard(theme, {
-			isErr: false,
+			isErr,
 			payload,
 			expanded,
-			bodyText: out,
-			isPartial: false,
+			bodyText: view.body,
+			isPartial: isPartial && !isErr,
 			spinnerFrame: options?.spinnerFrame,
+			opCount: view.opCount,
 		});
 	}
 
@@ -689,32 +687,22 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 	if (options) options.lastComponent = comp;
 	else if (context) context.lastComponent = comp;
 
-	if (isPartial) {
-		comp.setText("");
-		return comp;
-	}
+	const wall = payload?.wallMs != null ? `${payload.wallMs}ms` : "";
+	const calls = view.opCount > 0 ? `${view.opCount} call${view.opCount === 1 ? "" : "s"}` : "complete";
+	let out = theme.fg("toolTitle", theme.bold("nova"));
+	out += " " + theme.fg("dim", `· ${[calls, isPartial ? "running" : "", wall].filter(Boolean).join(" · ")}`);
+	if (view.body) out += `\n  ${view.body.replaceAll("\n", "\n  ")}`;
 
 	if (isErr) {
-		let out = theme.fg("error", "✗ error");
-		if (payload?.error) {
-			out += `\n  ${theme.fg("error", String(payload.error))}`;
-		}
+		out += `\n  ${theme.fg("error", payload?.error ? String(payload.error) : "error")}`;
 		if (expanded && payload?.logs?.length) {
 			out += `\n${theme.fg("dim", "── logs ──")}`;
-			for (const log of payload.logs) out += `\n  ${theme.fg("dim", String(log))}`;
+			for (const log of payload.logs.slice(0, 24)) out += `\n  ${theme.fg("dim", String(log))}`;
 		}
 		comp.setTone("error");
-		comp.setFraming(true);
-		comp.setText(out);
-		return comp;
+	} else {
+		comp.setTone(isPartial ? "pending" : "success");
 	}
-
-	const out = buildResultBody(theme, { payload, context, expanded });
-	if (!out.trim()) {
-		comp.setText("");
-		return comp;
-	}
-	comp.setTone("success");
 	comp.setFraming(true);
 	comp.setText(out);
 	return comp;

@@ -99,7 +99,7 @@ describe("host bridge and adapters", () => {
     try {
       await fs.writeFile(path.join(tmpDir, "multi.txt"), "alpha beta gamma");
       const bridge = createHostBridge({ pi: null, config, getCwd: () => tmpDir });
-      await bridge.call("edit", {
+      const result = await bridge.call("edit", {
         path: "multi.txt",
         edits: [
           { oldText: "alpha", newText: "one" },
@@ -107,6 +107,10 @@ describe("host bridge and adapters", () => {
         ],
       });
       assert.equal(await fs.readFile(path.join(tmpDir, "multi.txt"), "utf8"), "one beta three");
+      const diff = JSON.parse(result.details).diff;
+      assert.equal(diff.added, 2);
+      assert.equal(diff.removed, 2);
+      assert.ok(diff.lines.length < 8);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

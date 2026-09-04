@@ -6,7 +6,7 @@ import { packageHostResult } from "./bottleneck.js";
 import { isString, isNumber, isFunction } from "./decode.js";
 import { isMutatingTool, runParallelWave } from "./parallel.js";
 import { extractStructuralSurface } from "./surface.js";
-import { buildEditDiff, buildPatchDiff, buildWriteDiff } from "./diff.js";
+import { buildEditDiff, buildMultiEditDiff, buildPatchDiff, buildWriteDiff } from "./diff.js";
 import { executeSnap } from "./snap.js";
 
 function textResult(text, details) {
@@ -509,7 +509,7 @@ function createNativeAdapters(getCwd, vfs, config) {
       const diff =
         matches.length === 1
           ? buildEditDiff(target, content, matches[0].oldText, matches[0].newText)
-          : { ...buildWriteDiff(target, content, updated), op: "edit" };
+          : buildMultiEditDiff(target, content, matches);
       const tag = speculative ? " (speculative)" : "";
       return textResult(`edited ${target}${tag}`, { path: target, speculative, diff });
     },

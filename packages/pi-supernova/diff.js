@@ -35,6 +35,27 @@ export function buildEditDiff(filePath, originalText, oldText, newText) {
   };
 }
 
+export function buildMultiEditDiff(filePath, originalText, replacements) {
+  const parts = replacements.map(({ oldText, newText }) =>
+    buildEditDiff(filePath, originalText, oldText, newText),
+  );
+  const lines = [];
+  for (const part of parts) {
+    for (const line of part.lines) {
+      const previous = lines.at(-1);
+      if (previous?.type === "context" && line.type === "context" && previous.lineNum === line.lineNum) continue;
+      lines.push(line);
+    }
+  }
+  return {
+    path: filePath,
+    op: "edit",
+    added: parts.reduce((sum, part) => sum + part.added, 0),
+    removed: parts.reduce((sum, part) => sum + part.removed, 0),
+    lines,
+  };
+}
+
 export function buildPatchDiff(filePath, patchText) {
   const patchLines = isString(patchText) ? patchText.replace(/\r\n/g, "\n").split("\n") : [];
   const lines = [];
