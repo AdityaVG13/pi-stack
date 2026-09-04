@@ -309,7 +309,7 @@ function normalize(scores) {
 
 // ---- candidate files (boundary + topology + entity hits) ----
 
-function candidateFiles(files, profile, index, limit) {
+function candidateFiles(files, profile, index, limit, overlayText) {
   const scored = [];
   for (const f of files) {
     const s = scorePathTopology(f, profile.keywords, profile.flags);
@@ -318,7 +318,11 @@ function candidateFiles(files, profile, index, limit) {
   scored.sort((a, b) => b.s - a.s);
   const chosen = new Set(scored.slice(0, limit).map(({ f }) => f));
   const anchors = (profile.subjects.length ? profile.subjects : profile.keywords).map((a) => a.toLowerCase()).filter((a) => a.length > 2);
-  const hits = anchors.length ? index.filesContaining(files, anchors, true) : [];
+  const pendingHits = files.filter(file => {
+    const pending = overlayText(file);
+    return pending !== undefined && anchors.some(anchor => pending.toLowerCase().includes(anchor));
+  });
+  const hits = anchors.length ? [...new Set([...pendingHits, ...index.filesContaining(files, anchors, true)])] : [];
   for (const f of hits) {
     if (chosen.size >= limit) break;
     if (profile.flags.wantsTest || scorePathTopology(f, profile.keywords, profile.flags) > -50) chosen.add(f);
@@ -385,14 +389,19 @@ function render(spans, picks, fused, opts, root) {
  * R(q): top-K provenance-bearing source spans for a concept query, selected without any model call.
  * @returns {{ route: string, spans: Array<{path, lines, name, kind, why, text}> }}
  */
-export async function selectEvidence({ query, root, searchDir, index, overlayText = () => undefined, options = {} }) {
+export async function selectEvidence({ query, root, searchDir, index, overlayText = () => undefined, pendingPaths = [], options = {} }) {
   const opts = { ...EVIDENCE_DEFAULTS, ...options };
   const profile = profileQuery(query);
   if (profile.keywords.length === 0) throw new Error("evidence requires at least one searchable concept keyword");
-  const files = await index.files(searchDir || root);
+  const searchRoot = path.resolve(searchDir || root);
+  const staged = pendingPaths.filter(file => {
+    const relative = path.relative(searchRoot, file);
+    return relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative);
+  });
+  const files = [...new Set([...await index.files(searchRoot), ...staged])];
   if (files.length === 0) throw new Error(`no files found to search in ${searchDir || root}`);
 
-  const { files: chosenFiles, fileScores } = candidateFiles(files, profile, index, opts.maxCandidateFiles);
+  const { files: chosenFiles, fileScores } = candidateFiles(files, profile, index, opts.maxCandidateFiles, overlayText);
   const spans = [];
   for (const f of chosenFiles) {
     const pending = overlayText(f);

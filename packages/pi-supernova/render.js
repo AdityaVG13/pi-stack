@@ -12,7 +12,7 @@
 
 import { stripVTControlCharacters } from "node:util";
 import { isString, isObject, isFunction } from "./decode.js";
-import { measureWidth, hardTruncate, clampLine, fitPath } from "./render-measure.js";
+import { measureWidth, hardTruncate, clampLine, fitPath, wrapLine } from "./render-measure.js";
 import { novaFramedBlock, novaStatusLine } from "./omp-frame.js";
 import { formatValue } from "./format.js";
 
@@ -232,7 +232,6 @@ export function renderSupernovaCall(a, b, c) {
 
 const TOOL_COL = 7;
 const DURATION_COL = 6;
-const PREVIEW_LINES = 24;
 
 function formatDuration(ms) {
 	if (!Number.isFinite(ms) || ms < 0) return "";
@@ -310,12 +309,9 @@ function operationsFor(payload, context) {
 	return operationsFromTrace(payload?.trace || context?.state?.trace || []);
 }
 
-function resultLines(value, maxLines) {
+function resultLines(value, width) {
 	const text = isString(value) ? value : formatValue(value);
-	const lines = cleanBlockText(text).split("\n");
-	const shown = lines.slice(0, maxLines);
-	if (lines.length > maxLines) shown.push(`… ${lines.length - maxLines} more lines`);
-	return shown;
+	return cleanBlockText(text).split("\n").flatMap(line => wrapLine(line, width));
 }
 
 function appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, isError) {
@@ -327,15 +323,18 @@ function appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, is
 	if (ops.length > maxOps) lines.push(theme.fg("dim", `  … ${ops.length - maxOps} more calls`));
 }
 
-function appendTail(lines, theme, payload, expanded, isError) {
-	if (isError) lines.push(theme.fg("error", "✗ " + (payload?.error ? cleanBlockText(payload.error) : "error")));
+function appendTail(lines, theme, payload, expanded, isError, width) {
+	if (isError) {
+		const error = "✗ " + (payload?.error ? cleanBlockText(payload.error) : "error");
+		for (const line of expanded ? resultLines(error, width) : error.split("\n")) lines.push(theme.fg("error", line));
+	}
 	else if (expanded && payload?.result !== undefined) {
 		lines.push(theme.fg("dim", "── result ──"));
-		for (const line of resultLines(payload.result, PREVIEW_LINES)) lines.push(theme.fg("toolOutput", line));
+		for (const line of resultLines(payload.result, width)) lines.push(theme.fg("toolOutput", line));
 	}
 	if (expanded && payload?.logs?.length) {
 		lines.push(theme.fg("dim", "── logs ──"));
-		for (const log of payload.logs.slice(0, PREVIEW_LINES)) lines.push(theme.fg("dim", cleanBlockText(log)));
+		for (const log of payload.logs) for (const line of resultLines(log, width)) lines.push(theme.fg("dim", line));
 	}
 }
 
@@ -345,7 +344,7 @@ function buildBodyLines(theme, width, { payload, context, args, expanded, isPart
 	const maxDiffLines = expanded ? 24 : 8;
 	const lines = [];
 	appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, isError);
-	appendTail(lines, theme, payload, expanded, isError);
+	appendTail(lines, theme, payload, expanded, isError, width);
 	return { lines, opCount: ops.length };
 }
 
@@ -367,7 +366,7 @@ class UnifiedResultCard {
 	}
 	render(width = 80) {
 		const { theme, model } = this;
-		if (!theme || !model) return [];
+		if (!theme || !model || width <= 0) return [];
 		if (this.cache?.width === width) return this.cache.lines;
 		const view = buildBodyLines(theme, Math.max(1, width - 4), model);
 		const header = novaStatusLine(theme, {

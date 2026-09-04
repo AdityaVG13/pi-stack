@@ -1,7 +1,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { packageHostResult } from "./bottleneck.js";
+import { packageHostResult, hostResultFailed } from "./bottleneck.js";
 import { isString, isNumber, isFunction, isObject } from "./decode.js";
 import { isMutatingTool, runParallelWave } from "./parallel.js";
 import { unknownToolMessage } from "./catalog.js";
@@ -79,7 +79,7 @@ function applyReplacements(target, content, requestedEdits) {
     if (index < 0) {
       throw new Error(`edit target not found in ${target}: oldText must match the file byte-for-byte (read() it first; check whitespace and quotes)`);
     }
-    if (content.indexOf(replacement.oldText, index + replacement.oldText.length) >= 0) {
+    if (content.indexOf(replacement.oldText, index + 1) >= 0) {
       throw new Error(`edit target is not unique in ${target}: include more surrounding lines in oldText, or pass edits:[{oldText,newText},…]`);
     }
     return { ...replacement, index, end: index + replacement.oldText.length };
@@ -113,15 +113,16 @@ async function formatLsEntry(dirPath, entry) {
 
 function createNativeAdapters(getCwd, vfs, config, index, ledger) {
   async function readAdapter(params, signal) {
+      signal?.throwIfAborted();
       const cwd = getCwd();
       const targetParam = params?.path ?? params?.target;
 
       if (Array.isArray(targetParam)) {
         const results = await Promise.all(
-          targetParam.map((p) => readAdapter({ path: p, offset: params?.offset, limit: params?.limit }, signal)),
+          targetParam.map((p) => readAdapter({ ...params, path: p }, signal)),
         );
         const items = results.map((r) => r.content[0].text);
-        return textResult(items.join("\n---\n"), { count: results.length, batch: true, items });
+        return textResult("", { count: results.length, batch: true, items });
       }
 
       if (looksLikePath(targetParam)) {
@@ -281,7 +282,8 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger) {
       const cwd = getCwd();
       const target = await resolveWorkspacePath(cwd, params?.path, "write", false);
       if (signal?.aborted) throw new Error("aborted");
-      const content = String(params?.content ?? "");
+      if (!isString(params?.content)) throw new Error("write requires string content");
+      const content = params.content;
       let prevText = "";
       try {
         prevText = await vfs.read(target);
@@ -308,7 +310,6 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger) {
         matches.length === 1
           ? buildEditDiff(target, content, matches[0].oldText, matches[0].newText)
           : buildMultiEditDiff(target, content, matches);
-      const tag = speculative ? " (speculative)" : "";
       const summary = await editSummary(cwd, target, content, updated, diff);
       return textResult(summary, { path: target, speculative, diff });
     },
@@ -367,7 +368,7 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger) {
       const options = {};
       if (Number.isInteger(params?.k) && params.k > 0) options.k = params.k;
       if (Number.isInteger(params?.maxChars) && params.maxChars > 0) options.maxChars = params.maxChars;
-      const res = await selectEvidence({ query: params.query, root: cwd, searchDir, index, overlayText: (p) => vfs.getOverlay(p), options });
+      const res = await selectEvidence({ query: params.query, root: cwd, searchDir, index, overlayText: (p) => vfs.getOverlay(p), pendingPaths: vfs.getOverlayPaths(), options });
       for (const span of res.spans) ledger.recordOrigin(span.path, span.lines[0], span.text.split("\n"));
       return textResult(JSON.stringify(res), { route: res.route, count: res.spans.length });
     },
@@ -408,7 +409,7 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger) {
       if (res.exitCode !== 0) text += sourceForReferences(cwd, text);
       return {
         content: [{ type: "text", text }],
-        details: { exitCode: res.exitCode, outputTruncated: res.outputTruncated, transactionBarrier },
+        details: { exitCode: res.exitCode, signal: res.signal, outputTruncated: res.outputTruncated, transactionBarrier },
         isError: res.exitCode !== 0,
       };
     },
@@ -474,19 +475,24 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger) {
   };
 }
 
-export function createHostBridge({ pi, config, getCwd }) {
-  const index = new WorkspaceIndex((argv, opts) => runCommand(argv, opts));
-  const ledger = new SeenLedger({ window: config.seenWindow ?? 40 });
+export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedger }) {
+  const index = registry?.index ?? new WorkspaceIndex((argv, opts) => runCommand(argv, opts));
+  const ledger = runLedger ?? new SeenLedger({ window: config.seenWindow ?? 40 });
   const vfs = new CausalVfs(() => index.invalidate());
-  const executors = new Map();
+  const executors = registry?.executors ?? new Map();
+  const definitions = registry?.definitions ?? new Map();
+  const sharedRegistry = registry ?? { executors, definitions, index, callSeq: 0 };
+  let closed = false;
   const natives = createNativeAdapters(getCwd, vfs, config, index, ledger);
   let callCount = 0;
   let activeCtx = null;
+  let hostSession = null;
+  let boundSessionId;
   let activeSignal = undefined;
   let trace = [];
   let callListener = null;
 
-  if (pi && isFunction(pi.registerTool)) {
+  if (!registry && pi && isFunction(pi.registerTool)) {
     const original = pi.registerTool.bind(pi);
     const excluded = new Set(config.excludeTools || []);
     pi.registerTool = (tool) => {
@@ -498,6 +504,7 @@ export function createHostBridge({ pi, config, getCwd }) {
         !excluded.has(tool.name)
       ) {
         executors.set(tool.name, tool.execute.bind(tool));
+        definitions.set(tool.name, tool);
       }
       return original(tool);
     };
@@ -505,10 +512,52 @@ export function createHostBridge({ pi, config, getCwd }) {
 
   function bindCallContext(ctx, signal) {
     activeCtx = ctx || null;
+    const sessionId = ctx?.sessionManager?.getSessionId?.();
+    boundSessionId = sessionId;
+    const registry = pi?.pi?.AgentRegistry?.global?.();
+    hostSession = sessionId && registry?.list
+      ? registry.list().map(ref => ref.session).find(session => !session?.isDisposed && session?.sessionManager?.getSessionId?.() === sessionId) ?? null
+      : null;
     activeSignal = signal;
+    vfs.signal = signal;
+  }
+
+  function hostTool(name) {
+    if (!hostSession) return undefined;
+    const metadata = definitions.get(name);
+    // Keep Supernova's transactional adapters for ordinary built-ins. Respect overrides.
+    if (Object.hasOwn(natives, name) && metadata?.sourceInfo?.source === "builtin") return undefined;
+    return hostSession.getToolForEvalBridge?.(name);
+  }
+
+  function isCallable(name) {
+    if (name === "supernova" || (config.excludeTools ?? []).includes(name)) return false;
+    if (hostSession) {
+      if (hostSession.isDisposed || hostSession.sessionManager.getSessionId() !== boundSessionId) return false;
+      if (!hostSession.getEvalBridgeToolNames().includes(name) && definitions.has(name)) return false;
+      return !!hostTool(name) || (Object.hasOwn(natives, name) && (!definitions.has(name) || definitions.get(name).sourceInfo?.source === "builtin"));
+    }
+    if (definitions.has(name) && isFunction(pi?.getActiveTools) && !pi.getActiveTools().includes(name)) return false;
+    return executors.has(name) || Object.hasOwn(natives, name);
+  }
+
+  function refreshTools() {
+    const tools = pi?.getAllTools?.() ?? [];
+    for (const tool of tools) {
+      if (!isString(tool?.name)) continue;
+      definitions.set(tool.name, { ...definitions.get(tool.name), ...tool });
+      if (!hostSession && isFunction(tool.execute)) executors.set(tool.name, tool.execute.bind(tool));
+    }
+    return [...definitions.values()].filter(tool => isCallable(tool.name));
+  }
+
+  function externalNames() {
+    return [...definitions.keys()].filter(name => !!hostTool(name) || executors.has(name));
   }
 
   function resetCallBudget() {
+    closed = false;
+    vfs.closed = false;
     callCount = 0;
     trace = [];
     // Files may change between programs (editor, git); never serve a stale run.
@@ -556,6 +605,7 @@ export function createHostBridge({ pi, config, getCwd }) {
   }
 
   function checkCallBudget(name) {
+    if (closed) throw new Error("program is already complete");
     const maxCalls = config.maxBridgeCalls ?? 256;
     callCount += 1;
     if (callCount > maxCalls) {
@@ -598,23 +648,35 @@ export function createHostBridge({ pi, config, getCwd }) {
 
   async function invokeRaw(name, args) {
     checkCallBudget(name);
+    const callId = ++sharedRegistry.callSeq;
     assertCallableTarget(name);
+    if (!isCallable(name)) throw new Error(unknownToolMessage(name, [...definitions.keys(), ...Object.keys(natives)].filter(isCallable)));
 
     const record = { name, args: args || {}, time: Date.now() };
     trace.push(record);
     notifyCall(record);
 
     try {
-      const exec = executors.get(name);
+      const delegated = hostTool(name);
+      const exec = delegated ? delegated.execute.bind(delegated) : hostSession ? undefined : executors.get(name);
       if (exec) {
         const fallbackDiff = await writeFallbackDiff(name, args);
-        if (isMutatingTool(name, config)) await vfs.prepareExternalMutation(name);
-        const res = await exec(`supernova:${name}:${callCount}`, args || {}, activeSignal, undefined, activeCtx);
-        completeRecord(record, res, fallbackDiff);
-        return res;
+        const mutating = isMutatingTool(name, config, args, definitions.get(name));
+        if (mutating) await vfs.prepareExternalMutation(name);
+        if (activeSignal?.aborted || closed) throw new Error("aborted");
+        if (!isCallable(name)) throw new Error("tool is no longer enabled in this session: " + name);
+        try {
+          const res = await exec(`supernova:${name}:${callId}`, args || {}, activeSignal, undefined, delegated
+            ? { ...activeCtx, settings: hostSession.settings, toolNames: hostSession.getEvalBridgeToolNames(), autoApprove: false }
+            : activeCtx);
+          completeRecord(record, res, fallbackDiff);
+          return res;
+        } finally {
+          if (mutating) { vfs.invalidateCache(); index.invalidate(); clearPathCache(); }
+        }
       }
 
-      const native = natives[name];
+      const native = Object.hasOwn(natives, name) ? natives[name] : undefined;
       if (native) {
         const res = await native(args || {}, activeSignal);
         completeRecord(record, res);
@@ -633,7 +695,7 @@ export function createHostBridge({ pi, config, getCwd }) {
 
   function finishRecord(record, res) {
     record.ms = Date.now() - record.time;
-    record.ok = res?.isError !== true && res?.details?.ok !== false;
+    record.ok = !hostResultFailed(res);
     const exitCode = isObject(res?.details) ? res.details.exitCode : undefined;
     if (Number.isInteger(exitCode) && exitCode !== 0) record.exitCode = exitCode;
   }
@@ -645,14 +707,16 @@ export function createHostBridge({ pi, config, getCwd }) {
   }
 
   async function callMany(calls) {
-    const list = Array.isArray(calls) ? calls : [];
+    if (!Array.isArray(calls)) throw new TypeError("nova.callMany requires an array");
+    const list = calls;
+    if (list.some(item => !isString(item?.name) || !item.name)) throw new TypeError("nova.callMany entries require a tool name");
     const thunks = list.map((item) => {
       const n = item?.name;
       const a = item?.args;
       return () => call(n, a);
     });
     const names = list.map((item) => item?.name).filter((n) => isString(n));
-    const wave = await runParallelWave(thunks, { names }, { mode: "auto", config });
+    const wave = await runParallelWave(thunks, { names, calls: list, definitions: names.map(name => definitions.get(name)) }, { mode: "auto", config });
     // Return a results array that also carries .mode/.reason, and is directly
     // iterable so `for (const r of await nova.callMany([...]))` works.
     const results = Array.isArray(wave.results) ? wave.results.slice() : [];
@@ -666,7 +730,16 @@ export function createHostBridge({ pi, config, getCwd }) {
 
   return {
     executors,
+    definitions,
     natives,
+    refreshTools,
+    isCallable,
+    externalNames,
+    supportsBatchRead: () => !hostTool("read") && !executors.has("read"),
+    fork(options) {
+      return createHostBridge({ pi, config, getCwd: options.getCwd, registry: sharedRegistry, ledger: ledger.fork() });
+    },
+    close() { closed = true; vfs.closed = true; },
     bindCallContext,
     resetCallBudget,
     getTrace,

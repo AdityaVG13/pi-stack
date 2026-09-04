@@ -6,7 +6,7 @@ const NATIVE_TOOL_DEFINITIONS = [
     name: "read",
     description: "Read UTF-8 workspace files by path, or resolve a concept query to source. Supports path arrays, offset, and limit.",
     parameters: { type: "object", properties: {
-      path: { type: "string", description: "Workspace-relative file path or concept query" },
+      path: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }], description: "Workspace-relative file path, concept query, or array of paths" },
       target: { anyOf: [{ type: "string" }, { type: "array" }], description: "File path/query or array of paths" },
       offset: { type: "number", description: "One-based starting line" },
       limit: { type: "number", description: "Maximum lines to return" },
@@ -110,6 +110,7 @@ function normalizeTool(tool) {
     description,
     descLower: description.toLowerCase(),
     parameters: tool.parameters,
+    schemaError: tool.schemaError,
     sourcePath: sourcePathOf(tool),
   };
 }
@@ -156,33 +157,6 @@ export function searchCatalog(catalog, query, limit = 12) {
   }
   scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
   return scored.slice(0, Math.max(1, limit)).map(({ score: _s, ...hit }) => hit);
-}
-
-function fieldSummary(key, schema, required) {
-  const s = schema && isObject(schema) ? schema : {};
-  // Only signal-bearing keys: `required:false` and empty descriptions cost tokens and say nothing.
-  return {
-    type: s.type || (Array.isArray(s.anyOf) ? "union" : "unknown"),
-    required: required.has(key) || undefined,
-    description: isString(s.description) ? s.description.slice(0, 120) : undefined,
-  };
-}
-
-function schemaSummary(parameters) {
-  if (!parameters || !isObject(parameters)) return { type: "unknown" };
-  const props = parameters.properties;
-  if (!props || !isObject(props)) {
-    return {
-      type: parameters.type || "object",
-      note: "schema present (no enumerable properties)",
-    };
-  }
-  const required = new Set(Array.isArray(parameters.required) ? parameters.required : []);
-  const fields = {};
-  for (const [key, schema] of Object.entries(props)) {
-    fields[key] = fieldSummary(key, schema, required);
-  }
-  return { type: "object", fields };
 }
 
 /** Optimal string alignment distance: insert/delete/substitute/adjacent-transpose cost 1. */
@@ -232,12 +206,13 @@ export function describeTool(catalog, name) {
   if (!row) {
     return { ok: false, error: unknownToolMessage(name, catalog.map((t) => t.name)) };
   }
+  if (!isObject(row.parameters)) return { ok: false, name, error: "tool schema unavailable: " + (row.schemaError ?? name) };
   if (!row._described) {
     row._described = {
       ok: true,
       name: row.name,
       description: row.description,
-      parameters: schemaSummary(row.parameters),
+      parameters: row.parameters,
       sourcePath: row.sourcePath,
     };
   }

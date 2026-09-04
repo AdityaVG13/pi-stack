@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { Check } from "typebox/value";
 import { buildCatalog, searchCatalog, describeTool, mergeNativeToolDefinitions } from "../catalog.js";
 
 describe("catalog progressive discovery", () => {
@@ -47,12 +48,13 @@ describe("catalog progressive discovery", () => {
     assert.ok(hits[0].description.length <= 160);
   });
 
-  it("describe returns schema summary only on demand", () => {
+  it("describes the complete input contract only on demand", () => {
     const catalog = buildCatalog(tools, ["supernova"]);
     const desc = describeTool(catalog, "read");
     assert.equal(desc.ok, true);
-    assert.equal(desc.parameters.fields.path.type, "string");
-    assert.equal(desc.parameters.fields.path.required, true);
+    assert.equal(Check(desc.parameters, { path: "source.js" }), true);
+    assert.equal(Check(desc.parameters, {}), false);
+    assert.equal(Check(desc.parameters, { path: 42 }), false);
     const missing = describeTool(catalog, "nope");
     assert.equal(missing.ok, false);
   });
@@ -62,12 +64,11 @@ describe("catalog progressive discovery", () => {
     const read = describeTool(catalog, "read");
     const ls = describeTool(catalog, "ls");
 
-    assert.equal(read.parameters.fields.path.type, "string");
-    assert.match(read.description, /UTF-8 workspace files/);
-    assert.equal(ls.ok, true);
-    assert.equal(ls.parameters.fields.path.type, "string");
+    assert.equal(Check(read.parameters, { path: ["a.js", "b.js"] }), true);
+    assert.equal(Check(read.parameters, { path: [42] }), false);
+    assert.equal(Check(ls.parameters, { path: "src" }), true);
 
     const captured = buildCatalog(mergeNativeToolDefinitions(tools, ["read"]), ["supernova"]);
-    assert.equal(describeTool(captured, "read").description, "Read a file from disk");
+    assert.equal(Check(describeTool(captured, "read").parameters, { path: ["a.js"] }), false);
   });
 });

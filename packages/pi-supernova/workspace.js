@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
+import { constants } from "node:os";
 import { isString } from "./decode.js";
 
 let cachedCwd = null;
@@ -81,63 +82,66 @@ export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = f
 }
 
 export async function runCommand(argv, options = {}) {
+  options.signal?.throwIfAborted();
   const cwd = options.cwd || process.cwd();
   const timeoutMs = options.timeoutMs ?? 60_000;
   const maxOutputChars = options.maxOutputChars ?? 2 * 1024 * 1024;
-  return await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const child = spawn(argv[0], argv.slice(1), {
-      cwd,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
+      cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32",
     });
     let stdout = "";
     let stderr = "";
     let settled = false;
     let outputTruncated = false;
-    let onAbort;
-
+    let terminationError;
+    let escalation;
     const cleanup = () => {
       clearTimeout(timer);
-      if (options.signal && onAbort) options.signal.removeEventListener("abort", onAbort);
+      clearTimeout(escalation);
+      options.signal?.removeEventListener("abort", onAbort);
     };
-    const fail = (err) => {
+    const fail = error => {
       if (settled) return;
       settled = true;
       cleanup();
-      reject(err);
+      reject(error);
     };
+    const signalTree = signal => {
+      if (!child.pid) return;
+      if (process.platform === "win32") {
+        const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+        killer.on("error", () => child.kill(signal));
+      } else {
+        try { process.kill(-child.pid, signal); } catch (err) { if (err.code !== "ESRCH") child.kill(signal); }
+      }
+    };
+    const terminate = error => {
+      if (settled || terminationError) return;
+      terminationError = error;
+      signalTree("SIGTERM");
+      // Keep ownership after the direct child exits: descendants may ignore SIGTERM.
+      escalation = setTimeout(() => { signalTree("SIGKILL"); fail(error); }, 150);
+    };
+    const onAbort = () => terminate(new Error("aborted"));
+    const timer = setTimeout(() => terminate(new Error("command timed out after " + timeoutMs + "ms: " + argv.join(" "))), timeoutMs);
     const append = (current, chunk) => {
-      const remaining = Math.max(0, maxOutputChars - current.length);
+      const remaining = Math.max(0, maxOutputChars - stdout.length - stderr.length);
       if (chunk.length > remaining) outputTruncated = true;
-      return remaining > 0 ? current + chunk.slice(0, remaining) : current;
+      return remaining ? current + chunk.slice(0, remaining) : current;
     };
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      fail(new Error(`command timed out after ${timeoutMs}ms: ${argv.join(" ")}`));
-    }, timeoutMs);
-
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout = append(stdout, chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr = append(stderr, chunk);
-    });
+    child.stdout.on("data", chunk => { stdout = append(stdout, chunk); });
+    child.stderr.on("data", chunk => { stderr = append(stderr, chunk); });
     child.on("error", fail);
-    child.on("close", (code) => {
-      if (settled) return;
+    child.on("close", (code, signal) => {
+      if (settled || terminationError) return;
       settled = true;
       cleanup();
-      resolve({ stdout, stderr, exitCode: code ?? 0, outputTruncated });
+      resolve({ stdout, stderr, exitCode: code ?? (128 + (constants.signals[signal] ?? 1)), signal, outputTruncated });
     });
-    if (options.signal) {
-      onAbort = () => {
-        child.kill("SIGTERM");
-        fail(new Error("aborted"));
-      };
-      if (options.signal.aborted) onAbort();
-      else options.signal.addEventListener("abort", onAbort, { once: true });
-    }
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
   });
 }

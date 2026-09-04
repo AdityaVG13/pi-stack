@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { extractStructuralSurface } from "./surface.js";
+import { isFunction } from "./decode.js";
 import { Frecency } from "./fuzzy.js";
 import { relativeSlash } from "./workspace.js";
 
@@ -112,7 +113,7 @@ export class WorkspaceIndex {
         this.watchers.set(root, false);
         this.lists.clear();
       });
-      if (typeof watcher.unref === "function") watcher.unref();
+      if (isFunction(watcher.unref)) watcher.unref();
       ok = true;
     } catch {
       ok = false;

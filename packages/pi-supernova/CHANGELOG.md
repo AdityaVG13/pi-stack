@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-04
+
+### Fixed
+
+- Each program uses a separate worker and transaction. Late callbacks, idle worker errors, concurrent runs, startup cancellation, and startup deadlines no longer share state.
+- Command deadlines stop descendants. Signal exits report failure. Native commits recover partial replacements; writes reject missing content and edits reject overlapping matches.
+- Unified patches handle zero-context insertions, empty files, final-newline changes, and CRLF. Reads see external changes; evidence search includes staged files.
+- OMP tool calls use the current session’s enabled, permission-aware registry. Discovery supplies complete schemas. Batch options, failure envelopes, scheduling, and call identifiers remain consistent.
+- Output limits cover aggregate batch text, markers, and spill footers. Details remain valid JSON; logs report truncation. DataView ranges and own `__proto__` values survive serialization.
+
+### Changed
+
+- Acorn parses supported function and body forms. Return hints ignore comments and nested callbacks. Invalid collection arguments report errors.
+- The result ledger checks text equality, retains explicit-read pins across aliases, expires source records, and accepts a zero window.
+- Terminal width checks use Unicode graphemes. Expanded cards wrap all bounded result and log text without a preview-line limit.
+- Pi 0.85.0 native adapters respect active-tool changes. Pi has no cross-extension execution API; the README states this limit.
+- Live checks cover Pi 0.85.0 and OMP 18.1.10, including expanded terminal output.
+
 ## [0.0.15] - 2026-09-04
 
 ### Removed

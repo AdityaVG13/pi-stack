@@ -1,4 +1,4 @@
-import { isString } from "./decode.js";
+import { isString, isObject } from "./decode.js";
 
 export function truncateChars(text, maxChars, label = "value") {
   const normalized = isString(text) ? text : String(text ?? "");
@@ -12,22 +12,21 @@ export function truncateChars(text, maxChars, label = "value") {
       originalChars: normalized.length,
     };
   }
-  const head = headEnd(normalized, Math.floor(limit * 0.7));
-  let tail = Math.max(0, limit - head);
+  let head = headEnd(normalized, Math.floor(limit * 0.7));
+  let tail = 0;
   let marker = "";
-  let previousTail = -1;
-  while (tail !== previousTail) {
-    previousTail = tail;
+  for (;;) {
     const omitted = normalized.length - head - tail;
-    marker = `\n…[${label} truncated ${omitted} chars]…\n`;
-    tail = Math.max(0, limit - head - marker.length);
+    marker = "\n…[" + label + " truncated " + omitted + " chars]…\n";
+    if (marker.length > limit) return { text: normalized.slice(0, headEnd(normalized, limit)), truncated: true, originalChars: normalized.length };
+    const budget = limit - marker.length;
+    const nextHead = headEnd(normalized, Math.min(head, budget));
+    const nextTail = normalized.length - tailStartIndex(normalized, Math.max(0, budget - nextHead));
+    if (nextHead === head && nextTail === tail) break;
+    head = nextHead;
+    tail = nextTail;
   }
-  const tailStart = tailStartIndex(normalized, tail);
-  return {
-    text: normalized.slice(0, head) + marker + normalized.slice(tailStart),
-    truncated: true,
-    originalChars: normalized.length,
-  };
+  return { text: normalized.slice(0, head) + marker + normalized.slice(normalized.length - tail), truncated: true, originalChars: normalized.length };
 }
 
 // Lone surrogates in a tool result make the message invalid UTF-8 at the API
@@ -53,7 +52,7 @@ function formatKey(key) {
 
 function formatPrimitive(value) {
   if (value === undefined) return "undefined";
-  if (typeof value === "number" && !Number.isFinite(value)) return String(value);
+  if (Number.isNaN(value) || value === Infinity || value === -Infinity) return String(value);
   return JSON.stringify(value) ?? String(value);
 }
 
@@ -65,7 +64,7 @@ function formatFlatList(value) {
 }
 
 function formatFlat(value) {
-  if (value === null || typeof value !== "object") return formatPrimitive(value);
+  if ((!isObject(value) && !Array.isArray(value))) return formatPrimitive(value);
   if (Array.isArray(value)) return formatFlatList(value);
   let out = "";
   for (const key of Object.keys(value)) {
@@ -83,7 +82,7 @@ function formatFlat(value) {
  */
 export function formatValue(value, indent = "", width = FORMAT_WIDTH) {
   const flat = formatFlat(value);
-  if (value === null || typeof value !== "object" || flat.length + indent.length <= width) return flat;
+  if ((!isObject(value) && !Array.isArray(value)) || flat.length + indent.length <= width) return flat;
   const pad = indent + " ";
   if (Array.isArray(value)) {
     if (value.length === 0) return "[]";

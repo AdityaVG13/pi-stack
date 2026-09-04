@@ -127,7 +127,6 @@ function renderPortableFrame(theme, { header, sections = [], state = "pending", 
 	const border = borderPaint(theme, state, borderColor);
 	const bgFn = bgFnForState(theme, state);
 	const h = box.horizontal;
-	const v = box.vertical;
 	const cap = h.repeat(3);
 
 	const paintBar = (leftChar, rightChar, label) => {

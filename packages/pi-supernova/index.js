@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { isString, isFunction, isObject } from "./decode.js";
+import { isString, isFunction } from "./decode.js";
 import { buildCatalog, searchCatalog, describeTool, mergeNativeToolDefinitions } from "./catalog.js";
 import { loadConfig } from "./config.js";
 import { createHostBridge } from "./host-bridge.js";
@@ -82,7 +82,7 @@ function errorText(outcome, call) {
 
 function successText(outcome, call) {
   const truncated = outcome.returnTruncated ? " [return truncated]" : "";
-  const hint = outcome.undefinedReturn ? " (no return statement; add \`return\` to get a value)" : "";
+  const hint = outcome.undefinedReturn ? " (no return statement; add `return` to get a value)" : "";
   return `ok #${call} ${outcome.wallMs}ms${truncated}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
 }
 const TOOL_DESCRIPTION = `Run one JavaScript program that composes host tools. Async body or arrow; \`return\` a small shaped value (compact literal, capped; strings raw; console.log is captured).
@@ -111,50 +111,38 @@ export default function piSupernova(pi) {
     getCwd: () => cwd,
   });
 
-  function refreshCatalog() {
-    let tools = [];
-    try {
-      if (isFunction(pi.getAllTools)) {
-        tools = pi.getAllTools() || [];
-      }
-    } catch {
-      tools = [];
-    }
-    const discoverable = mergeNativeToolDefinitions(tools, bridge.executors.keys());
+  function refreshCatalog(target = bridge) {
+    const tools = target.refreshTools();
+    const discoverable = mergeNativeToolDefinitions(tools, target.externalNames())
+      .filter(tool => target.isCallable(tool.name))
+      .map(tool => {
+        const schema = tool.parameters;
+        try {
+          if (isFunction(schema?.toJsonSchema)) return { ...tool, parameters: schema.toJsonSchema() };
+          if (schema && !schema.type && pi.zod?.toJSONSchema && (schema._zod || schema._def)) {
+            return { ...tool, parameters: pi.zod.toJSONSchema(schema, { io: "input" }) };
+          }
+          return tool;
+        } catch (error) {
+          return { ...tool, parameters: undefined, schemaError: error.message };
+        }
+      });
     catalog = buildCatalog(discoverable, config.excludeTools || []);
     return catalog;
   }
 
-  function makeNovaApi() {
+  function makeNovaApi(runBridge, runCatalog, cancel) {
     return {
-      async search(query, limit) {
-        const cat = catalog.length ? catalog : refreshCatalog();
-        const lim = Number.isInteger(limit) ? limit : config.maxSearchResults;
-        return searchCatalog(cat, query, lim);
-      },
-      async describe(name) {
-        const cat = catalog.length ? catalog : refreshCatalog();
-        return describeTool(cat, name);
-      },
-      async call(name, args) {
-        return bridge.call(name, args);
-      },
-      async callMany(calls) {
-        return bridge.callMany(calls);
-      },
-      speculateBegin() {
-        bridge.beginSpeculation();
-      },
-      async speculateCommit() {
-        await bridge.commitSpeculation();
-      },
-      speculateRollback() {
-        bridge.rollbackSpeculation();
-      },
-      names() {
-        const cat = catalog.length ? catalog : refreshCatalog();
-        return [...new Set([...cat.map((t) => t.name), ...bridge.executors.keys(), ...Object.keys(bridge.natives)])];
-      },
+      search: async (query, limit) => searchCatalog(runCatalog, query, Number.isInteger(limit) ? limit : config.maxSearchResults),
+      describe: async (name) => describeTool(runCatalog, name),
+      call: (name, args) => runBridge.call(name, args),
+      callMany: (calls) => runBridge.callMany(calls),
+      speculateBegin: () => runBridge.beginSpeculation(),
+      speculateCommit: () => runBridge.commitSpeculation(),
+      speculateRollback: () => runBridge.rollbackSpeculation(),
+      names: () => runCatalog.map(tool => tool.name),
+      batchRead: runBridge.supportsBatchRead(),
+      cancel,
     };
   }
 
@@ -177,70 +165,62 @@ export default function piSupernova(pi) {
     renderCall: renderSupernovaCall,
     renderResult: renderSupernovaResult,
     async execute(_id, params, signal, onUpdate, ctx) {
-      if (ctx && isString(ctx.cwd) && ctx.cwd) cwd = ctx.cwd;
+      const runCwd = ctx?.cwd || cwd;
       const runController = new AbortController();
       const abortRun = () => runController.abort(signal?.reason);
       if (signal?.aborted) abortRun();
       else signal?.addEventListener("abort", abortRun, { once: true });
+      const runBridge = bridge.fork({ getCwd: () => runCwd });
+      runBridge.bindCallContext(ctx, runController.signal);
+      runBridge.resetCallBudget();
 
-      bridge.bindCallContext(ctx, runController.signal);
-      bridge.resetCallBudget();
-      refreshCatalog();
-      bridge.beginSpeculation();
       const call = ++programSeq;
-      bridge.ledger.beginProgram(call);
+      runBridge.ledger.beginProgram(call);
       const emitProgress = progressEmitter(onUpdate);
-      bridge.setCallListener((_record, allTrace) => emitProgress(allTrace));
+      runBridge.setCallListener((_record, trace) => emitProgress(trace));
       emitProgress([]);
-
+      const started = performance.now();
       let outcome;
       try {
-        outcome = await runProgram(params, runController.signal, abortRun);
+        const runCatalog = refreshCatalog(runBridge);
+        runBridge.beginSpeculation();
+        outcome = await runGuestProgram({
+          code: params?.code,
+          nova: makeNovaApi(runBridge, runCatalog, abortRun),
+          config: { ...config, timeoutMs: Number.isInteger(params?.timeoutMs) ? params.timeoutMs : config.timeoutMs },
+          signal: runController.signal,
+          onTimeout: abortRun,
+        });
+        runBridge.close();
+        if (outcome.ok) {
+          if (runBridge.getOverlayDepth() !== 1) throw new Error("program ended with an unfinished nova.speculate branch; await it before returning");
+          await runBridge.commitSpeculation();
+        }
+        else runBridge.rollbackSpeculation();
+      } catch (error) {
+        abortRun();
+        runBridge.close();
+        runBridge.rollbackSpeculation();
+        outcome = { ok: false, error: error instanceof Error ? error.message : String(error), logs: outcome?.logs ?? [], wallMs: Math.round(performance.now() - started) };
       } finally {
-        bridge.setCallListener(null);
+        runBridge.setCallListener(null);
         emitProgress.flush();
         signal?.removeEventListener("abort", abortRun);
       }
-
-      const trace = bridge.getTrace();
-      if (!outcome.ok) {
-        bridge.rollbackSpeculation();
-        return result(bridge.ledger.dedupe(errorText(outcome, call), call), { ok: false, error: outcome.error, wallMs: outcome.wallMs, logs: outcome.logs, trace });
-      }
-      await bridge.commitSpeculation();
-      return result(bridge.ledger.dedupe(successText(outcome, call), call), {
-        ok: true,
-        wallMs: outcome.wallMs,
-        returnTruncated: outcome.returnTruncated,
-        logTruncated: outcome.logTruncated,
-        logs: outcome.logs,
-        result: outcome.result,
-        trace,
+      const trace = runBridge.getTrace();
+      const text = outcome.ok ? successText(outcome, call) : errorText(outcome, call);
+      return result(runBridge.ledger.dedupe(text, call), {
+        ok: outcome.ok, error: outcome.error, wallMs: outcome.wallMs,
+        returnTruncated: outcome.returnTruncated, logTruncated: outcome.logTruncated,
+        logs: outcome.logs, result: outcome.result, trace,
       });
     },
   });
 
-  async function runProgram(params, signal, onTimeout) {
-    const runStartedAt = performance.now();
-    const runConfig = {
-      ...config,
-      timeoutMs: Number.isInteger(params?.timeoutMs) ? params.timeoutMs : config.timeoutMs,
-    };
-    try {
-      return await runGuestProgram({ code: String(params?.code || ""), nova: makeNovaApi(), config: runConfig, signal, onTimeout });
-    } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-        logs: [],
-        wallMs: Math.round(performance.now() - runStartedAt),
-      };
-    }
-  }
-
   pi.on("session_start", (_event, ctx) => {
     if (ctx && isString(ctx.cwd) && ctx.cwd) cwd = ctx.cwd;
     // A new session is a new model context: nothing has been seen yet.
+    bridge.bindCallContext(ctx);
     bridge.ledger.reset();
     programSeq = 0;
     refreshCatalog();
@@ -248,14 +228,15 @@ export default function piSupernova(pi) {
   });
 
   pi.registerCommand("supernova", {
-    description: "Show pi-supernova status (catalog size, captured executors)",
+    description: "Show pi-supernova status (callable tools and session statistics)",
     handler: async (_args, ctx) => {
+      bridge.bindCallContext(ctx);
       refreshCatalog();
-      const captured = [...bridge.executors.keys()].sort();
-      const natives = Object.keys(bridge.natives).sort();
+      const external = bridge.externalNames().filter(bridge.isCallable).sort();
+      const natives = Object.keys(bridge.natives).filter(name => bridge.isCallable(name) && !external.includes(name)).sort();
       const lines = [
         `pi-supernova catalog: ${catalog.length} tools`,
-        `captured executors: ${captured.length ? captured.join(", ") : "(none yet; load this package early)"}`,
+        `external tools: ${external.length ? external.join(", ") : "(none)"}`,
         `native adapters: ${natives.join(", ")}`,
         `timeoutMs=${config.timeoutMs} maxCallResultChars=${config.maxCallResultChars} maxReturnChars=${config.maxReturnChars} maxBridgeCalls=${config.maxBridgeCalls} maxHeapMb=${config.maxHeapMb}`,
         sessionStats(bridge.ledger.stats),

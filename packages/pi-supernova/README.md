@@ -12,7 +12,13 @@ pi install npm:pi-supernova
 omp install npm:pi-supernova
 ```
 
-Load **before** other tool-owning packages so `registerTool` capture works. Restart the host after install.
+Restart the host after install. OMP uses the current session’s enabled tool registry, independent of extension load order.
+
+Pi 0.85.0 supplies tool schemas but has no cross-extension execution API. Supernova uses native adapters and executors registered through its API instance.
+
+An unrelated Pi extension’s tools are not callable through Supernova. OMP 18.1.10 supports those calls through its session registry.
+
+The runtime, transaction, patch, output-limit, and renderer fixes share the same code on both hosts. Disabled configured tools are not callable.
 
 ---
 
@@ -25,7 +31,11 @@ Load **before** other tool-owning packages so `registerTool` capture works. Rest
 | Parallel reads | Ad hoc | `callMany` Auto / `parallel()` |
 | Hosts | Separate packages | Same tarball for Pi **and** OMP |
 
-Guest code runs as an `AsyncFunction` in a worker thread (same trust class as host `bash`), not an OS/VM sandbox. Tool calls go through `nova.call` RPC to the host thread; a hard timeout, abort, `process.exit`, or a memory blow-up terminates the worker without touching the harness.
+Guest code runs as an `AsyncFunction` in a new worker for each program. It has the same trust level as host `bash`.
+
+The host parses the bounded source with Acorn before execution. Tool calls use RPC. Deadlines and cancellation cover worker startup, tool discovery, and execution.
+
+A completed worker cannot supply callbacks or globals to another program. Concurrent programs have separate transactions, traces, cancellation signals, and call budgets.
 
 ---
 
@@ -69,7 +79,9 @@ Unified Pi/OMP card: one aligned row per call (status · tool · duration · tar
 ╰───────────────────────────────────────────────────────────────╯
 ```
 
-Multi-line commands show their first line plus a hidden-line count. Press Enter for a larger hunk budget, the full returned value, and logs.
+Multi-line commands show their first line and a hidden-line count. Expand the card to show the complete bounded return value and logs.
+
+Expanded text wraps at the terminal width without a preview-line limit. Operation lists and mutation diffs keep their separate 24-row budgets.
 
 ---
 
@@ -78,7 +90,7 @@ Multi-line commands show their first line plus a hidden-line count. Press Enter 
 | API | Role |
 |-----|------|
 | `nova.search(query, limit?)` | Thin catalog hits |
-| `nova.describe(name)` | Parameter summary on demand |
+| `nova.describe(name)` | Complete JSON input schema on demand; explicit failure when no usable schema is available |
 | `nova.call(name, args)` | Host tool or native adapter |
 | `nova.callMany([{name,args}])` | Auto parallel wave; iterable array with `.mode` / `.results` |
 | `nova.evidence(query, {k?, path?, maxChars?})` | Top-K source spans (path, lines, verbatim text) that answer a question. Zero-token evidence selection after Zero-Mem; ~68% fewer tokens than reading the files |
@@ -86,8 +98,14 @@ Multi-line commands show their first line plus a hidden-line count. Press Enter 
 | `nova.surface(path)` | Structural outline for a source file |
 | `nova.snap(query, searchRoot?)` | Defining file (workspace-relative), line, signature, confidence, and context for a concept; served from the in-process index in well under 1ms |
 | `nova.has(name)` | Whether a catalog or native tool is callable (sync) |
-| `parallel(thunks)` / `pipeline(items, …stages)` | Raw `Promise.all` helpers |
+| `parallel(thunks)` / `pipeline(items, …stages)` | Array-based helpers; pipeline stages must be functions |
 | `nova.speculate(fn)` | Counterfactual branch (rollback / commit) |
+
+`nova.call` returns an explicit `{ok, value}` envelope. Convenience helpers throw when a host tool reports failure.
+
+`callMany` runs known read-only tools concurrently. Unknown tools and mutating actions run in order, including LSP rename operations.
+
+`nova.describe` preserves required fields, unions, enums, nested objects, and numeric constraints. OMP ArkType and Zod schemas convert to JSON Schema.
 
 Root Snap searches ignore hidden files. Passing a hidden search root includes hidden files beneath that root; Git metadata is always excluded.
 
@@ -112,11 +130,17 @@ Optional `~/.pi/agent/supernova.json` or `~/.omp/agent/supernova.json`
 }
 ```
 
+`maxCallResultChars` bounds text per call. A batch shares one text budget across all items; it does not repeat a joined copy.
+
+Envelope fields and JSON encoding add overhead. Details have a separate 2,000-character JSON budget. Truncation flags cover returns, raw objects, and logs.
+
+An optional `spillDir` retains complete truncated text. Inline spill footers and truncation markers fit within the configured text limit.
+
 `seenWindow` is how many programs back the seen-ledger remembers (set 0 to disable collapsing). `maxHeapMb` caps the guest worker heap (V8 `resourceLimits` on Node) and arms a process-RSS watchdog that terminates a runaway program on both Node and Bun.
 
 Defaults also set `excludeTools` (includes `supernova` and DCE helpers). An empty `"excludeTools": []` **replaces** those defaults, so omit the key unless you mean that.
 
-Slash command `/supernova`: catalog size, captured executors, and session token stats.
+Slash command `/supernova`: callable catalog size, external tools, native adapters, and session token stats.
 
 ---
 
@@ -141,8 +165,8 @@ Pair with DCE last if you use it: `omp install npm:pi-deferred-context-engine`.
 
 | Symptom | Fix |
 |---------|-----|
-| `unknown tool "…"` | Follow the `Did you mean` hint, or `nova.search("")`; for host tools install supernova **first**; restart; `/supernova` |
-| `Rendered line exceeds terminal width` | ≥0.0.1 and restart so `render.js` reloads |
+| `unknown tool "…"` | Use `nova.search("")` and `/supernova`. Enable the tool in the current session. Restart after package changes. |
+| `Rendered line exceeds terminal width` | Install the current package and restart so the Unicode width code reloads. |
 | `callMany` / not iterable | ≥0.0.1; the return is an array with `.mode` / `.results` |
 | Extension missing on OMP | `omp install npm:pi-supernova` (needs `"omp".extensions`) |
 
@@ -152,9 +176,16 @@ Pair with DCE last if you use it: `omp install npm:pi-deferred-context-engine`.
 
 - Guest JS is **unsandboxed**. Adapter path jails are not a boundary against `import("node:fs")`. The worker only contains hangs, exits, and memory, not intent.
 - Guest error messages carry `(line:col)` on Node; Bun's engine does not expose guest-relative positions.
-- `bash` / mutating tools flush speculative writes (transaction barrier); error rollback cannot undo that.
-- The workspace index refreshes its file list every 10s or on any supernova mutation; a file created by an external process can take up to 10s to appear in `glob`/`snap` (`read` is never stale).
-- Pre-1.0 package: APIs and TUI may still evolve between minor releases.
+
+## Transactions and file freshness
+
+- `bash` and mutating host tools commit pending writes before execution. Later rollback cannot undo those changes or external effects.
+- Native commits stage replacements and backups before installation. A commit failure restores earlier replacements; a recovery failure reports retained backup paths.
+- A nested `nova.speculate` branch cannot call external mutators. Await each branch before returning.
+- Native reads use current disk content unless a staged write replaces it. Evidence search includes new staged files.
+- Workspace file-list updates use filesystem watchers. Without a working watcher, external new files can take 10 seconds to appear in indexed searches.
+
+This is a pre-1.0 package. APIs and the terminal display can change between minor releases.
 
 ## Research and prior art
 

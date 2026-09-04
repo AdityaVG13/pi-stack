@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 const DEFAULTS = require("./config.default.json");
 
 const KNOWN_KEYS = new Set(Object.keys(DEFAULTS));
-const NONNEGATIVE_INTEGER_KEYS = new Set(["maxLogLines"]);
+const NONNEGATIVE_INTEGER_KEYS = new Set(["maxLogLines", "seenWindow"]);
 const POSITIVE_INTEGER_KEYS = new Set([
   "timeoutMs",
   "maxCodeChars",
@@ -18,7 +18,6 @@ const POSITIVE_INTEGER_KEYS = new Set([
   "maxLogLineChars",
   "maxSearchResults",
   "maxHeapMb",
-  "seenWindow",
 ]);
 
 const VALIDATORS = {

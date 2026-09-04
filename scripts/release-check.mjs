@@ -5,8 +5,8 @@
  *
  * Usage: node scripts/release-check.mjs
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, dirname, relative } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -23,17 +23,6 @@ const HOST_PEERS = new Set([
 ]);
 
 const BAD_PATH_RE = /\/Users\/|\/home\/[a-z]+\/Developer|C:\\\\Users\\\\/i;
-
-function walkFiles(dir, out = []) {
-  for (const name of readdirSync(dir)) {
-    if (name === "node_modules" || name === ".tokenzero" || name.endsWith(".tgz")) continue;
-    const p = join(dir, name);
-    const st = statSync(p);
-    if (st.isDirectory()) walkFiles(p, out);
-    else out.push(p);
-  }
-  return out;
-}
 
 function checkPackage(name) {
   const dir = join(PACKAGES, name);
@@ -85,28 +74,6 @@ function checkPackage(name) {
   if (!existsSync(join(dir, "README.md"))) issues.push("missing README.md");
   if (!existsSync(join(dir, "LICENSE"))) issues.push("missing LICENSE");
 
-  // Scan published source for absolute personal paths
-  const filesField = pj.files || ["*"];
-  for (const file of walkFiles(dir)) {
-    const rel = relative(dir, file);
-    if (rel.startsWith("test/") || rel.startsWith("tests/")) continue;
-    if (rel === "package-lock.json") continue;
-    if (!/\.(js|mjs|ts|json|md)$/.test(rel)) continue;
-    // Only scan files that would ship (best-effort vs files globs)
-    const ship =
-      filesField.includes(rel) ||
-      filesField.some((f) => f === rel || (f.endsWith("/") && rel.startsWith(f)));
-    if (!ship && filesField.length) {
-      // still scan main code
-      if (!/\.(js|mjs|ts)$/.test(rel) && !rel.endsWith(".json")) continue;
-      if (rel.startsWith("test")) continue;
-    }
-    const text = readFileSync(file, "utf8");
-    if (BAD_PATH_RE.test(text)) {
-      issues.push(`personal absolute path in ${rel}`);
-    }
-  }
-
   // npm pack dry-run
   const pack = spawnSync("npm", ["pack", "--dry-run", "--json"], {
     cwd: dir,
@@ -120,8 +87,14 @@ function checkPackage(name) {
       const entry = Array.isArray(data) ? data[0] : data;
       const count = entry?.entryCount ?? entry?.files?.length;
       if (count != null && count < 2) issues.push(`npm pack too few files: ${count}`);
-    } catch {
-      /* older npm may not support --json the same way */
+      if (!Array.isArray(entry?.files)) throw new Error("missing package file list");
+      // npm decides what ships; ignored local artifacts cannot block a release.
+      for (const { path: rel } of entry.files) {
+        if (!/\.(js|mjs|ts|json|md)$/.test(rel)) continue;
+        if (BAD_PATH_RE.test(readFileSync(join(dir, rel), "utf8"))) issues.push(`personal absolute path in ${rel}`);
+      }
+    } catch (error) {
+      issues.push(`npm pack inspection failed: ${error.message}`);
     }
   }
 

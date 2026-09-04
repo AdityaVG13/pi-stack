@@ -1,47 +1,55 @@
+import { isFunction } from "./decode.js";
 
-import { isString } from "./decode.js";
-export function isMutatingTool(name, config) {
-  const exact = new Set(config.mutatingTools || []);
-  if (exact.has(name)) return true;
-  const prefixes = config.mutatingPrefixes || [];
-  for (const prefix of prefixes) {
-    if (isString(prefix) && prefix.length > 0 && name.startsWith(prefix)) return true;
+const READ_ONLY_TOOLS = new Set(["read", "grep", "glob", "find", "ls", "snap", "evidence", "surface", "asgrep_search", "asgrep_status", "ast_grep", "web_search"]);
+const READ_ONLY_LSP = new Set(["definition", "references", "hover", "symbols", "diagnostics", "implementation", "type_definition", "incoming_calls", "outgoing_calls"]);
+
+export function isMutatingTool(name, config = {}, args = {}, definition) {
+  if ((config.mutatingTools ?? []).includes(name)) return true;
+  if ((config.mutatingPrefixes ?? []).some(prefix => prefix && name.startsWith(prefix))) return true;
+  if (definition?.annotations?.readOnlyHint === true) return false;
+  if (name === "lsp") {
+    const action = args.action ?? args.operation;
+    if (READ_ONLY_LSP.has(action)) return false;
+    if (["rename", "rename_file"].includes(action)) return args.apply !== false;
+    if (action === "code_actions") return args.apply === true;
+    return true;
   }
-  return false;
+  if (name === "todo") return args.op !== "view";
+  if (name === "hub") return !["list", "ps", "logs", "describe"].includes(args.op);
+  return !READ_ONLY_TOOLS.has(name);
 }
-async function runSerial(list) {
-  const out = [];
-  for (const thunk of list) out.push(await thunk());
-  return out;
+
+function requireArray(value, name) {
+  if (!Array.isArray(value)) throw new TypeError(name + " requires an array");
+  return value;
 }
-function shouldParallelize(mode, anyMutating, count) {
-  if (mode === "parallel") return true;
-  if (mode !== "auto") return false;
-  if (anyMutating) return false;
-  return count > 1;
-}
+
 export async function runParallelWave(thunks, meta, options = {}) {
-  const list = Array.isArray(thunks) ? thunks : [];
-  if (list.length === 0) return { results: [], mode: "serial", reason: "empty" };
+  const list = requireArray(thunks, "parallel wave");
+  if (list.some(item => !isFunction(item))) throw new TypeError("parallel wave requires functions");
+  if (!list.length) return { results: [], mode: "serial", reason: "empty" };
   const { mode = "auto", config = {} } = options;
-  const names = Array.isArray(meta?.names) ? meta.names : [];
-  const anyMutating = names.some((n) => isString(n) && isMutatingTool(n, config));
-  if (shouldParallelize(mode, anyMutating, list.length)) {
-    const results = await Promise.all(list.map((thunk) => thunk()));
-    return { results, mode: "parallel", reason: "independent-reads" };
+  const names = meta?.names ?? [];
+  const mutating = names.length !== list.length || names.some((name, i) => isMutatingTool(name, config, meta?.calls?.[i]?.args, meta?.definitions?.[i]));
+  if (!mutating && (mode === "parallel" || (mode === "auto" && list.length > 1))) {
+    // Do not finish a wave while its already-started host calls are still running.
+    const settled = await Promise.allSettled(list.map(thunk => Promise.resolve().then(thunk)));
+    const failure = settled.find(item => item.status === "rejected");
+    if (failure) throw failure.reason;
+    return { results: settled.map(item => item.value), mode: "parallel", reason: "independent-reads" };
   }
-  const results = await runSerial(list);
-  if (anyMutating) return { results, mode: "serial", reason: "mutating" };
-  return { results, mode: "serial", reason: "single-or-forced" };
+  const results = [];
+  for (const thunk of list) results.push(await thunk());
+  return { results, mode: "serial", reason: mutating ? "mutating" : "single-or-forced" };
 }
+
 export async function parallel(items) {
-  const list = Array.isArray(items) ? items : [];
-  return Promise.all(list.map((item) => (item instanceof Function ? item() : item)));
+  return Promise.all(requireArray(items, "parallel").map(item => isFunction(item) ? item() : item));
 }
+
 export async function pipeline(items, ...stages) {
-  let current = Array.isArray(items) ? items.slice() : [];
-  for (const stage of stages) {
-    current = await Promise.all(current.map((item) => stage(item)));
-  }
+  let current = requireArray(items, "pipeline");
+  if (stages.some(stage => !isFunction(stage))) throw new TypeError("pipeline stages must be functions");
+  for (const stage of stages) current = await Promise.all(current.map(item => stage(item)));
   return current;
 }
