@@ -4,9 +4,10 @@ import * as path from "node:path";
 const VFS_CACHE_MAX = 1024;
 
 export class CausalVfs {
-  constructor() {
+  constructor(onNewFile) {
     this.cache = new Map();
     this.overlays = [];
+    this.onNewFile = onNewFile;
   }
 
   setCache(target, content) {
@@ -62,6 +63,7 @@ export class CausalVfs {
       return { speculative: true };
     }
 
+    let existed = true;
     try {
       const stat = await fs.stat(target);
       if (stat.isDirectory()) {
@@ -69,11 +71,13 @@ export class CausalVfs {
       }
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
+      existed = false;
     }
 
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, content, "utf8");
     this.setCache(target, content);
+    if (!existed) this.onNewFile?.(target);
     return { speculative: false };
   }
 
@@ -95,6 +99,7 @@ export class CausalVfs {
       await fs.writeFile(filePath, fileContent, "utf8");
       this.setCache(filePath, fileContent);
     }
+    if (top.size > 0) this.onNewFile?.();
     return { committed: top.size, depth: 0 };
   }
 
@@ -115,6 +120,7 @@ export class CausalVfs {
       await fs.writeFile(filePath, fileContent, "utf8");
       this.setCache(filePath, fileContent);
     }
+    if (pending.size > 0) this.onNewFile?.();
     this.overlays[0] = new Map();
     return pending.size > 0;
   }

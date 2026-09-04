@@ -8,9 +8,10 @@ import { unknownToolMessage } from "./catalog.js";
 import { extractStructuralSurface } from "./surface.js";
 import { buildEditDiff, buildMultiEditDiff, buildPatchDiff, buildWriteDiff } from "./diff.js";
 import { executeSnap } from "./snap.js";
+import { WorkspaceIndex, globToRegExp } from "./repo-index.js";
 import { CausalVfs } from "./vfs.js";
 import { applyPatchToText } from "./patch.js";
-import { resolveWorkspacePath, runCommand } from "./workspace.js";
+import { resolveWorkspacePath, runCommand, clearPathCache } from "./workspace.js";
 
 function textResult(text, details) {
   return {
@@ -113,7 +114,61 @@ async function formatLsEntry(dirPath, entry) {
   return `${entry.name}${isDir ? "/" : ""} (${typeLabel}${sizeSuffix})`;
 }
 
-function createNativeAdapters(getCwd, vfs, config) {
+function rgGrepArgs(pattern, params, searchPath) {
+  const args = ["--line-number", "--no-heading", "--color", "never"];
+  if (params?.caseSensitive !== true) args.push("--ignore-case");
+  if (params?.glob) args.push("--glob", String(params.glob));
+  args.push("--", pattern, searchPath);
+  return args;
+}
+
+/** rg --files, then find(1) when rg is unavailable; both accept an optional glob/name pattern. */
+async function listWithTools(searchDir, pattern, cwd, signal) {
+  const args = ["--files"];
+  if (pattern) args.push("-g", pattern);
+  const res = await runCommand(["rg", ...args, searchDir], { cwd, timeoutMs: 30_000, signal }).catch(() => null);
+  if (res && (res.exitCode === 0 || res.exitCode === 1)) return textResult(res.stdout, { via: "rg" });
+  const findArgs = [searchDir];
+  if (pattern) findArgs.push("-name", pattern);
+  const findRes = await runCommand(["find", ...findArgs], { cwd, timeoutMs: 30_000, signal });
+  return textResult(findRes.stdout, { via: "find" });
+}
+
+/** rg-compatible grep served from the index; null when the pattern or tree needs real rg. */
+async function grepIndexed(index, pattern, params, searchPath, cwd) {
+  let regex;
+  try {
+    regex = new RegExp(pattern, params?.caseSensitive === true ? "" : "i");
+  } catch {
+    return null;
+  }
+  let files = await index.files(searchPath);
+  if (!index.canScan(files)) return null;
+  if (params?.glob) {
+    const matcher = globToRegExp(String(params.glob));
+    files = files.filter((f) => matcher.test(path.relative(cwd, f).split(path.sep).join("/")));
+  }
+  const rows = index.grep(files, regex, cwd);
+  return rows.length ? rows.join("\n") + "\n" : "";
+}
+
+/** rg --files [-g pattern] served from the index; null when the tree is too large. */
+async function listIndexed(index, root, cwd, pattern) {
+  const files = await index.files(root);
+  if (!index.canScan(files)) return null;
+  const rel = files.map((f) => path.relative(cwd, f).split(path.sep).join("/"));
+  if (!pattern) return rel.length ? rel.join("\n") + "\n" : "";
+  let matcher;
+  try {
+    matcher = globToRegExp(pattern);
+  } catch {
+    return null;
+  }
+  const hits = rel.filter((f) => matcher.test(f));
+  return hits.length ? hits.join("\n") + "\n" : "";
+}
+
+function createNativeAdapters(getCwd, vfs, config, index) {
   async function readAdapter(params, signal) {
       const cwd = getCwd();
       const targetParam = params?.path ?? params?.target;
@@ -143,8 +198,9 @@ function createNativeAdapters(getCwd, vfs, config) {
           const snapRes = await executeSnap({
             query: targetParam,
             searchDir: cwd,
-            vfs,
-            runCommand: (argv, opts) => runCommand(argv, { cwd, signal, ...opts }),
+            index,
+            overlayText: (p) => vfs.getOverlay(p),
+            pendingPaths: vfs.getOverlayPaths(),
           });
           return textResult(JSON.stringify(snapRes, null, 2), { ...snapRes, isSnap: true });
         } catch {}
@@ -243,15 +299,10 @@ function createNativeAdapters(getCwd, vfs, config) {
       const res = await executeSnap({
         query: params.query,
         searchDir: snapTarget,
+        root: cwd,
         includeHidden,
-        vfs: {
-          read: async (candidate) => {
-            // Jail each snap candidate (symlink files must not escape the workspace).
-            const jailed = await resolveWorkspacePath(cwd, candidate, "snap", false);
-            return vfs.read(jailed);
-          },
-        },
-        runCommand: (argv, opts) => runCommand(argv, { cwd: snapTarget, signal, ...opts }),
+        index,
+        overlayText: (p) => vfs.getOverlay(p),
         pendingPaths: vfs.getOverlayPaths(),
       });
       return textResult(JSON.stringify(res, null, 2), res);
@@ -286,6 +337,7 @@ function createNativeAdapters(getCwd, vfs, config) {
         });
       } finally {
         vfs.invalidateCache();
+        index.invalidate();
       }
       const { stdout, stderr } = res;
       const text = stdout && stderr ? stdout + (stdout.endsWith("\n") ? "" : "\n") + stderr : stdout || stderr;
@@ -300,11 +352,9 @@ function createNativeAdapters(getCwd, vfs, config) {
       const pattern = String(params?.pattern || "");
       if (!pattern) throw new Error("grep requires pattern");
       const searchPath = params?.path ? await resolveWorkspacePath(cwd, params.path, "grep", true) : cwd;
-      const args = ["--line-number", "--no-heading", "--color", "never"];
-      if (params?.caseSensitive !== true) args.push("--ignore-case");
-      if (params?.glob) args.push("--glob", String(params.glob));
-      args.push("--", pattern, searchPath);
-      const res = await runCommand(["rg", ...args], { cwd, timeoutMs: 30_000, signal });
+      const indexed = await grepIndexed(index, pattern, params, searchPath, cwd);
+      if (indexed !== null) return textResult(indexed, { exitCode: indexed ? 0 : 1, via: "index" });
+      const res = await runCommand(["rg", ...rgGrepArgs(pattern, params, searchPath)], { cwd, timeoutMs: 30_000, signal });
       if (res.exitCode !== 0 && res.exitCode !== 1) {
         throw new Error(res.stderr.trim() || `rg exited ${res.exitCode}`);
       }
@@ -314,6 +364,8 @@ function createNativeAdapters(getCwd, vfs, config) {
       const cwd = getCwd();
       const pattern = String(params?.pattern || "");
       if (!pattern) throw new Error("glob requires pattern");
+      const indexed = await listIndexed(index, cwd, cwd, pattern);
+      if (indexed !== null) return textResult(indexed, { via: "index" });
       const rg = await runCommand(["rg", "--files", "-g", pattern], { cwd, timeoutMs: 30_000, signal }).catch(
         () => null,
       );
@@ -333,16 +385,10 @@ function createNativeAdapters(getCwd, vfs, config) {
       const searchDir = params?.path ? await resolveWorkspacePath(cwd, params.path, "find", true) : cwd;
       const pattern = params?.pattern || params?.glob;
       if (signal?.aborted) throw new Error("aborted");
-      const args = ["--files"];
-      if (pattern) args.push("-g", String(pattern));
-      const res = await runCommand(["rg", ...args, searchDir], { cwd, timeoutMs: 30_000, signal }).catch(() => null);
-      if (res && (res.exitCode === 0 || res.exitCode === 1)) {
-        return textResult(res.stdout, { via: "rg" });
-      }
-      const findArgs = [searchDir];
-      if (pattern) findArgs.push("-name", String(pattern));
-      const findRes = await runCommand(["find", ...findArgs], { cwd, timeoutMs: 30_000, signal });
-      return textResult(findRes.stdout, { via: "find" });
+      const globPattern = pattern ? String(pattern) : null;
+      const indexed = await listIndexed(index, searchDir, cwd, globPattern);
+      if (indexed !== null) return textResult(indexed, { via: "index" });
+      return listWithTools(searchDir, globPattern, cwd, signal);
     },
     async ls(params, signal) {
       const cwd = getCwd();
@@ -359,9 +405,10 @@ function createNativeAdapters(getCwd, vfs, config) {
 }
 
 export function createHostBridge({ pi, config, getCwd }) {
-  const vfs = new CausalVfs();
+  const index = new WorkspaceIndex((argv, opts) => runCommand(argv, opts));
+  const vfs = new CausalVfs(() => index.invalidate());
   const executors = new Map();
-  const natives = createNativeAdapters(getCwd, vfs, config);
+  const natives = createNativeAdapters(getCwd, vfs, config, index);
   let callCount = 0;
   let activeCtx = null;
   let activeSignal = undefined;
@@ -395,6 +442,7 @@ export function createHostBridge({ pi, config, getCwd }) {
     trace = [];
     // Files may change between programs (editor, git); never serve a stale run.
     vfs.invalidateCache();
+    clearPathCache();
   }
 
   function getTrace() {

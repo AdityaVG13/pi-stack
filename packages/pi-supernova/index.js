@@ -31,14 +31,44 @@ function result(text, details) {
   return { content: [{ type: "text", text }], details };
 }
 
-/** Live trace updates for the card; a throwing host callback must never break the run. */
+const PROGRESS_FRAME_MS = 40;
+
+/**
+ * Live trace updates for the card. The first update is immediate (seeds the result slot);
+ * later ones are coalesced to one host re-render per frame so a tight loop of nova.calls
+ * is not throttled by the TUI. A throwing host callback must never break the run.
+ */
 function progressEmitter(onUpdate) {
-  if (!isFunction(onUpdate)) return () => {};
-  return (trace) => {
+  if (!isFunction(onUpdate)) return Object.assign(() => {}, { flush() {} });
+  let pending = null;
+  let timer = null;
+  const send = (trace) => {
     try {
       onUpdate({ content: [{ type: "text", text: "" }], details: { trace, running: true } });
     } catch {}
   };
+  const flush = () => {
+    timer = null;
+    if (pending === null) return;
+    const trace = pending;
+    pending = null;
+    send(trace);
+  };
+  const emit = (trace) => {
+    if (timer === null && pending === null) {
+      send(trace);
+      timer = setTimeout(flush, PROGRESS_FRAME_MS);
+      return;
+    }
+    pending = trace;
+    if (timer === null) timer = setTimeout(flush, PROGRESS_FRAME_MS);
+  };
+  emit.flush = () => {
+    if (timer !== null) clearTimeout(timer);
+    pending = null;
+    timer = null;
+  };
+  return emit;
 }
 
 function logsBlock(outcome, tail = "") {
@@ -180,6 +210,7 @@ export default function piSupernova(pi) {
         outcome = await runProgram(params, runController.signal, abortRun);
       } finally {
         bridge.setCallListener(null);
+        emitProgress.flush();
         signal?.removeEventListener("abort", abortRun);
       }
 

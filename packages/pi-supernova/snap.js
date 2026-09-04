@@ -1,7 +1,7 @@
 
 import * as path from "node:path";
 import { isString } from "./decode.js";
-import { extractStructuralSurface } from "./surface.js";
+import { WorkspaceIndex } from "./repo-index.js";
 
 const STOP_WORDS = new Set([
   "the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "of", "with",
@@ -30,46 +30,45 @@ export function tokenizeQuery(query) {
   };
 }
 
-export function scorePathTopology(filePath, tokens, { wantsTest, wantsDoc, wantsType }) {
-  const norm = filePath.replace(/\\/g, "/").toLowerCase();
-  const basename = path.basename(norm);
-  const ext = path.extname(norm);
+const SOURCE_EXT = new Set([".ts", ".js", ".mjs", ".rs", ".py", ".go"]);
+const TYPED_EXT = new Set([".ts", ".d.ts", ".rs", ".go"]);
+const VENDOR_SEGMENTS = ["node_modules/", "dist/", "target/"];
 
+function tokenPathScore(token, basename, pathParts, norm) {
+  if (basename === token || basename.startsWith(token + ".")) return 60;
+  if (basename.includes(token)) return 30;
+  if (pathParts.includes(token)) return 15;
+  if (norm.includes(token)) return 5;
+  return 0;
+}
+
+function extensionBonus(ext, { wantsDoc, wantsType }) {
+  let bonus = 0;
+  if (SOURCE_EXT.has(ext) && !wantsDoc) bonus += 5;
+  if (wantsType && TYPED_EXT.has(ext)) bonus += 10;
+  return bonus;
+}
+
+export function scorePathTopology(filePath, tokens, flags) {
+  const norm = filePath.replaceAll("\\", "/").toLowerCase();
   const isTest = norm.includes("test") || norm.includes("spec") || norm.includes("__tests__");
-  if (isTest && !wantsTest) return -50;
-  if (!isTest && wantsTest) return -20;
+  if (isTest && !flags.wantsTest) return -50;
+  if (!isTest && flags.wantsTest) return -20;
+  if (VENDOR_SEGMENTS.some((segment) => norm.includes(segment))) return -100;
 
-  if (norm.includes("node_modules/") || norm.includes("dist/") || norm.includes("target/")) {
-    return -100;
-  }
-
-  let score = 0;
+  const basename = path.basename(norm);
   const pathParts = norm.split(/[^a-zA-Z0-9]+/);
-
-  for (const token of tokens) {
-    if (basename === token || basename.startsWith(token + ".")) score += 60;
-    else if (basename.includes(token)) score += 30;
-    else if (pathParts.includes(token)) score += 15;
-    else if (norm.includes(token)) score += 5;
-  }
-
-  if ([".ts", ".js", ".mjs", ".rs", ".py", ".go"].includes(ext) && !wantsDoc) {
-    score += 5;
-  }
-  if (wantsType && [".ts", ".d.ts", ".rs", ".go"].includes(ext)) {
-    score += 10;
-  }
-
+  let score = extensionBonus(path.extname(norm), flags);
+  for (const token of tokens) score += tokenPathScore(token, basename, pathParts, norm);
   return score;
 }
 
-function isSkippableLine(line) {
-  return !line || line.startsWith("//") || line.startsWith("#") || line.startsWith("*");
+function isSkippableLine(lower) {
+  return !lower || lower.startsWith("//") || lower.startsWith("#") || lower.startsWith("*");
 }
 
 /** A line defines a token only when the declared name contains it; `const x = foo(token)` is a mention. */
-function lineScoreFor(line, tokens, definedName) {
-  const lower = line.toLowerCase();
+function lineScoreFor(lower, tokens, definedName) {
   let lineScore = 0;
   for (const token of tokens) {
     if (!lower.includes(token)) continue;
@@ -81,30 +80,23 @@ function lineScoreFor(line, tokens, definedName) {
 // Mentions are capped so a file that calls a symbol many times cannot outrank the file that defines it.
 const MAX_MENTION_SCORE = 60;
 
-function accumulateContentScore(lines, tokens, defPattern) {
+function scoreContentDefinitions(entry, tokens) {
+  const { lower, defNames } = WorkspaceIndex.linesOf(entry);
   let defScore = 0;
   let mentionScore = 0;
   let bestLine = 1;
   let bestLineScore = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (isSkippableLine(line)) continue;
-    const definedName = defPattern.exec(line)?.[2].toLowerCase() ?? "";
-    const isDef = definedName.length > 0;
-    const lineScore = lineScoreFor(line, tokens, definedName);
+  for (let i = 0; i < lower.length; i++) {
+    if (isSkippableLine(lower[i])) continue;
+    const lineScore = lineScoreFor(lower[i], tokens, defNames[i]);
     if (lineScore > bestLineScore) {
       bestLineScore = lineScore;
       bestLine = i + 1;
     }
-    if (isDef) defScore += lineScore;
+    if (defNames[i]) defScore += lineScore;
     else mentionScore += lineScore;
   }
   return { totalScore: defScore + Math.min(mentionScore, MAX_MENTION_SCORE), bestLine, bestLineScore };
-}
-
-function scoreContentDefinitions(content, tokens) {
-  const defRegex = /^(?:pub\s+)?(?:export\s+)?(?:async\s+)?(?:default\s+)?(function|class|def|fn|const|let|interface|type|struct|enum)\s+([a-zA-Z0-9_$]+)/;
-  return accumulateContentScore(content.split("\n"), tokens, defRegex);
 }
 
 function relativeHasSegment(relativePath, segmentName) {
@@ -115,17 +107,8 @@ function relativeHasHiddenSegment(relativePath) {
   return relativePath.split(path.sep).some((segment) => segment.startsWith(".") && segment.length > 1);
 }
 
-async function listCandidateFiles(dir, includeHidden, runCommand) {
-  const rgArgs = ["rg", "--files"];
-  if (includeHidden) rgArgs.push("--hidden");
-  rgArgs.push("-g", "!.git/**", "-g", "!**/.git/**", dir);
-  try {
-    const res = await runCommand(rgArgs, { timeoutMs: 15_000 });
-    // rg --files is multithreaded and emits in nondeterministic order; ties must rank stably.
-    return res.stdout.split("\n").map((f) => f.trim()).filter(Boolean).sort();
-  } catch {
-    return [];
-  }
+async function listCandidateFiles(dir, includeHidden, index) {
+  return (await index.files(dir, includeHidden)).slice();
 }
 
 function mergePendingPaths(fileList, pendingPaths, dir, includeHidden = false) {
@@ -154,22 +137,19 @@ function mergeGrepHits(candidates, grepHits) {
   return candidates;
 }
 
-async function expandCandidatesWithGrep(candidates, fileList, tokens, flags, dir, includeHidden, runCommand) {
+function isTestPath(filePath) {
+  const segments = filePath.split(path.sep);
+  const base = segments[segments.length - 1];
+  return segments.includes("test") || segments.includes("tests") || base.includes(".test.") || base.includes(".spec.");
+}
+
+function expandCandidatesWithGrep(candidates, fileList, tokens, flags, index) {
   if (candidates.length >= 5) return candidates;
-  try {
-    // Tokens are lowercased; identifiers are not.
-    const grepArgs = ["-l", "-i", "--max-count=1", "-g", "!.git/**", "-g", "!**/.git/**"];
-    if (includeHidden) grepArgs.push("--hidden");
-    if (!flags.wantsTest) {
-      grepArgs.push("-g", "!test/**", "-g", "!tests/**", "-g", "!*.test.*", "-g", "!*.spec.*");
-    }
-    const salient = tokens.filter((t) => t.length > 2).slice(0, 4);
-    for (const t of salient) grepArgs.push("-e", t);
-    const res = await runCommand(["rg", ...grepArgs, dir], { timeoutMs: 15_000 });
-    mergeGrepHits(candidates, res.stdout.split("\n").map((f) => f.trim()).filter(Boolean).sort());
-  } catch {
-    if (candidates.length === 0) candidates = fileList.slice(0, 5);
-  }
+  const salient = tokens.filter((t) => t.length > 2).slice(0, 4);
+  const scope = flags.wantsTest ? fileList : fileList.filter((f) => !isTestPath(f));
+  const hits = index.filesContaining(scope, salient, true);
+  mergeGrepHits(candidates, hits);
+  if (candidates.length === 0) return fileList.slice(0, 5);
   return candidates;
 }
 
@@ -190,17 +170,15 @@ function scoreSurfaceItems(items, tokens, fallbackLine) {
   return { bonus, signature: best?.signature ?? "", anchorLine: best?.line ?? fallbackLine };
 }
 
-async function scoreCandidateContents(candidates, tokens, flags, vfs) {
+function scoreCandidateContents(candidates, tokens, flags, index, overlayText) {
   const candidateScores = [];
   for (const filePath of candidates) {
-    let content = "";
-    try {
-      content = await vfs.read(filePath);
-    } catch {
-      continue;
-    }
-    const { totalScore, bestLine, bestLineScore } = scoreContentDefinitions(content, tokens);
-    const surface = extractStructuralSurface(content, path.extname(filePath));
+    const pending = overlayText(filePath);
+    const entry = pending === undefined ? index.entry(filePath) : WorkspaceIndex.fromText(filePath, pending);
+    if (!entry) continue;
+    const content = entry.text;
+    const { totalScore, bestLine, bestLineScore } = scoreContentDefinitions(entry, tokens);
+    const surface = WorkspaceIndex.surfaceOf(entry);
     const { bonus: surfaceBonus, signature, anchorLine } = scoreSurfaceItems(surface.items, tokens, bestLine);
     const lowerPath = filePath.toLowerCase();
     const isTestFile = lowerPath.includes("test") || lowerPath.includes("spec");
@@ -217,7 +195,7 @@ async function scoreCandidateContents(candidates, tokens, flags, vfs) {
   return candidateScores;
 }
 
-async function rankCandidates(fileList, tokens, flags, dir, includeHidden, runCommand, vfs) {
+function rankCandidates(fileList, tokens, flags, index, overlayText) {
   const scoredPaths = [];
   for (const f of fileList) {
     const score = scorePathTopology(f, tokens, flags);
@@ -225,33 +203,29 @@ async function rankCandidates(fileList, tokens, flags, dir, includeHidden, runCo
   }
   scoredPaths.sort((a, b) => b.score - a.score);
   const selected = scoredPaths.filter((p) => p.score >= 25).slice(0, 10).map((p) => p.path);
-  const candidates = await expandCandidatesWithGrep(selected, fileList, tokens, flags, dir, includeHidden, runCommand);
-  const candidateScores = await scoreCandidateContents(candidates, tokens, flags, vfs);
+  const candidates = expandCandidatesWithGrep(selected, fileList, tokens, flags, index);
+  const candidateScores = scoreCandidateContents(candidates, tokens, flags, index, overlayText);
   return { candidates, candidateScores };
 }
 
-function buildSnapResult(candidates, candidateScores, fileList) {
+function buildSnapResult(candidates, candidateScores, fileList, root) {
+  const relative = (p) => path.relative(root, p) || p;
   if (candidateScores.length === 0 || candidateScores[0].score <= 0) {
-    return {
-      path: candidates[0] || fileList[0],
-      line: 1,
-      signature: "",
-      confidence: 0.3,
-      context: [],
-    };
+    return { path: relative(candidates[0] || fileList[0]), line: 1, signature: "", confidence: 0.3, context: [] };
   }
   const best = candidateScores[0];
   const lines = best.content.split("\n");
-  const startLine = Math.max(1, best.anchorLine - 3);
-  const endLine = Math.min(lines.length, best.anchorLine + 8);
+  // Two lines before and four after: enough to confirm the hit; read() is the tool for more.
+  const startLine = Math.max(1, best.anchorLine - 2);
+  const endLine = Math.min(lines.length, best.anchorLine + 4);
   const context = [];
   for (let l = startLine; l <= endLine; l++) {
     const marker = l === best.anchorLine ? "►" : " ";
-    context.push(`${marker} ${String(l).padStart(4)} │ ${lines[l - 1]}`);
+    context.push(marker + l + " " + lines[l - 1]);
   }
   const confidence = Math.min(0.98, Math.max(0.65, best.score / 150));
   return {
-    path: best.path,
+    path: relative(best.path),
     line: best.anchorLine,
     signature: best.signature,
     confidence: Number(confidence.toFixed(2)),
@@ -259,7 +233,7 @@ function buildSnapResult(candidates, candidateScores, fileList) {
   };
 }
 
-export async function executeSnap({ query, searchDir, includeHidden = false, vfs, runCommand, pendingPaths = [] }) {
+export async function executeSnap({ query, searchDir, root, includeHidden = false, index, overlayText = () => undefined, pendingPaths = [] }) {
   const { tokens, wantsTest, wantsType, wantsDoc } = tokenizeQuery(query);
   if (tokens.length === 0) {
     throw new Error("snap requires at least one searchable concept keyword");
@@ -268,12 +242,12 @@ export async function executeSnap({ query, searchDir, includeHidden = false, vfs
   if (path.resolve(dir).split(path.sep).includes(".git")) {
     throw new Error("snap cannot search Git metadata");
   }
-  const fileList = await listCandidateFiles(dir, includeHidden, runCommand);
+  const fileList = await listCandidateFiles(dir, includeHidden, index);
   mergePendingPaths(fileList, pendingPaths, dir, includeHidden);
   if (fileList.length === 0) {
     throw new Error(`no files found to search in ${dir}`);
   }
   const flags = { wantsTest, wantsDoc, wantsType };
-  const { candidates, candidateScores } = await rankCandidates(fileList, tokens, flags, dir, includeHidden, runCommand, vfs);
-  return buildSnapResult(candidates, candidateScores, fileList);
+  const { candidates, candidateScores } = rankCandidates(fileList, tokens, flags, index, overlayText);
+  return buildSnapResult(candidates, candidateScores, fileList, root ?? dir);
 }

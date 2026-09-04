@@ -5,6 +5,14 @@ import { isString } from "./decode.js";
 
 let cachedCwd = null;
 let cachedResolvedCwd = null;
+// realpath results per program: two syscalls per call otherwise dominate a cached read.
+const realRoots = new Map();
+const realNearest = new Map();
+const PATH_CACHE_MAX = 2048;
+
+export function clearPathCache() {
+  realNearest.clear();
+}
 
 function getResolvedCwd(cwd) {
   if (cwd === cachedCwd && cachedResolvedCwd) return cachedResolvedCwd;
@@ -43,8 +51,17 @@ export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = f
   if (!allowRoot && target === resolvedCwd) {
     throw new Error(`${opName} path cannot be the workspace root directory`);
   }
-  const realRoot = await fs.realpath(resolvedCwd);
-  const probe = await realpathNearest(target);
+  let realRoot = realRoots.get(resolvedCwd);
+  if (!realRoot) {
+    realRoot = await fs.realpath(resolvedCwd);
+    realRoots.set(resolvedCwd, realRoot);
+  }
+  let probe = realNearest.get(target);
+  if (!probe) {
+    probe = await realpathNearest(target);
+    if (realNearest.size >= PATH_CACHE_MAX) realNearest.clear();
+    realNearest.set(target, probe);
+  }
   assertInside(path.relative(realRoot, probe), `${opName} path escapes workspace through symlink`);
   return target;
 }

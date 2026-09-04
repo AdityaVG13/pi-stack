@@ -76,7 +76,7 @@ Multi-line commands show their first line plus a hidden-line count. Press Enter 
 | `nova.call(name, args)` | Host tool or native adapter |
 | `nova.callMany([{name,args}])` | Auto parallel wave — iterable array with `.mode` / `.results` |
 | `nova.surface(path)` | Structural outline for a source file |
-| `nova.snap(query, searchRoot?)` | Defining file, line, signature, confidence, and context for a concept (definitions outrank call sites) |
+| `nova.snap(query, searchRoot?)` | Defining file (workspace-relative), line, signature, confidence, and context for a concept; served from the in-process index in well under 1ms |
 | `nova.has(name)` | Whether a catalog or native tool is callable (sync) |
 | `parallel(thunks)` / `pipeline(items, …stages)` | Raw `Promise.all` helpers |
 | `nova.speculate(fn)` | Counterfactual branch (rollback / commit) |
@@ -144,6 +144,7 @@ Pair with DCE last if you use it: `omp install npm:pi-deferred-context-engine`.
 - Guest JS is **unsandboxed**. Adapter path jails are not a boundary against `import("node:fs")`. The worker only contains hangs, exits, and memory — not intent.
 - Guest error messages carry `(line:col)` on Node; Bun's engine does not expose guest-relative positions.
 - `bash` / mutating tools flush speculative writes (transaction barrier); error rollback cannot undo that.
+- The workspace index refreshes its file list every 10s or on any supernova mutation; a file created by an external process can take up to 10s to appear in `glob`/`snap` (`read` is never stale).
 - Pre-1.0 package — APIs and TUI may still evolve between minor releases.
 
 ## License

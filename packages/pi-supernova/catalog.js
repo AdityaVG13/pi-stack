@@ -142,12 +142,7 @@ export function searchCatalog(catalog, query, limit = 12) {
   for (const row of catalog) {
     const score = scoreRow(row, tokens);
     if (score <= 0 && tokens.length > 0) continue;
-    scored.push({
-      name: row.name,
-      description: row.description.slice(0, 160),
-      score,
-      callable: true,
-    });
+    scored.push({ name: row.name, description: row.description.slice(0, 160), score });
   }
   scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
   return scored.slice(0, Math.max(1, limit)).map(({ score: _s, ...hit }) => hit);
@@ -155,9 +150,10 @@ export function searchCatalog(catalog, query, limit = 12) {
 
 function fieldSummary(key, schema, required) {
   const s = schema && isObject(schema) ? schema : {};
+  // Only signal-bearing keys: `required:false` and empty descriptions cost tokens and say nothing.
   return {
     type: s.type || (Array.isArray(s.anyOf) ? "union" : "unknown"),
-    required: required.has(key),
+    required: required.has(key) || undefined,
     description: isString(s.description) ? s.description.slice(0, 120) : undefined,
   };
 }
@@ -233,7 +229,6 @@ export function describeTool(catalog, name) {
       description: row.description,
       parameters: schemaSummary(row.parameters),
       sourcePath: row.sourcePath,
-      signature: `await nova.call(${JSON.stringify(row.name)}, args)`,
     };
   }
   return row._described;

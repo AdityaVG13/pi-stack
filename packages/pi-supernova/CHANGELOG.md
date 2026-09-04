@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.0.10] - 2026-09-04
+
+### Changed
+
+- In-process workspace index (`repo-index.js`): one gitignore-aware `rg --files` per 10s window, then file text, lowercase lines, declared names, and structural surfaces are cached per path and validated by mtime. `snap`, `grep`, `glob`, and `find` are served from it without spawning (trees over 4000 files fall back to `rg`). Warm latencies: snap 14ms → 0.36ms, grep 4.8ms → 0.15ms, glob 4.7ms → 0.06ms; a warm `nova.call` is ~20µs and the program floor is ~50µs.
+- `bash` and any on-disk write or commit invalidate the file list, so a file created by a shell command is visible to the next `glob` in the same program.
+- Workspace-path realpath checks are cached per program (two syscalls per call before).
+- Live card updates are coalesced to one host re-render per 40ms frame; a tight loop of calls no longer pays a TUI render per call.
+- Fewer result tokens: `snap` returns a workspace-relative path and a 7-line context window (`►36 text`); `grep` rows are relative; `nova.search` hits drop `callable:true`; `nova.describe` omits `required:false` and the redundant `signature` line.
+
 ## [0.0.9] - 2026-09-04
 
 ### Fixed
