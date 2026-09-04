@@ -6,6 +6,7 @@
  */
 
 import { clampLine, measureWidth } from "./render-measure.js";
+import { isFunction, isString } from "./decode.js";
 
 const DEFAULT_BOX = {
 	topLeft: "╭",
@@ -28,7 +29,7 @@ function borderPaint(theme, state, borderColor) {
 	const key =
 		borderColor ||
 		(state === "error" ? "error" : state === "warning" ? "warning" : state === "running" || state === "pending" ? "accent" : "dim");
-	if (theme && typeof theme.fg === "function") {
+	if (theme && isFunction(theme.fg)) {
 		try {
 			return (text) => theme.fg(key, text);
 		} catch {
@@ -66,21 +67,21 @@ function padLine(line, width, bgFn) {
 
 function bgFnForState(theme, state) {
 	if (!state || !theme) return undefined;
-	if (typeof theme.bg === "function") {
+	if (isFunction(theme.bg)) {
 		const key =
 			state === "error" ? "toolErrorBg" : state === "pending" || state === "running" ? "toolPendingBg" : "toolSuccessBg";
 		try {
 			const probe = theme.bg(key, "x");
-			if (typeof probe !== "string") return undefined;
+			if (!isString(probe)) return undefined;
 			return (text) => {
 				const painted = theme.bg(key, text);
-				return typeof painted === "string" ? painted : text;
+				return isString(painted) ? painted : text;
 			};
 		} catch {
 			return undefined;
 		}
 	}
-	if (typeof theme.getBgAnsi === "function") {
+	if (isFunction(theme.getBgAnsi)) {
 		try {
 			const key =
 				state === "error" ? "toolErrorBg" : state === "pending" || state === "running" ? "toolPendingBg" : "toolSuccessBg";

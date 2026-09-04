@@ -9,7 +9,8 @@
     "test:deferred": "npm test --prefix packages/pi-deferred-context-engine",
     "test:supernova": "npm test --prefix packages/pi-supernova",
     "release-check": "node scripts/release-check.mjs",
-    "pack:all": "npm pack --prefix packages/pi-papercuts && npm pack --prefix packages/pi-deferred-context-engine && npm pack --prefix packages/pi-supernova"
+    "pack:all": "npm pack --prefix packages/pi-papercuts && npm pack --prefix packages/pi-deferred-context-engine && npm pack --prefix packages/pi-supernova",
+    "lint:supernova": "oxlint packages/pi-supernova"
   },
   "keywords": [
     "pi-package",
@@ -36,7 +37,7 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "@oxlint/plugins": "^1.81.0",
-    "oxlint": "^1.81.0"
+    "@oxlint/plugins": "1.81.0",
+    "oxlint": "1.81.0"
   }
 }

@@ -11,7 +11,7 @@
  */
 
 import { stripVTControlCharacters } from "node:util";
-import { isString, isObject } from "./decode.js";
+import { isString, isObject, isFunction } from "./decode.js";
 import {
 	measureWidth,
 	hardTruncate,
@@ -165,11 +165,20 @@ export function renderDiffBox(diff, theme, width = 60, maxShown = 6) {
 	return `${header}\n${divider}\n${formatDiffRows(diff, theme, maxShown).join("\n")}\n${divider}`;
 }
 
+function stripUnsafeControls(value) {
+	let clean = "";
+	for (const character of value) {
+		const codePoint = character.codePointAt(0);
+		const isC0 = codePoint <= 0x08 || codePoint === 0x0b || codePoint === 0x0c || (codePoint >= 0x0e && codePoint <= 0x1f);
+		const isDeleteOrC1 = codePoint >= 0x7f && codePoint <= 0x9f;
+		if (!isC0 && !isDeleteOrC1) clean += character;
+	}
+	return clean;
+}
+
 function cleanBlockText(value) {
-	return stripVTControlCharacters(String(value ?? ""))
-		.replace(/\r\n?/g, "\n")
-		.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "")
-		.replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
+	const normalized = stripVTControlCharacters(String(value ?? "")).replace(/\r\n?/g, "\n");
+	return stripUnsafeControls(normalized).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
 }
 
 function cleanInlineText(value) {
@@ -195,7 +204,7 @@ function formatOpTarget(raw, tool) {
 }
 
 function isTheme(value) {
-	return !!value && typeof value === "object" && typeof value.fg === "function";
+	return isObject(value) && isFunction(value.fg);
 }
 
 /**
@@ -205,13 +214,13 @@ function isTheme(value) {
  */
 export function normalizeCallRenderArgs(a, b, c) {
 	if (isTheme(b)) {
-		const context = c && typeof c === "object" ? c : {};
-		if (!context.state || typeof context.state !== "object") context.state = {};
+		const context = isObject(c) ? c : {};
+		if (!isObject(context.state)) context.state = {};
 		return { args: a, theme: b, context, host: "pi" };
 	}
 	if (isTheme(c)) {
-		const options = b && typeof b === "object" ? b : {};
-		if (!options.state || typeof options.state !== "object") options.state = {};
+		const options = isObject(b) ? b : {};
+		if (!isObject(options.state)) options.state = {};
 		const context = {
 			...options,
 			state: options.state,
@@ -238,15 +247,13 @@ export function normalizeCallRenderArgs(a, b, c) {
 function detectResultHost(options, ctxOrArgs) {
 	if (isTheme(options)) return "pi";
 	if (
-		ctxOrArgs &&
-		typeof ctxOrArgs === "object" &&
+		isObject(ctxOrArgs) &&
 		("lastComponent" in ctxOrArgs || "invalidate" in ctxOrArgs)
 	) {
 		return "pi";
 	}
 	if (
-		ctxOrArgs &&
-		typeof ctxOrArgs === "object" &&
+		isObject(ctxOrArgs) &&
 		("code" in ctxOrArgs || "timeoutMs" in ctxOrArgs)
 	) {
 		return "omp";
@@ -256,19 +263,18 @@ function detectResultHost(options, ctxOrArgs) {
 
 export function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs) {
 	if (isTheme(themeOrCtx)) {
-		const opts = options && typeof options === "object" ? options : {};
+		const opts = isObject(options) ? options : {};
 		let context;
 		if (
-			ctxOrArgs &&
-			typeof ctxOrArgs === "object" &&
+			isObject(ctxOrArgs) &&
 			!isTheme(ctxOrArgs) &&
 			("lastComponent" in ctxOrArgs || "state" in ctxOrArgs || "invalidate" in ctxOrArgs)
 		) {
 			context = ctxOrArgs;
 		} else {
-			context = { ...(opts.state ? { state: opts.state } : {}), lastComponent: opts.lastComponent };
+			context = { state: opts.state, lastComponent: opts.lastComponent };
 		}
-		if (!context.state || typeof context.state !== "object") context.state = {};
+		if (!isObject(context.state)) context.state = {};
 		return {
 			result,
 			expanded: !!opts.expanded,
@@ -282,8 +288,8 @@ export function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs
 	}
 	// Extremely defensive: (result, theme, context) oddball
 	if (isTheme(options)) {
-		const context = themeOrCtx && typeof themeOrCtx === "object" ? themeOrCtx : {};
-		if (!context.state || typeof context.state !== "object") context.state = {};
+		const context = isObject(themeOrCtx) ? themeOrCtx : {};
+		if (!isObject(context.state)) context.state = {};
 		return {
 			result,
 			expanded: !!context.expanded,

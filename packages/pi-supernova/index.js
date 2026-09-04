@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { isString, isFunction } from "./decode.js";
+import { isString, isFunction, isObject } from "./decode.js";
 import { buildCatalog, searchCatalog, describeTool, mergeNativeToolDefinitions } from "./catalog.js";
 import { loadConfig } from "./config.js";
 import { createHostBridge } from "./host-bridge.js";
@@ -34,7 +34,7 @@ function unwrapStructuredResult(response, operation) {
   if (response?.ok === false) {
     throw new Error(response.value || response.error || `${operation} failed`);
   }
-  const value = response && typeof response === "object" && "value" in response ? response.value : response;
+  const value = isObject(response) && "value" in response ? response.value : response;
   if (!isString(value)) return value;
   try {
     return JSON.parse(value);

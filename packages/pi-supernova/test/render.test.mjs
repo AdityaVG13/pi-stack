@@ -13,6 +13,7 @@ import {
 } from "../render.js";
 import { stripVTControlCharacters } from "node:util";
 import { createRequire } from "node:module";
+import { isFunction } from "../decode.js";
 
 const mockTheme = {
   fg: (token, text) => `[${token}]${text}[/${token}]`,
@@ -32,7 +33,7 @@ const require = createRequire(import.meta.url);
 let piVisibleWidth = measureWidth;
 try {
   const tui = require("@earendil-works/pi-tui");
-  if (typeof tui.visibleWidth === "function") piVisibleWidth = tui.visibleWidth;
+  if (isFunction(tui.visibleWidth)) piVisibleWidth = tui.visibleWidth;
 } catch {
   // path-install / CI without pi-tui — measureWidth is the fallback contract
 }

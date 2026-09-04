@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { packageHostResult } from "./bottleneck.js";
-import { isString, isNumber, isFunction } from "./decode.js";
+import { isString, isNumber, isFunction, isObject } from "./decode.js";
 import { isMutatingTool, runParallelWave } from "./parallel.js";
 import { extractStructuralSurface } from "./surface.js";
 import { buildEditDiff, buildMultiEditDiff, buildPatchDiff, buildWriteDiff } from "./diff.js";
@@ -749,7 +749,7 @@ export function createHostBridge({ pi, config, getCwd }) {
         return undefined;
       }
     }
-    return details && typeof details === "object" ? details.diff : undefined;
+    return isObject(details) ? details.diff : undefined;
   }
 
   function notifyCall(record) {
