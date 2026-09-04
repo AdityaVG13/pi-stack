@@ -100,7 +100,7 @@ function unwrapStructuredResult(response, operation) {
 const TOOL_DESCRIPTION = `Run one JavaScript program that composes host tools. Async body or arrow; \`return\` a small shaped value (compact literal, capped; strings raw; console.log is captured).
 
 Globals (async):
-read(path|paths, offset?, limit?) → text | text[]
+read(path|paths, offset?, limit?) → text | text[] · read(path, {about}) → whole-file outline, relevant bodies expanded
 write(path, text) · edit(path, oldText, newText) · patch(path, unifiedDiff)
 bash(cmd, {cwd?, timeoutMs?}) → output, throws on non-zero exit · exec(cmd, argv?) quotes argv
 evidence(query, {k?}) → {spans: [{path, lines, name, text}]} top-K spans that answer a question — use before read
@@ -179,7 +179,7 @@ export default function piSupernova(pi) {
     description: TOOL_DESCRIPTION,
     promptSnippet: "Compose host tools in one JavaScript program",
     promptGuidelines: [
-      "Use supernova for multi-step tool work: loops, filtering, parallel reads, read→edit chains. To understand code, call evidence(question) and read only the returned spans; read whole files only to edit them. Return a compact shaped value; keep raw tool output inside the program.",
+      "Use supernova for multi-step tool work: loops, filtering, parallel reads, read→edit chains. To understand code: evidence(question) across the repo, or read(path, {about: question}) for one file — full structure, only relevant bodies expanded. Plain read(path) only for lines you will edit. Return a compact shaped value; keep raw tool output inside the program.",
     ],
     parameters: Type.Object({
       code: Type.String({ description: "JavaScript program: async body or arrow function." }),

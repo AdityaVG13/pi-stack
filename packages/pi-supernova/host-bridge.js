@@ -10,6 +10,8 @@ import { buildEditDiff, buildMultiEditDiff, buildPatchDiff, buildWriteDiff } fro
 import { executeSnap } from "./snap.js";
 import { selectEvidence } from "./evidence.js";
 import { WorkspaceIndex, globToRegExp } from "./repo-index.js";
+import { outlineFile } from "./outline.js";
+import { rankPaths, smartCase, fuzzyMatch } from "./fuzzy.js";
 import { CausalVfs } from "./vfs.js";
 import { applyPatchToText } from "./patch.js";
 import { resolveWorkspacePath, runCommand, clearPathCache } from "./workspace.js";
@@ -135,22 +137,98 @@ async function listWithTools(searchDir, pattern, cwd, signal) {
   return textResult(findRes.stdout, { via: "find" });
 }
 
-/** rg-compatible grep served from the index; null when the pattern or tree needs real rg. */
+function relativeSlash(cwd, absolute) {
+  return path.relative(cwd, absolute).split(path.sep).join("/");
+}
+
+const GLOB_CHARS = /[*?[\]{}]/;
+
+/**
+ * fffind: a pattern without glob characters is a fuzzy, typo-tolerant, frecency-ranked path query.
+ * Returns "path" rows (best first) or null when the pattern is a real glob.
+ */
+async function fuzzyFind(index, root, cwd, pattern, limit = 20) {
+  if (!pattern || GLOB_CHARS.test(pattern)) return null;
+  const files = await index.files(root);
+  if (!index.canScan(files)) return null;
+  const rel = files.map((f) => relativeSlash(cwd, f));
+  const mtimes = new Map(rel.map((r, i) => [r, index.mtimeSeconds(files[i])]));
+  const ranked = rankPaths(pattern, rel, { frecency: index.frecency, mtimes, modified: await index.modifiedFiles(cwd), currentFile: index.lastTouched });
+  // fff weak-match detector: when nothing matches exactly and the best is mostly typos, say so instead of flooding.
+  const rows = ranked.slice(0, limit);
+  if (rows.length === 0) return "";
+  return rows.map((r) => r.path).join("\n") + "\n";
+}
+
+/** fff-style grep: smart-case, definition lines first, fuzzy fallback when the literal has no hits. */
 async function grepIndexed(index, pattern, params, searchPath, cwd) {
-  let regex;
-  try {
-    regex = new RegExp(pattern, params?.caseSensitive === true ? "" : "i");
-  } catch {
-    return null;
-  }
+  const compiled = grepRegex(pattern, params);
+  if (!compiled) return null;
+  const { regex, caseSensitive } = compiled;
   let files = await index.files(searchPath);
   if (!index.canScan(files)) return null;
   if (params?.glob) {
     const matcher = globToRegExp(String(params.glob));
-    files = files.filter((f) => matcher.test(path.relative(cwd, f).split(path.sep).join("/")));
+    files = files.filter((f) => matcher.test(relativeSlash(cwd, f)));
   }
-  const rows = index.grep(files, regex, cwd);
-  return rows.length ? rows.join("\n") + "\n" : "";
+  const rows = index.grepRows(files, regex, cwd);
+  const fallback = rows.length === 0 && /^[\w$.-]{4,}$/.test(pattern) ? fuzzyGrepRows(index, files, pattern, cwd, caseSensitive) : rows;
+  return formatGrepRows(fallback, grepLimit(params));
+}
+
+function grepLimit(params) {
+  return Number.isInteger(params?.limit) && params.limit > 0 ? params.limit : 200;
+}
+
+function grepRegex(pattern, params) {
+  const caseSensitive = params?.caseSensitive === true || (params?.caseSensitive !== false && smartCase(pattern));
+  try {
+    return { regex: new RegExp(pattern, caseSensitive ? "" : "i"), caseSensitive };
+  } catch {
+    return null;
+  }
+}
+
+/** Zero literal hits: retry each line fuzzily (1 typo, 2 for long names) within a tight span, so IsOffTheRecord finds is_off_the_record. */
+function fuzzyGrepRows(index, files, pattern, cwd, caseSensitive) {
+  const maxTypos = pattern.length >= 8 ? 2 : 1;
+  const rows = [];
+  for (const filePath of files) {
+    const e = index.entry(filePath);
+    if (!e) continue;
+    const { raw, defNames } = WorkspaceIndex.linesOf(e);
+    const rel = relativeSlash(cwd, filePath);
+    for (let i = 0; i < raw.length && rows.length <= 400; i++) {
+      const m = fuzzyMatch(pattern, raw[i], { maxTypos, caseSensitive });
+      if (!m || m.end - m.start > pattern.length + 2) continue;
+      rows.push({ rel, line: i + 1, text: raw[i], def: defNames[i] !== "" && fuzzyMatch(pattern, defNames[i], { maxTypos }) !== null });
+    }
+  }
+  return rows;
+}
+
+/** fff definition-first hinting: files that declare the name come first, declarations first within a file; one header per file. */
+function formatGrepRows(rows, limit) {
+  if (rows.length === 0) return "";
+  const groups = new Map();
+  for (const r of rows) {
+    if (!groups.has(r.rel)) groups.set(r.rel, []);
+    groups.get(r.rel).push(r);
+  }
+  const files = [...groups.values()].sort((a, b) => Number(b.some((r) => r.def)) - Number(a.some((r) => r.def)));
+  let out = "";
+  let shown = 0;
+  for (const group of files) {
+    if (shown >= limit) break;
+    out += group[0].rel + "\n";
+    group.sort((a, b) => Number(b.def) - Number(a.def) || a.line - b.line);
+    for (const r of group) {
+      if (shown++ >= limit) break;
+      out += "  " + r.line + (r.def ? "*" : ":") + " " + r.text.trim() + "\n";
+    }
+  }
+  if (rows.length > limit) out += "… " + (rows.length - limit) + " more matches (pass limit or narrow the pattern)\n";
+  return out;
 }
 
 /** rg --files [-g pattern] served from the index; null when the tree is too large. */
@@ -184,15 +262,11 @@ function createNativeAdapters(getCwd, vfs, config, index) {
 
       if (looksLikePath(targetParam)) {
         const targetPath = await resolveWorkspacePath(cwd, targetParam, "read", false);
-        const text = await vfs.read(targetPath);
-        return textResult(sliceLines(text, params?.offset, params?.limit), { path: targetPath });
+        return readFile(targetPath, params);
       }
 
       const existing = await probeExistingFile(cwd, targetParam, vfs);
-      if (existing) {
-        const text = await vfs.read(existing);
-        return textResult(sliceLines(text, params?.offset, params?.limit), { path: existing });
-      }
+      if (existing) return readFile(existing, params);
 
       if (isString(targetParam) && targetParam.trim()) {
         try {
@@ -208,8 +282,21 @@ function createNativeAdapters(getCwd, vfs, config, index) {
       }
 
       const targetPath = await resolveWorkspacePath(cwd, targetParam, "read", false);
-      const text = await vfs.read(targetPath);
-      return textResult(sliceLines(text, params?.offset, params?.limit), { path: targetPath });
+      return readFile(targetPath, params);
+  }
+
+  /** Plain text, a line window, or — with `about` — a relevance-folded outline of the whole file. */
+  async function readFile(targetPath, params) {
+    const cwd = getCwd();
+    const text = await vfs.read(targetPath);
+    index.touch(relativeSlash(cwd, targetPath));
+    if (isString(params?.about)) {
+      const pending = vfs.getOverlay(targetPath);
+      const entry = pending === undefined ? index.entry(targetPath) : WorkspaceIndex.fromText(targetPath, pending);
+      const outline = entry && outlineFile(entry, relativeSlash(cwd, targetPath), params.about, params?.maxChars ? { maxChars: params.maxChars } : {});
+      if (outline) return textResult(outline.text, { path: targetPath, outline: true, expanded: outline.expanded, declarations: outline.declarations });
+    }
+    return textResult(sliceLines(text, params?.offset, params?.limit), { path: targetPath });
   }
 
   return {
@@ -224,6 +311,7 @@ function createNativeAdapters(getCwd, vfs, config, index) {
         prevText = await vfs.read(target);
       } catch {}
       const { speculative } = await vfs.write(target, content);
+      index.touch(relativeSlash(cwd, target));
       const diff = buildWriteDiff(target, prevText, content);
       const tag = speculative ? " (speculative)" : "";
       return textResult(`wrote ${target}${tag}`, { path: target, speculative, diff });
@@ -254,6 +342,7 @@ function createNativeAdapters(getCwd, vfs, config, index) {
       const content = await vfs.read(target);
       const { updated, matches } = applyReplacements(target, content, requestedEdits);
       const { speculative } = await vfs.write(target, updated);
+      index.touch(relativeSlash(cwd, target));
       const diff =
         matches.length === 1
           ? buildEditDiff(target, content, matches[0].oldText, matches[0].newText)
@@ -366,6 +455,7 @@ function createNativeAdapters(getCwd, vfs, config, index) {
       const searchPath = params?.path ? await resolveWorkspacePath(cwd, params.path, "grep", true) : cwd;
       const indexed = await grepIndexed(index, pattern, params, searchPath, cwd);
       if (indexed !== null) return textResult(indexed, { exitCode: indexed ? 0 : 1, via: "index" });
+      // Large tree: real rg keeps its own output format.
       const res = await runCommand(["rg", ...rgGrepArgs(pattern, params, searchPath)], { cwd, timeoutMs: 30_000, signal });
       if (res.exitCode !== 0 && res.exitCode !== 1) {
         throw new Error(res.stderr.trim() || `rg exited ${res.exitCode}`);
@@ -376,6 +466,8 @@ function createNativeAdapters(getCwd, vfs, config, index) {
       const cwd = getCwd();
       const pattern = String(params?.pattern || "");
       if (!pattern) throw new Error("glob requires pattern");
+      const fuzzy = await fuzzyFind(index, cwd, cwd, pattern);
+      if (fuzzy !== null) return textResult(fuzzy, { via: "fuzzy" });
       const indexed = await listIndexed(index, cwd, cwd, pattern);
       if (indexed !== null) return textResult(indexed, { via: "index" });
       const rg = await runCommand(["rg", "--files", "-g", pattern], { cwd, timeoutMs: 30_000, signal }).catch(
@@ -398,6 +490,8 @@ function createNativeAdapters(getCwd, vfs, config, index) {
       const pattern = params?.pattern || params?.glob;
       if (signal?.aborted) throw new Error("aborted");
       const globPattern = pattern ? String(pattern) : null;
+      const fuzzy = await fuzzyFind(index, searchDir, cwd, globPattern);
+      if (fuzzy !== null) return textResult(fuzzy, { via: "fuzzy" });
       const indexed = await listIndexed(index, searchDir, cwd, globPattern);
       if (indexed !== null) return textResult(indexed, { via: "index" });
       return listWithTools(searchDir, globPattern, cwd, signal);

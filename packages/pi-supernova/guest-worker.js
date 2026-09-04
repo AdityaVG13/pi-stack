@@ -234,14 +234,16 @@ function buildGuestApi(available) {
     has: (name) => availableSet.has(name),
   };
 
-  const read = async (p, offset, limit) => {
+  // read(path, offset?, limit?) or read(path, { about, offset, limit, maxChars })
+  const readArgs = (p, a, b) => (isObject(a) && !Array.isArray(a) ? { path: p, ...a } : { path: p, offset: a, limit: b });
+  const read = async (p, a, b) => {
     if (Array.isArray(p)) {
-      const res = await nova.call("read", { path: p, offset, limit });
+      const res = await nova.call("read", readArgs(p, a, b));
       if (Array.isArray(res?.items)) return res.items;
       // Captured host executor without batch support: fan out.
-      return Promise.all(p.map((item) => read(item, offset, limit)));
+      return Promise.all(p.map((item) => read(item, a, b)));
     }
-    return unwrapValue(await nova.call("read", { path: p, offset, limit }));
+    return unwrapValue(await nova.call("read", readArgs(p, a, b)));
   };
   const write = async (p, content) => unwrapValue(await nova.call("write", { path: p, content }));
   const edit = async (p, oldText, newText) => unwrapValue(await nova.call("edit", { path: p, oldText, newText }));

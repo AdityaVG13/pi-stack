@@ -10,6 +10,7 @@ export const NATIVE_TOOL_DEFINITIONS = [
       target: { anyOf: [{ type: "string" }, { type: "array" }], description: "File path/query or array of paths" },
       offset: { type: "number", description: "One-based starting line" },
       limit: { type: "number", description: "Maximum lines to return" },
+      about: { type: "string", description: "Question or symbol: returns the whole file as an outline with only the relevant bodies expanded" },
     } },
   },
   {
@@ -51,13 +52,13 @@ export const NATIVE_TOOL_DEFINITIONS = [
     parameters: { type: "object", properties: { command: { type: "string" }, cwd: { type: "string" }, timeoutMs: { type: "number" } }, required: ["command"] },
   },
   {
-    name: "grep", description: "Search workspace file contents by pattern.",
+    name: "grep", description: "Search file contents. Smart-case regex; definition lines first (marked *); fuzzy fallback when nothing matches literally.",
     parameters: { type: "object", properties: {
-      pattern: { type: "string" }, path: { type: "string" }, glob: { type: "string" }, caseSensitive: { type: "boolean" },
+      pattern: { type: "string" }, path: { type: "string" }, glob: { type: "string" }, caseSensitive: { type: "boolean" }, limit: { type: "number" },
     }, required: ["pattern"] },
   },
   {
-    name: "glob", description: "List workspace files matching a glob pattern.",
+    name: "glob", description: "Find files: a glob pattern, or free text for typo-tolerant, frecency-ranked path search.",
     parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] },
   },
   {

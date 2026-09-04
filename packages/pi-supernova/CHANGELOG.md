@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.0.12] - 2026-09-04
+
+### Added
+
+- `read(path, {about})` — one call returns the whole file as an outline: every declaration (including nested object/class methods) with its signature and line range, and only the bodies relevant to `about` expanded, with line numbers, under a character budget (default 8000, 6 spans, weak-match cutoff at 40% of the best span). A folded body reads `  75 function applyReplacements(target, content, edits) … 26 lines`, so the follow-up `read(path, 75, 26)` is known without another search. Across 5 files/questions: **65% fewer tokens** than reading the file (23,968 → 8,477), correct spans expanded.
+- fff (dmtrKovalenko/fff) ported to plain JS in `fuzzy.js` — no binary, no spawn:
+  - `glob`/`find` with free text (no glob characters) is a typo-tolerant, frecency-ranked path search: up to 2 skipped characters, smart-case, +40%/+20% exact/any filename bonus, frecency boost `base·f/100` with fff's AI-mode decay (3-day half-life, 7-day window, 30s…4h modification steps), +15% for git-modified files, directory-distance penalty from the last touched file.
+  - `grep` is smart-case, groups rows under one path header, lists files that *declare* the name first with declaration lines marked `*` (definition-first hinting), accepts `limit`, and falls back to a fuzzy line match when the literal has no hits (`CausualVfs` → `class CausalVfs`).
+  - The workspace index watches the tree with `fs.watch` (recursive) and refreshes on change instead of every 10s; TTL remains the fallback when watching is unavailable.
+- Structural surface detects indented methods (`async bash(params, signal) {`, `name: (a) => {`), so adapters and class members are their own spans for `evidence`, `snap`, and outlines.
+
+### Changed
+
+- Tool guidance: `evidence(question)` across the repo or `read(path, {about})` for one file; plain `read(path)` only for lines you will edit.
+
 ## [0.0.11] - 2026-09-04
 
 ### Added

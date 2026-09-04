@@ -1,13 +1,17 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { extractStructuralSurface } from "./surface.js";
+import { Frecency } from "./fuzzy.js";
 
 // In-process workspace index: the gitignore-aware file list comes from one
 // \`rg --files\` spawn and is then reused; file text, lowercase text, and the
 // structural surface are cached per path and validated by mtime. snap/grep/glob
 // read from here instead of spawning, so a warm call is sub-millisecond.
 
+// With a working fs.watch the list only refreshes on change; the TTL is the fallback when watching fails.
 const LIST_TTL_MS = 10_000;
+const WATCHED_TTL_MS = 5 * 60_000;
+const WATCH_DEBOUNCE_MS = 150;
 const MAX_INDEXED_FILES = 4000;
 const MAX_FILE_BYTES = 512 * 1024;
 const BINARY_EXT = new Set([
@@ -69,17 +73,81 @@ export class WorkspaceIndex {
     this.runCommand = runCommand;
     this.lists = new Map();
     this.entries = new Map();
+    this.watchers = new Map();
+    this.frecency = new Frecency();
+    this.gitModified = new Map(); // root → Set(relative "/"-joined paths)
+    this.lastTouched = null;
   }
 
   invalidate() {
     this.lists.clear();
   }
 
+  /** fff frecency: every read/edit is an access; the newest one is the "current file" for distance penalties. */
+  touch(relPath) {
+    this.frecency.record(relPath);
+    this.lastTouched = relPath;
+  }
+
+  watch(root) {
+    if (this.watchers.has(root)) return this.watchers.get(root);
+    let ok = false;
+    try {
+      let timer = null;
+      const watcher = fs.watch(root, { recursive: true }, () => {
+        if (timer) return;
+        timer = setTimeout(() => {
+          timer = null;
+          this.lists.clear();
+          this.gitModified.delete(root);
+        }, WATCH_DEBOUNCE_MS);
+      });
+      watcher.on("error", () => {
+        this.watchers.set(root, false);
+        this.lists.clear();
+      });
+      if (typeof watcher.unref === "function") watcher.unref();
+      ok = true;
+    } catch {
+      ok = false;
+    }
+    this.watchers.set(root, ok);
+    return ok;
+  }
+
+  /** Paths git reports as modified/added/untracked (fff's git-status boost); one spawn per list refresh. */
+  async modifiedFiles(root) {
+    const cached = this.gitModified.get(root);
+    if (cached) return cached;
+    const set = new Set();
+    try {
+      const res = await this.runCommand(["git", "status", "--porcelain", "-z", "--untracked-files=all"], { cwd: root, timeoutMs: 5_000 });
+      if (res.exitCode === 0) {
+        for (const row of res.stdout.split("\0")) {
+          if (row.length > 3) set.add(row.slice(3));
+        }
+      }
+    } catch {}
+    this.gitModified.set(root, set);
+    return set;
+  }
+
+  mtimeSeconds(filePath) {
+    const e = this.entries.get(filePath);
+    if (e) return e.mtimeMs / 1000;
+    try {
+      return fs.statSync(filePath).mtimeMs / 1000;
+    } catch {
+      return 0;
+    }
+  }
+
   /** Absolute, sorted file list for a root; gitignore-aware via rg; cached for LIST_TTL_MS. */
   async files(root, includeHidden = false) {
     const key = root + "\0" + (includeHidden ? "h" : "");
     const cached = this.lists.get(key);
-    if (cached && Date.now() - cached.at < LIST_TTL_MS) return cached.files;
+    const ttl = this.watch(root) ? WATCHED_TTL_MS : LIST_TTL_MS;
+    if (cached && Date.now() - cached.at < ttl) return cached.files;
     const args = ["rg", "--files"];
     if (includeHidden) args.push("--hidden");
     args.push("-g", "!.git/**", "-g", "!**/.git/**", root);
@@ -162,16 +230,17 @@ export class WorkspaceIndex {
     return hits;
   }
 
-  /** rg-style "path:line:text" rows over the indexed files, paths relative to root. */
-  grep(files, regex, root) {
+  /** Structured grep rows {rel, line, text, def}; def marks lines whose declared name itself matches. */
+  grepRows(files, regex, root) {
     const out = [];
+    const nameRegex = new RegExp(regex.source, "i");
     for (const filePath of files) {
       const e = this.entry(filePath);
       if (!e || !regex.test(e.text)) continue;
-      const lines = e.text.split("\n");
-      const rel = path.relative(root, filePath) || filePath;
-      for (let i = 0; i < lines.length; i++) {
-        if (regex.test(lines[i])) out.push(rel + ":" + (i + 1) + ":" + lines[i]);
+      const { raw, defNames } = WorkspaceIndex.linesOf(e);
+      const rel = (path.relative(root, filePath) || filePath).split(path.sep).join("/");
+      for (let i = 0; i < raw.length; i++) {
+        if (regex.test(raw[i])) out.push({ rel, line: i + 1, text: raw[i], def: defNames[i] !== "" && nameRegex.test(defNames[i]) });
       }
     }
     return out;
