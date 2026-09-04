@@ -25,7 +25,7 @@ Load **before** other tool-owning packages so `registerTool` capture works. Rest
 | Parallel reads | Ad hoc | `callMany` Auto / `parallel()` |
 | Hosts | Separate packages | Same tarball for Pi **and** OMP |
 
-Guest code is an in-process `AsyncFunction` (same trust class as host `bash`) — not an OS/VM sandbox. Tool calls still go through `nova.call`.
+Guest code runs as an `AsyncFunction` in a worker thread (same trust class as host `bash`) — not an OS/VM sandbox. Tool calls go through `nova.call` RPC to the host thread; a hard timeout, abort, `process.exit`, or a memory blow-up terminates the worker without touching the harness.
 
 ---
 
@@ -46,21 +46,24 @@ async () => {
 }
 ```
 
-Globals: `nova` / `tools`, `parallel`, `pipeline`, `console`, plus shorthand `read`, `write`, `edit`, `patch`, `surface`, `snap`, `bash`, and `exec`.
+Globals: `nova` / `tools`, `parallel`, `pipeline`, `console`, plus shorthand `read` (path or path array), `write`, `edit`, `patch`, `surface`, `snap`, `bash`, and `exec`.
 
-Unified Pi/OMP card with bounded mutation diffs visible while collapsed:
+The returned value is rendered as a compact JS literal (unquoted keys, one item per line only when a container exceeds 120 columns) and capped at `maxReturnChars`. Strings are returned raw. This costs ~43% fewer tokens than pretty JSON — return small shaped values, not raw file dumps.
+
+Unified Pi/OMP card — one aligned row per call (status · tool · duration · target) with bounded mutation diffs:
 
 ```text
-╭─── nova: 2 calls · 84ms ───────────────────────────────╮
-│ ├─ ✓ read    packages/pi-supernova/host-bridge.js       │
-│ │                                                       │
-│ └─ ✓ edit   +1/-1 packages/pi-supernova/diff.js         │
-│       -143 │ - const oldValue = before;                 │
-│       +143 │ + const newValue = after;                  │
-╰─────────────────────────────────────────────────────────╯
+╭─── nova: 4 calls · 6.9s ─────────────────────────────────────╮
+│ ✓ bash      6.2s  python3 - <<'EOF' …+3 lines                 │
+│ × bash     120ms  exit 3  pytest -q                           │
+│ ✓ read       3ms  packages/pi-supernova/host-bridge.js        │
+│ ✓ edit       4ms  +1/-1 src/a.ts                              │
+│    -143 │ - const oldValue = before;                          │
+│    +143 │ + const newValue = after;                           │
+╰───────────────────────────────────────────────────────────────╯
 ```
 
-Collapsed cards show bounded edit/write/patch hunks immediately. Press Enter for a larger hunk budget, logs, and the returned value.
+Multi-line commands show their first line plus a hidden-line count. Press Enter for a larger hunk budget, the full returned value, and logs.
 
 ---
 
@@ -74,7 +77,7 @@ Collapsed cards show bounded edit/write/patch hunks immediately. Press Enter for
 | `nova.callMany([{name,args}])` | Auto parallel wave — iterable array with `.mode` / `.results` |
 | `nova.surface(path)` | Structural outline for a source file |
 | `nova.snap(query, searchRoot?)` | Most relevant source path, line, signature, confidence, and context |
-| `nova.has(name)` | Whether a catalog or native tool is callable |
+| `nova.has(name)` | Whether a catalog or native tool is callable (sync) |
 | `parallel(thunks)` / `pipeline(items, …stages)` | Raw `Promise.all` helpers |
 | `nova.speculate(fn)` | Counterfactual branch (rollback / commit) |
 
@@ -93,11 +96,14 @@ Optional `~/.pi/agent/supernova.json` or `~/.omp/agent/supernova.json`
   "maxCodeChars": 48000,
   "maxBridgeCalls": 256,
   "maxCallResultChars": 65536,
-  "maxReturnChars": 200000,
+  "maxReturnChars": 32000,
+  "maxHeapMb": 512,
   "maxSearchResults": 12,
   "spillDir": null
 }
 ```
+
+`maxHeapMb` caps the guest worker heap (V8 `resourceLimits` on Node) and arms a process-RSS watchdog that terminates a runaway program on both Node and Bun.
 
 Defaults also set `excludeTools` (includes `supernova` and DCE helpers). An empty `"excludeTools": []` **replaces** those defaults — omit the key unless you mean that.
 
@@ -126,7 +132,7 @@ Pair with DCE last if you use it: `omp install npm:pi-deferred-context-engine`.
 
 | Symptom | Fix |
 |---------|-----|
-| `no executor for tool "…"` | Install supernova **first**; restart; `/supernova` |
+| `unknown tool "…"` | Follow the `Did you mean` hint, or `nova.search("")`; for host tools install supernova **first**; restart; `/supernova` |
 | `Rendered line exceeds terminal width` | ≥0.0.1 and restart so `render.js` reloads |
 | `callMany` / not iterable | ≥0.0.1 — return is an array with `.mode` / `.results` |
 | Extension missing on OMP | `omp install npm:pi-supernova` (needs `"omp".extensions`) |
@@ -135,7 +141,8 @@ Pair with DCE last if you use it: `omp install npm:pi-deferred-context-engine`.
 
 ## Limitations
 
-- Guest JS is **unsandboxed**. Adapter path jails are not a boundary against `import("node:fs")`.
+- Guest JS is **unsandboxed**. Adapter path jails are not a boundary against `import("node:fs")`. The worker only contains hangs, exits, and memory — not intent.
+- Guest error messages carry `(line:col)` on Node; Bun's engine does not expose guest-relative positions.
 - `bash` / mutating tools flush speculative writes (transaction barrier); error rollback cannot undo that.
 - Pre-1.0 package — APIs and TUI may still evolve between minor releases.
 

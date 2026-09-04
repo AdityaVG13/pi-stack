@@ -36,6 +36,21 @@ describe("causal vfs cache, speculation overlay, and structural surface", () => 
     }
   });
 
+  it("drops the read cache when a new program starts", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "vfs-reset-test-"));
+    try {
+      const filePath = path.join(tmpDir, "external.txt");
+      await fs.writeFile(filePath, "v1", "utf8");
+      const bridge = createHostBridge({ pi: null, config, getCwd: () => tmpDir });
+      assert.equal((await bridge.call("read", { path: "external.txt" })).value, "v1");
+      await fs.writeFile(filePath, "v2", "utf8");
+      bridge.resetCallBudget();
+      assert.equal((await bridge.call("read", { path: "external.txt" })).value, "v2");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("counterfactual speculation rolls back cleanly without disk side-effects", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "spec-test-"));
     try {

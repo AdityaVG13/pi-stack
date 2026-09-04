@@ -61,45 +61,28 @@ function scanGo(lines) {
   return items;
 }
 
+const JS_DECL_PATTERNS = [
+  [/^export\s+(?:default\s+)?(?:async\s+)?(function\*?|class|const|let|var|type|interface|enum)\s+([a-zA-Z0-9_$]+)/, true],
+  [/^(?:async\s+)?(function\*?|class)\s+([a-zA-Z0-9_$]+)/, false],
+  [/^(interface|type)\s+([a-zA-Z0-9_$]+)/, false],
+];
+
 function scanJavaScript(lines) {
   const items = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line || line.startsWith("//") || line.startsWith("/*") || line.startsWith("*")) continue;
-
-    const expMatch = /^export\s+(?:default\s+)?(?:async\s+)?(function\*?|class|const|let|var|type|interface|enum)\s+([a-zA-Z0-9_$]+)/.exec(line);
-    if (expMatch) {
+    for (const [pattern, isExport] of JS_DECL_PATTERNS) {
+      const match = pattern.exec(line);
+      if (!match) continue;
       items.push({
-        kind: expMatch[1],
-        name: expMatch[2],
-        isExport: true,
+        kind: match[1],
+        name: match[2],
+        isExport,
         signature: line.replace(/\{.*$/, "").trim(),
         line: i + 1,
       });
-      continue;
-    }
-
-    const declMatch = /^(?:async\s+)?(function\*?|class)\s+([a-zA-Z0-9_$]+)/.exec(line);
-    if (declMatch) {
-      items.push({
-        kind: declMatch[1],
-        name: declMatch[2],
-        isExport: false,
-        signature: line.replace(/\{.*$/, "").trim(),
-        line: i + 1,
-      });
-      continue;
-    }
-
-    const tsMatch = /^(interface|type)\s+([a-zA-Z0-9_$]+)/.exec(line);
-    if (tsMatch) {
-      items.push({
-        kind: tsMatch[1],
-        name: tsMatch[2],
-        isExport: false,
-        signature: line.replace(/\{.*$/, "").trim(),
-        line: i + 1,
-      });
+      break;
     }
   }
   return items;

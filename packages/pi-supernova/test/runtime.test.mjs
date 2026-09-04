@@ -27,7 +27,7 @@ describe("guest runtime", () => {
     };
     const outcome = await runGuestProgram({
       code: `
-        const hits = nova.search("read");
+        const hits = await nova.search("read");
         const r = await nova.call("read", { path: "a.txt" });
         return { hits: hits.length, r: r.value };
       `,
@@ -277,6 +277,43 @@ describe("guest runtime", () => {
     assert.equal(outcome.details.ok, false);
     assert.match(outcome.details.error, /timed out|aborted/);
     assert.equal(mutations, 0);
+  });
+
+  it("terminates a synchronous infinite loop at the timeout", async () => {
+    const started = performance.now();
+    const outcome = await runGuestProgram({ code: "while (true) {}", nova: {}, config: { ...config, timeoutMs: 200 } });
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.error, /timed out/);
+    assert.ok(performance.now() - started < 2000);
+    const next = await runGuestProgram({ code: "return 'alive'", nova: {}, config });
+    assert.equal(next.result, "alive");
+  });
+
+  it("contains process.exit and non-JSON return values", async () => {
+    const exited = await runGuestProgram({ code: "process.exit(7)", nova: {}, config });
+    assert.equal(exited.ok, false);
+    assert.match(exited.error, /exited/);
+
+    const outcome = await runGuestProgram({
+      code: "const a = { m: new Map([['k', 1]]), s: new Set([2]), big: 3n }; a.self = a; return a;",
+      nova: {},
+      config,
+    });
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(outcome.result, { m: { k: 1 }, s: [2], big: "3n", self: "[Circular]" });
+  });
+
+  it("reads a path array with one batched host call", async () => {
+    const calls = [];
+    const nova = {
+      call: async (name, args) => {
+        calls.push({ name, args });
+        return { ok: true, value: "joined", items: args.path.map((p) => "content:" + p) };
+      },
+    };
+    const outcome = await runGuestProgram({ code: 'return await read(["a.js", "b.js"]);', nova, config });
+    assert.deepEqual(outcome.result, ["content:a.js", "content:b.js"]);
+    assert.equal(calls.length, 1);
   });
 
   it("turns guest ReferenceError into a tool error, not a crash", async () => {

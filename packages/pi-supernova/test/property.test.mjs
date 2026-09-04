@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { applyPatchToText, parsePatchHunks } from "../host-bridge.js";
-import { truncateChars } from "../bottleneck.js";
+import { applyPatchToText, parsePatchHunks } from "../patch.js";
+import { truncateChars } from "../format.js";
 
 function generator(seed = 0x5eed1234) {
   let state = seed >>> 0;

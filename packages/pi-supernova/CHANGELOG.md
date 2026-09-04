@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [0.0.8] - 2026-09-04
+
+### Changed
+
+- Result card redesigned as an aligned ledger: one row per call (status · tool · duration · `exit N` · `+a/-r` · target), no tree stems or spacer rows, durations humanized (`6.2s`), multi-line commands shown as their first line plus `…+N lines`, and paths fitted to width with the basename kept. Trace records now carry per-call `ms` and non-zero `exitCode`.
+- Guest programs run in a warm worker thread. A hard timeout or abort now terminates synchronous loops (`while (true) {}`), `process.exit()` only ends the program, and `maxHeapMb` (V8 `resourceLimits` plus a process-RSS watchdog for Bun) stops memory blow-ups — none of these can take the host down anymore. Warm-worker overhead is ~0.1ms per program and ~20µs per `nova.call`.
+- Result text is a compact JS literal (`ok 12ms` header, unquoted keys, no separator whitespace, one item per line only past 120 columns): ~43% fewer tokens than the previous pretty JSON. Logs appear under `--- logs` only when present.
+- `maxReturnChars` default lowered from 200000 to 32000.
+- Return values that JSON cannot express are rendered instead of collapsing to `[object Object]`: circular references, `Map`, `Set`, `BigInt`, `Error`, functions, typed arrays.
+- A program that finishes without a `return` statement says so instead of printing `null`.
+- Guest runtime errors include `(line:col)` on Node.
+
+- Errors teach: unknown tool names get `Did you mean "read"?` (OSA distance over callable tools), and budget, timeout, missing-file, path-escape, and edit-mismatch errors name the exact fix.
+- `nova.call` envelopes are lean when returned: `details` is reachable but non-enumerable and `truncated:false` is omitted (53 → 13 tokens for a dumped `bash` result). Tool description rewritten as signatures (327 → 252 prompt tokens per turn, more information).
+- Internals: `host-bridge.js` split into `vfs.js`, `patch.js`, `workspace.js`; `format.js` holds the text-shaping kernel so the UI no longer imports result packaging. Every function is at CC ≤ 10 (was: 14 above, max 43).
+
+### Fixed
+
+- `read([...paths])` is a single batched host call instead of one call per path, so reading 300 files no longer exhausts `maxBridgeCalls`; the native batch adapter also returned `null` items.
+- Result truncation no longer splits a surrogate pair, which produced a lone surrogate the model API rejects.
+- `bash` failures throw `command failed (exit N): <cmd>` plus output instead of a JSON details blob; stdout/stderr are joined without a blank line; truncated output is marked.
+- `read("dir")` reports a directory instead of silently running a concept search.
+- The VFS read cache is cleared at the start of every program, so files edited outside supernova are never read stale.
+- Arrow programs with default parameters containing parentheses or a leading comment are recognized and executed instead of silently returning `null`.
+- `snap` ranks deterministically (`rg --files` order is sorted) and its content-grep fallback is case-insensitive, so `quasar handshake` finds `exactQuasarHandshake` instead of returning the first listed file.
+
+## [0.0.7] - 2026-09-03
+
+### Fixed
+
+- `bash` / `exec` run through `bash -c` (and strip a wrapping quote pair), so `git status` and `echo $PATH` are not looked up as a single binary name.
+- `nova.search` / `nova.describe` return promises, so `.catch()` in guest programs works.
+
 ## [0.0.6] - 2026-09-03
 
 ### Changed

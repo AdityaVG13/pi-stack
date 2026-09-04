@@ -157,7 +157,7 @@ describe("supernova UI rendering", () => {
     assert.deepEqual(piLines, ompLines);
     const text = piLines.join("\n");
     assert.match(text, /╭.*nova/);
-    assert.match(text, /└─ ✓ write/);
+    assert.match(text, /✓ write\s+\+1\/-0 src\/a\.ts/);
     assert.match(text, /src\/a\.ts/);
     assert.match(text, /\+1.*export const value = 1;/);
     assert.match(text, /╰/);
@@ -243,22 +243,28 @@ describe("supernova UI rendering", () => {
     assert.match(rendered, /× read\s+missing\.txt/);
   });
 
-  it("separates multiple calls with connected tree lines", () => {
+  it("renders one aligned ledger row per call with duration and exit code", () => {
     const result = {
       details: {
         ok: true,
+        wallMs: 6871,
         trace: [
-          { name: "read", args: { path: "a.ts" }, ok: true },
-          { name: "edit", args: { path: "b.ts" }, ok: true },
+          { name: "bash", args: { command: "python3 - <<'EOF'\nprint(1)\nEOF" }, ok: true, ms: 6210 },
+          { name: "bash", args: { command: "pytest -q" }, ok: false, ms: 120, exitCode: 3 },
+          { name: "read", args: { path: "b.ts" }, ok: true, ms: 3 },
         ],
       },
     };
-    const text = renderSupernovaResult(result, { expanded: false, isPartial: false }, plainTheme, {}).render(80).join("\n");
-    assert.match(text, /├─ ✓ read/);
-    assert.match(text, /\n│ │\s+│\n/);
-    assert.match(text, /└─ ✓ edit/);
-    assert.match(text, /╭.*nova/);
-    assert.match(text, /╰/);
+    const lines = renderSupernovaResult(result, { expanded: false, isPartial: false }, plainTheme, {}).render(80);
+    assert.equal(lines.length, 5, "frame + 3 rows, no spacer rows");
+    assert.match(lines[0], /nova: 3 calls · 6\.9s/);
+    assert.match(lines[1], /✓ bash\s+6\.2s  python3 - <<'EOF' …\+2 lines/);
+    assert.match(lines[2], /× bash\s+120ms  exit 3  pytest -q/);
+    assert.match(lines[3], /✓ read\s+3ms  b\.ts/);
+    // The column after the duration starts at the same offset on every row.
+    const col = (line) => stripVTControlCharacters(line).search(/python3|exit 3|b\.ts/);
+    assert.equal(col(lines[1]), col(lines[2]));
+    assert.equal(col(lines[2]), col(lines[3]));
   });
 
   it("never emits a line wider than the terminal (Pi crash contract)", () => {

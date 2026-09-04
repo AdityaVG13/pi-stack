@@ -25,10 +25,14 @@ function boxOf(theme) {
 	return DEFAULT_BOX;
 }
 
+const BORDER_BY_STATE = { error: "error", warning: "warning", running: "accent", pending: "accent" };
+
+function borderKeyFor(state) {
+	return BORDER_BY_STATE[state] || "dim";
+}
+
 function borderPaint(theme, state, borderColor) {
-	const key =
-		borderColor ||
-		(state === "error" ? "error" : state === "warning" ? "warning" : state === "running" || state === "pending" ? "accent" : "dim");
+	const key = borderColor || borderKeyFor(state);
 	if (theme && isFunction(theme.fg)) {
 		try {
 			return (text) => theme.fg(key, text);
@@ -39,22 +43,30 @@ function borderPaint(theme, state, borderColor) {
 	return (text) => text;
 }
 
+function resolveStatusIcon({ icon, iconOverride, state }) {
+	if (iconOverride !== undefined) return undefined;
+	if (icon !== undefined) return icon;
+	return state === "error" ? "error" : undefined;
+}
+
+const STATUS_GLYPH = { error: "✗ ", running: "… " };
+const STATUS_COLOR = { error: "error", running: "dim" };
+
+function statusPrefix(theme, resolvedIcon, iconOverride, spinnerFrame) {
+	if (iconOverride) return `${iconOverride} `;
+	const key = resolvedIcon === "error" ? "error" : resolvedIcon === "running" || spinnerFrame ? "running" : undefined;
+	const glyph = STATUS_GLYPH[key];
+	if (!glyph) return "";
+	return theme?.fg ? theme.fg(STATUS_COLOR[key], glyph) : glyph;
+}
+
 function statusHeader(theme, { title, description, state, spinnerFrame, icon, iconOverride }) {
-	const resolvedIcon =
-		iconOverride !== undefined
-			? undefined
-			: icon !== undefined
-				? icon
-				: state === "error"
-					? "error"
-					: undefined;
+	const resolvedIcon = resolveStatusIcon({ icon, iconOverride, state });
 	const titleText = theme?.fg ? theme.fg("accent", title) : title;
 	const descText = description ? (theme?.fg ? theme.fg("muted", description) : description) : "";
-	let prefix = "";
-	if (iconOverride) prefix = `${iconOverride} `;
-	else if (resolvedIcon === "error") prefix = theme?.fg ? theme.fg("error", "✗ ") : "✗ ";
-	else if (resolvedIcon === "running" || spinnerFrame) prefix = theme?.fg ? theme.fg("dim", "… ") : "… ";
-	return descText ? `${prefix}${titleText}: ${descText}` : `${prefix}${titleText}`;
+	const prefix = statusPrefix(theme, resolvedIcon, iconOverride, spinnerFrame);
+	if (!descText) return `${prefix}${titleText}`;
+	return `${prefix}${titleText}: ${descText}`;
 }
 
 function padLine(line, width, bgFn) {
@@ -65,34 +77,55 @@ function padLine(line, width, bgFn) {
 	return bgFn ? bgFn(padded) : padded;
 }
 
+const BG_BY_STATE = { error: "toolErrorBg", pending: "toolPendingBg", running: "toolPendingBg" };
+
+function bgKeyFor(state) {
+	return BG_BY_STATE[state] || "toolSuccessBg";
+}
+
+function wrapBg(paint) {
+	return (text) => {
+		const out = paint(text);
+		return isString(out) ? out : text;
+	};
+}
+
 function bgFnForState(theme, state) {
 	if (!state || !theme) return undefined;
+	const key = bgKeyFor(state);
 	if (isFunction(theme.bg)) {
-		const key =
-			state === "error" ? "toolErrorBg" : state === "pending" || state === "running" ? "toolPendingBg" : "toolSuccessBg";
 		try {
-			const probe = theme.bg(key, "x");
-			if (!isString(probe)) return undefined;
-			return (text) => {
-				const painted = theme.bg(key, text);
-				return isString(painted) ? painted : text;
-			};
+			if (!isString(theme.bg(key, "x"))) return undefined;
 		} catch {
 			return undefined;
 		}
+		return wrapBg((text) => theme.bg(key, text));
 	}
-	if (isFunction(theme.getBgAnsi)) {
-		try {
-			const key =
-				state === "error" ? "toolErrorBg" : state === "pending" || state === "running" ? "toolPendingBg" : "toolSuccessBg";
-			const ansi = theme.getBgAnsi(key);
-			if (!ansi) return undefined;
-			return (text) => `${ansi}${text}\x1b[49m`;
-		} catch {
-			return undefined;
+	if (!isFunction(theme.getBgAnsi)) return undefined;
+	try {
+		const ansi = theme.getBgAnsi(key);
+		if (!ansi) return undefined;
+		return (text) => `${ansi}${text}\x1b[49m`;
+	} catch {
+		return undefined;
+	}
+}
+
+function frameBodyLines(sections, contentWidth, box, border, bgFn, w, paintBar) {
+	const lines = [];
+	const normalized = sections.length > 0 ? sections : [{ lines: [] }];
+	const v = box.vertical;
+	for (const section of normalized) {
+		if (section.label) lines.push(paintBar(box.teeRight || "├", box.teeLeft || "┤", section.label));
+		for (const raw of section.lines || []) {
+			for (const piece of String(raw).split("\n")) {
+				const body = clampLine(piece, contentWidth);
+				const pad = Math.max(0, contentWidth - measureWidth(body));
+				lines.push(padLine(`${border(v)} ${body}${" ".repeat(pad)} ${border(v)}`, w, bgFn));
+			}
 		}
 	}
-	return undefined;
+	return lines;
 }
 
 function renderPortableFrame(theme, { header, sections = [], state = "pending", borderColor, width }) {
@@ -129,22 +162,7 @@ function renderPortableFrame(theme, { header, sections = [], state = "pending", 
 	const contentWidth = Math.max(1, w - 2 - 2);
 	const lines = [];
 	lines.push(paintBar(box.topLeft, box.topRight, header));
-
-	const normalized = sections.length > 0 ? sections : [{ lines: [] }];
-	for (const section of normalized) {
-		if (section.label) {
-			lines.push(paintBar(box.teeRight || "├", box.teeLeft || "┤", section.label));
-		}
-		for (const raw of section.lines || []) {
-			for (const piece of String(raw).split("\n")) {
-				const body = clampLine(piece, contentWidth);
-				const pad = Math.max(0, contentWidth - measureWidth(body));
-				const inner = `${body}${" ".repeat(pad)}`;
-				lines.push(padLine(`${border(v)} ${inner} ${border(v)}`, w, bgFn));
-			}
-		}
-	}
-
+	lines.push(...frameBodyLines(sections, contentWidth, box, border, bgFn, w, paintBar));
 	lines.push(paintBar(box.bottomLeft, box.bottomRight, null));
 	return lines;
 }
@@ -180,4 +198,3 @@ export function novaFramedBlock(theme, build) {
 export function novaStatusLine(theme, options) {
 	return statusHeader(theme, options);
 }
-

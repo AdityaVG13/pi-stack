@@ -56,6 +56,12 @@ export function buildMultiEditDiff(filePath, originalText, replacements) {
   };
 }
 
+const PATCH_LINE_KINDS = { "-": "remove", "+": "add", " ": "context" };
+
+function classifyPatchLine(line) {
+  return PATCH_LINE_KINDS[line[0]] || null;
+}
+
 export function buildPatchDiff(filePath, patchText) {
   const patchLines = isString(patchText) ? patchText.replace(/\r\n/g, "\n").split("\n") : [];
   const lines = [];
@@ -66,7 +72,7 @@ export function buildPatchDiff(filePath, patchText) {
   let inHunk = false;
 
   for (const patchLine of patchLines) {
-    const headerMatch = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)/.exec(patchLine);
+    const headerMatch = (/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)/).exec(patchLine);
     if (headerMatch) {
       oldLineNum = Number(headerMatch[1]);
       newLineNum = Number(headerMatch[2]);
@@ -74,15 +80,17 @@ export function buildPatchDiff(filePath, patchText) {
       continue;
     }
     if (!inHunk || patchLine.startsWith("\\")) continue;
-    if (patchLine.startsWith("-")) {
+    const kind = classifyPatchLine(patchLine);
+    if (!kind) continue;
+    if (kind === "remove") {
       removed += 1;
       lines.push({ type: "remove", lineNum: oldLineNum, text: patchLine.slice(1) });
       oldLineNum += 1;
-    } else if (patchLine.startsWith("+")) {
+    } else if (kind === "add") {
       added += 1;
       lines.push({ type: "add", lineNum: newLineNum, text: patchLine.slice(1) });
       newLineNum += 1;
-    } else if (patchLine.startsWith(" ")) {
+    } else {
       lines.push({ type: "context", lineNum: newLineNum, text: patchLine.slice(1) });
       oldLineNum += 1;
       newLineNum += 1;

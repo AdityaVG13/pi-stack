@@ -1,262 +1,293 @@
-
-import { packageFinalReturn } from "./bottleneck.js";
-import { parallel as runParallel, pipeline as runPipeline } from "./parallel.js";
+import { Worker } from "node:worker_threads";
 import { performance } from "node:perf_hooks";
-import { isString, isFunction, isObject } from "./decode.js";
+import { packageFinalReturn } from "./bottleneck.js";
+import { isFunction, isObject } from "./decode.js";
 
-const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+// Guest code runs in a worker thread (see guest-worker.js). The host thread
+// owns the bridge and answers nova.* RPCs; a hard timeout or abort terminates
+// the worker, which is the only way to stop a synchronous loop.
 
-const compiledCache = new Map();
-const COMPILED_CACHE_MAX = 256;
+const WORKER_URL = new URL("./guest-worker.js", import.meta.url);
+const ABORT_MESSAGE = "supernova timed out or aborted: pass timeoutMs to allow longer runs, or split the program";
+// Bun ignores worker resourceLimits, so a process-RSS watchdog backs up the V8 heap cap.
+const MEMORY_POLL_MS = 50;
+const MEMORY_SLACK = 1.5;
 
-function wrapBody(code) {
-  const trimmed = String(code || "").trim();
-  if (!trimmed) throw new Error("code must be a non-empty string");
+const rssBytes = isFunction(process.memoryUsage?.rss) ? () => process.memoryUsage.rss() : () => process.memoryUsage().rss;
 
-  if (/^(async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/.test(trimmed)) {
-    return `const __fn = (${trimmed});\nreturn await __fn();`;
-  }
-  if (/^async\s+function\b/.test(trimmed) || /^function\b/.test(trimmed)) {
-    return `const __fn = (${trimmed});\nreturn await __fn();`;
-  }
-  return trimmed;
+let idleWorker = null;
+let runSeq = 0;
+
+function spawnWorker(config) {
+  const { maxHeapMb = 512 } = config;
+  const worker = new Worker(WORKER_URL, {
+    resourceLimits: { maxOldGenerationSizeMb: maxHeapMb },
+  });
+  const handle = { worker, dead: false, ready: null };
+  handle.ready = new Promise((resolve, reject) => {
+    const onMessage = (msg) => {
+      if (msg?.op === "ready") {
+        cleanup();
+        resolve();
+      }
+    };
+    const onFail = (err) => {
+      cleanup();
+      handle.dead = true;
+      reject(err instanceof Error ? err : new Error("guest worker exited before ready (code " + err + ")"));
+    };
+    const cleanup = () => {
+      worker.off("message", onMessage);
+      worker.off("error", onFail);
+      worker.off("exit", onFail);
+    };
+    worker.on("message", onMessage);
+    worker.on("error", onFail);
+    worker.on("exit", onFail);
+  });
+  handle.ready.catch(() => {});
+  worker.on("exit", () => {
+    handle.dead = true;
+    if (idleWorker === handle) idleWorker = null;
+  });
+  return handle;
 }
+
+function setIdleRef(handle, idle) {
+  const fn = idle ? handle.worker.unref : handle.worker.ref;
+  if (isFunction(fn)) fn.call(handle.worker);
+}
+
+function acquireWorker(config) {
+  const handle = idleWorker && !idleWorker.dead ? idleWorker : spawnWorker(config);
+  idleWorker = null;
+  setIdleRef(handle, false);
+  return handle;
+}
+
+function releaseWorker(handle) {
+  if (handle.dead) return;
+  if (idleWorker && idleWorker !== handle) {
+    void handle.worker.terminate();
+    return;
+  }
+  idleWorker = handle;
+  setIdleRef(handle, true);
+}
+
+function killWorker(handle) {
+  handle.dead = true;
+  if (idleWorker === handle) idleWorker = null;
+  void handle.worker.terminate();
+}
+
+/** Pre-spawn the guest worker so the first program does not pay startup cost. */
+export function warmGuestWorker(config) {
+  if (idleWorker && !idleWorker.dead) return idleWorker.ready;
+  const handle = spawnWorker(config || {});
+  idleWorker = handle;
+  // Keep the loop alive only until the worker reports ready; an idle worker must not pin the process.
+  handle.ready.then(
+    () => { if (idleWorker === handle) setIdleRef(handle, true); },
+    () => {},
+  );
+  return handle.ready;
+}
+
+/** Terminate every guest worker (tests, shutdown). */
+export async function shutdownGuestWorkers() {
+  if (!idleWorker) return;
+  const handle = idleWorker;
+  idleWorker = null;
+  handle.dead = true;
+  await handle.worker.terminate();
+}
+
+const RPC_METHODS = {
+  call: (nova, args) => {
+    if (!isFunction(nova?.call)) throw new Error("nova.call unavailable");
+    return nova.call(args[0], args[1]);
+  },
+  callMany: async (nova, args) => {
+    if (!isFunction(nova?.callMany)) throw new Error("nova.callMany unavailable");
+    const wave = await nova.callMany(args[0]);
+    if (Array.isArray(wave)) return { results: [...wave], mode: wave.mode, reason: wave.reason };
+    return wave;
+  },
+  search: (nova, args) => {
+    if (!isFunction(nova?.search)) throw new Error("nova.search unavailable");
+    return nova.search(args[0], args[1]);
+  },
+  describe: (nova, args) => {
+    if (!isFunction(nova?.describe)) throw new Error("nova.describe unavailable");
+    return nova.describe(args[0]);
+  },
+  surface: (nova, args) => {
+    if (isFunction(nova?.surface)) return nova.surface(args[0]);
+    return nova.call("surface", { path: args[0] });
+  },
+  snap: (nova, args) => {
+    if (isFunction(nova?.snap)) return nova.snap(args[0], args[1]);
+    return nova.call("snap", { query: args[0], path: args[1] });
+  },
+  speculateBegin: (nova) => (isFunction(nova?.speculateBegin) ? nova.speculateBegin() : undefined),
+  speculateCommit: (nova) => (isFunction(nova?.speculateCommit) ? nova.speculateCommit() : undefined),
+  speculateRollback: (nova) => (isFunction(nova?.speculateRollback) ? nova.speculateRollback() : undefined),
+};
+
+async function dispatchRpc(nova, method, args) {
+  const fn = RPC_METHODS[method];
+  if (!fn) throw new Error("unknown nova method: " + method);
+  return fn(nova, args);
+}
+
+async function loadAvailable(nova) {
+  if (!isFunction(nova?.names)) return [];
+  try {
+    return await nova.names();
+  } catch {
+    return [];
+  }
+}
+
+async function prepareRun(options, fail) {
+  const { code, config, signal, nova } = options;
+  if (!String(code || "").trim()) return { failed: fail("code must be a non-empty string") };
+  const maxCode = config.maxCodeChars ?? 48000;
+  if (code.length > maxCode) return { failed: fail("code exceeds " + maxCode + " characters") };
+  if (signal?.aborted) return { failed: fail(ABORT_MESSAGE) };
+  const handle = acquireWorker(config);
+  try {
+    await handle.ready;
+  } catch (err) {
+    return { failed: fail("guest worker failed to start: " + err?.message) };
+  }
+  const available = await loadAvailable(nova);
+  return { handle, worker: handle.worker, available };
+}
+
+function startWatchdogs({ timeoutMs, rssLimit, signal, onAbort, onMemoryExceeded }) {
+  const timer = setTimeout(onAbort, timeoutMs);
+  if (timer.unref) timer.unref();
+  const memTimer = setInterval(() => {
+    if (rssBytes() <= rssLimit) return;
+    onMemoryExceeded(rssBytes());
+  }, MEMORY_POLL_MS);
+  if (memTimer.unref) memTimer.unref();
+  if (signal) signal.addEventListener("abort", onAbort, { once: true });
+  return () => {
+    clearTimeout(timer);
+    clearInterval(memTimer);
+    if (signal) signal.removeEventListener("abort", onAbort);
+  };
+}
+
+const MESSAGE_HANDLERS = {
+  log: (msg, ctx) => {
+    ctx.logs.push(msg.line);
+  },
+  rpc: (msg, ctx) => {
+    dispatchRpc(ctx.nova, msg.method, msg.args).then(
+      (value) => ctx.postResult({ op: "rpc:result", id: msg.id, ok: true, value }),
+      (err) => ctx.postResult({ op: "rpc:result", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) }),
+    );
+  },
+  done: (msg, ctx) => {
+    const packaged = packageFinalReturn(msg.value, ctx.logs, ctx.config);
+    ctx.finish(
+      {
+        ok: true,
+        result: packaged.returnValue,
+        resultText: packaged.returnText,
+        returnTruncated: packaged.returnTruncated,
+        undefinedReturn: msg.undefinedReturn === true && msg.hasReturn === false,
+        logs: packaged.logs,
+        logTruncated: packaged.logTruncated,
+        wallMs: ctx.wall(),
+      },
+      true,
+    );
+  },
+  error: (msg, ctx) => {
+    const where = msg.location ? " (line " + msg.location.line + ":" + msg.location.col + ")" : "";
+    ctx.finish(ctx.fail(msg.message + where, ctx.logs), true);
+  },
+};
 
 export async function runGuestProgram(options) {
   const { code, nova, config, signal, onTimeout } = options;
-  const maxCode = config.maxCodeChars ?? 48000;
-  if (code.length > maxCode) {
-    return {
-      ok: false,
-      error: `code exceeds ${maxCode} characters`,
-      logs: [],
-      wallMs: 0,
-    };
-  }
-
-  const logs = [];
   const started = performance.now();
-  const timeoutMs = config.timeoutMs ?? 60000;
-
-  const scopedConsole = {
-    log: (...args) => pushLog(logs, args, config),
-    warn: (...args) => pushLog(logs, args, config),
-    error: (...args) => pushLog(logs, args, config),
-    info: (...args) => pushLog(logs, args, config),
-  };
-
-  let body;
-  try {
-    body = wrapBody(code);
-  } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-      logs,
-      wallMs: Math.round(performance.now() - started),
+  const wall = () => Math.round(performance.now() - started);
+  const fail = (error, logs = []) => ({ ok: false, error, logs, wallMs: wall() });
+  const prepared = await prepareRun(options, fail);
+  if (prepared.failed) return prepared.failed;
+  const { handle, worker, available } = prepared;
+  const logs = [];
+  const runId = ++runSeq;
+  const { timeoutMs = 60000, maxHeapMb = 512 } = config;
+  const rssLimit = rssBytes() + maxHeapMb * MEMORY_SLACK * 1048576;
+  return await new Promise((resolve) => {
+    let finished = false;
+    let stop;
+    const finish = (outcome, keepWorker) => {
+      if (finished) return;
+      finished = true;
+      stop();
+      worker.off("message", onMessage);
+      worker.off("error", onError);
+      worker.off("exit", onExit);
+      if (keepWorker) releaseWorker(handle);
+      else killWorker(handle);
+      resolve(outcome);
     };
-  }
-
-  let compiled = compiledCache.get(body);
-  if (!compiled) {
-    try {
-      compiled = new AsyncFunction(
-        "nova",
-        "tools",
-        "console",
-        "parallel",
-        "pipeline",
-        "read",
-        "write",
-        "edit",
-        "patch",
-        "surface",
-        "snap",
-        "bash",
-        "exec",
-        "speculate",
-        body,
-      );
-    } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-        logs,
-        wallMs: Math.round(performance.now() - started),
-      };
-    }
-    if (compiledCache.size >= COMPILED_CACHE_MAX) {
-      const first = compiledCache.keys().next().value;
-      if (first !== undefined) compiledCache.delete(first);
-    }
-    compiledCache.set(body, compiled);
-  }
-
-  const abortError = new Error("supernova timed out or aborted");
-  const timeoutPromise = sleepReject(timeoutMs, abortError, signal, () => {
-    try {
-      onTimeout?.();
-    } catch {
-    }
-  });
-
-  const unwrapValue = (res) => {
-    if (res && isObject(res) && "value" in res) {
-      if (res.details?.isSnap && isString(res.value)) {
-        try {
-          return JSON.parse(res.value);
-        } catch {
-          return res.value;
-        }
-      }
-      if (res.details?.batch && Array.isArray(res.details?.items)) {
-        return res.details.items;
-      }
-      return res.value;
-    }
-    return res;
-  };
-
-  const unwrapJsonValue = (res) => {
-    const value = unwrapValue(res);
-    if (!isString(value)) return value;
-    try {
-      return JSON.parse(value);
-    } catch {
-      return value;
-    }
-  };
-
-  const guestRead = async (p, off, lim) => {
-    if (Array.isArray(p)) {
-      return await Promise.all(p.map((item) => guestRead(item, off, lim)));
-    }
-    const res = await nova.call("read", { path: p, offset: off, limit: lim });
-    return unwrapValue(res);
-  };
-  const guestWrite = async (p, c) => unwrapValue(await nova.call("write", { path: p, content: c }));
-  const guestEdit = async (p, oldOrDiff, newText) => {
-    const res = await nova.call("edit", { path: p, oldText: oldOrDiff, newText });
-    return unwrapValue(res);
-  };
-  const guestPatch = async (p, d) => unwrapValue(await nova.call("apply_patch", { path: p, patch: d }));
-  const guestSurface = async (p) => {
-    const res = await (isFunction(nova.surface) ? nova.surface(p) : nova.call("surface", { path: p }));
-    return unwrapJsonValue(res);
-  };
-  const guestSnap = async (q, p) => {
-    const res = await (isFunction(nova.snap) ? nova.snap(q, p) : nova.call("snap", { query: q, path: p }));
-    return unwrapJsonValue(res);
-  };
-  const guestBash = async (cmd, opts) => {
-    const res = await nova.call("bash", { command: cmd, ...opts });
-    if (res?.ok === false) {
-      const detail = isString(res?.details) ? res.details : "";
-      throw new Error(res?.value || detail || `command failed: ${cmd}`);
-    }
-    return unwrapValue(res);
-  };
-  const quoteShellArg = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
-  const guestExec = async (cmd, args, opts) => {
-    const argv = [cmd, ...(Array.isArray(args) ? args : [])].map(quoteShellArg).join(" ");
-    return guestBash(argv, opts);
-  };
-  const guestSpeculate = async (fn) => (isFunction(nova.speculate) ? nova.speculate(fn) : fn());
-
-  let settled = false;
-  const runPromise = Promise.resolve(
-    compiled(
-      nova,
-      nova,
-      scopedConsole,
-      runParallel,
-      runPipeline,
-      guestRead,
-      guestWrite,
-      guestEdit,
-      guestPatch,
-      guestSurface,
-      guestSnap,
-      guestBash,
-      guestExec,
-      guestSpeculate,
-    ),
-  );
-  runPromise.catch((err) => {
-    if (!settled) return;
-    pushLog(logs, [`[late guest error] ${err instanceof Error ? err.message : String(err)}`], config);
-  });
-  timeoutPromise.catch(() => {
-  });
-
-  try {
-    const resultValue = await Promise.race([runPromise, timeoutPromise]);
-    settled = true;
-    const packaged = packageFinalReturn(resultValue, logs, config);
-    return {
-      ok: true,
-      result: packaged.returnValue,
-      resultText: packaged.returnText,
-      returnTruncated: packaged.returnTruncated,
-      logs: packaged.logs,
-      logTruncated: packaged.logTruncated,
-      wallMs: Math.round(performance.now() - started),
-    };
-  } catch (err) {
-    settled = true;
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-      logs,
-      wallMs: Math.round(performance.now() - started),
-    };
-  } finally {
-    settled = true;
-    timeoutPromise.clear();
-  }
-}
-
-function pushLog(logs, args, config) {
-  const maxLines = config.maxLogLines ?? 100;
-  if (logs.length >= maxLines) return;
-  const line = args
-    .map((a) => {
-      if (isString(a)) return a;
+    const abort = () => {
       try {
-        return JSON.stringify(a);
-      } catch {
-        return String(a);
+        onTimeout?.();
+      } catch {}
+      finish(fail(ABORT_MESSAGE, logs), false);
+    };
+    const postResult = (msg) => {
+      if (finished) return;
+      try {
+        worker.postMessage(msg);
+      } catch (err) {
+        worker.postMessage({ op: "rpc:result", id: msg.id, ok: false, error: "result not transferable: " + err?.message });
       }
-    })
-    .join(" ");
-  logs.push(line);
-}
-
-function sleepReject(ms, error, signal, onFire) {
-  let timer;
-  let onAbort;
-  const fire = (reject) => {
-    try {
-      onFire?.();
-    } catch {
-    }
-    reject(error);
-  };
-  const promise = new Promise((_, reject) => {
-    timer = setTimeout(() => fire(reject), ms);
-    if (timer.unref) timer.unref();
-    if (signal) {
-      onAbort = () => {
-        clearTimeout(timer);
-        fire(reject);
-      };
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
-    }
+    };
+    const ctx = { logs, nova, config, wall, fail, finish, postResult };
+    const onMessage = (msg) => {
+      if (!isObject(msg)) return;
+      if (msg.runId !== runId) {
+        if (msg.op === "rpc") postResult({ op: "rpc:result", id: msg.id, ok: false, error: "stale run" });
+        return;
+      }
+      const handler = MESSAGE_HANDLERS[msg.op];
+      if (handler) handler(msg, ctx);
+    };
+    const onError = (err) => finish(fail("guest crashed: " + err?.message, logs), false);
+    const onExit = (runCode) => finish(fail("guest exited (code " + runCode + ")", logs), false);
+    worker.on("message", onMessage);
+    worker.on("error", onError);
+    worker.on("exit", onExit);
+    stop = startWatchdogs({
+      timeoutMs,
+      rssLimit,
+      signal,
+      onAbort: abort,
+      onMemoryExceeded: (rss) => {
+        finish(fail(`guest exceeded memory limit (maxHeapMb=${maxHeapMb}, process rss grew to ${Math.round(rss / 1048576)} MB)`, logs), false);
+        try {
+          onTimeout?.();
+        } catch {}
+      },
+    });
+    const { maxLogLines = 100, maxLogLineChars = 4096 } = config;
+    worker.postMessage({
+      op: "run",
+      runId,
+      code,
+      limits: { maxLogLines, maxLogLineChars },
+      available,
+    });
   });
-  promise.clear = () => {
-    clearTimeout(timer);
-    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-  };
-  return promise;
 }

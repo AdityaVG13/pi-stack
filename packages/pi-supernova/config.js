@@ -1,4 +1,3 @@
-
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,7 +17,23 @@ const POSITIVE_INTEGER_KEYS = new Set([
   "maxReturnChars",
   "maxLogLineChars",
   "maxSearchResults",
+  "maxHeapMb",
 ]);
+
+const VALIDATORS = {
+  positiveInt: (v) => Number.isInteger(v) && v > 0,
+  nonNegativeInt: (v) => Number.isInteger(v) && v >= 0,
+  stringArray: (v) => Array.isArray(v) && v.every(isString),
+  spillDir: (v) => v === null || (isString(v) && v.length > 0),
+};
+
+const KEY_VALIDATOR = new Map();
+for (const k of POSITIVE_INTEGER_KEYS) KEY_VALIDATOR.set(k, VALIDATORS.positiveInt);
+for (const k of NONNEGATIVE_INTEGER_KEYS) KEY_VALIDATOR.set(k, VALIDATORS.nonNegativeInt);
+for (const k of Object.keys(DEFAULTS)) {
+  if (Array.isArray(DEFAULTS[k])) KEY_VALIDATOR.set(k, VALIDATORS.stringArray);
+}
+KEY_VALIDATOR.set("spillDir", VALIDATORS.spillDir);
 
 export function packageDefaults() {
   return structuredClone(DEFAULTS);
@@ -53,15 +68,9 @@ export function mergeConfig(base, overlay) {
   const out = { ...base };
   for (const [key, value] of Object.entries(overlay)) {
     if (!KNOWN_KEYS.has(key)) continue;
-    if (POSITIVE_INTEGER_KEYS.has(key)) {
-      if (Number.isInteger(value) && value > 0) out[key] = value;
-    } else if (NONNEGATIVE_INTEGER_KEYS.has(key)) {
-      if (Number.isInteger(value) && value >= 0) out[key] = value;
-    } else if (Array.isArray(base[key])) {
-      if (Array.isArray(value) && value.every(isString)) out[key] = value.slice();
-    } else if (key === "spillDir") {
-      if (value === null || (isString(value) && value.length > 0)) out[key] = value;
-    }
+    const validate = KEY_VALIDATOR.get(key);
+    if (!validate) continue;
+    if (validate(value)) out[key] = Array.isArray(value) ? value.slice() : value;
   }
   return out;
 }

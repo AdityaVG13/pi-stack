@@ -24,3 +24,7 @@ coverage/
 **/.state-space-collapse/
 .skill-loop-progress.md
 tools/
+.module-coupling-topology/
+**/.module-coupling-topology/
+.cyclomatic-reduction/
+**/.cyclomatic-reduction/

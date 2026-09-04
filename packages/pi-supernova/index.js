@@ -3,7 +3,7 @@ import { isString, isFunction, isObject } from "./decode.js";
 import { buildCatalog, searchCatalog, describeTool, mergeNativeToolDefinitions } from "./catalog.js";
 import { loadConfig } from "./config.js";
 import { createHostBridge } from "./host-bridge.js";
-import { runGuestProgram } from "./runtime.js";
+import { runGuestProgram, warmGuestWorker } from "./runtime.js";
 import {
   extractOperationsFromCode,
   renderSupernovaCall,
@@ -30,6 +30,30 @@ try {
 function result(text, details) {
   return { content: [{ type: "text", text }], details };
 }
+
+/** Live trace updates for the card; a throwing host callback must never break the run. */
+function progressEmitter(onUpdate) {
+  if (!isFunction(onUpdate)) return () => {};
+  return (trace) => {
+    try {
+      onUpdate({ content: [{ type: "text", text: "" }], details: { trace, running: true } });
+    } catch {}
+  };
+}
+
+function logsBlock(outcome, tail = "") {
+  return outcome.logs?.length ? `\n--- logs\n${outcome.logs.join("\n")}${tail}` : "";
+}
+
+function errorText(outcome) {
+  return `error ${outcome.wallMs}ms: ${outcome.error}${logsBlock(outcome)}`;
+}
+
+function successText(outcome) {
+  const truncated = outcome.returnTruncated ? " [return truncated]" : "";
+  const hint = outcome.undefinedReturn ? " (no return statement — add \`return\` to get a value)" : "";
+  return `ok ${outcome.wallMs}ms${truncated}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
+}
 function unwrapStructuredResult(response, operation) {
   if (response?.ok === false) {
     throw new Error(response.value || response.error || `${operation} failed`);
@@ -43,21 +67,16 @@ function unwrapStructuredResult(response, operation) {
   }
 }
 
-const TOOL_DESCRIPTION = `Execute JavaScript that orchestrates host tools in one shot (Code Mode).
+const TOOL_DESCRIPTION = `Run one JavaScript program that composes host tools. Async body or arrow; \`return\` a small shaped value (compact literal, capped; strings raw; console.log is captured).
 
-Inside the program you get:
-  nova.search(query)           — thin catalog hits (name + one-liner)
-  nova.describe(name)          — full parameter summary on demand
-  nova.call(name, args)        — invoke a host tool (or native adapter)
-  nova.callMany([{name,args}]) — Auto parallel wave (serial if any mutating)
-  nova.snap(query, root?)       — resolve a concept to a source location
-  nova.surface(path)            — structural source outline
-  nova.has(name)                — test host-tool availability
-  parallel(thunks) / pipeline(items, ...stages)
-
-Shorthand globals: read, write, edit, patch, exec, snap, surface.
-Prefer search→describe→call. Keep intermediates in the program; return a shaped value.
-Schemas are NOT dumped into the system prompt — discover them inside the runtime.`;
+Globals (async):
+read(path|paths, offset?, limit?) → text | text[]
+write(path, text) · edit(path, oldText, newText) · patch(path, unifiedDiff)
+bash(cmd, {cwd?, timeoutMs?}) → output, throws on non-zero exit · exec(cmd, argv?) quotes argv
+snap(query, root?) → {path, line, signature, context} · surface(path) → {items: [{name, kind, line}]}
+nova.call(name, args) → {ok, value} for any host tool · nova.callMany([{name, args}]) parallel when read-only
+nova.search(query) → [{name, description}] · nova.describe(name) → parameters · nova.has(name) sync
+parallel(thunks) · pipeline(items, ...stages)`;
 
 export default function piSupernova(pi) {
   const config = loadConfig();
@@ -86,12 +105,12 @@ export default function piSupernova(pi) {
 
   function makeNovaApi() {
     return {
-      search(query, limit) {
+      async search(query, limit) {
         const cat = catalog.length ? catalog : refreshCatalog();
         const lim = Number.isInteger(limit) ? limit : config.maxSearchResults;
         return searchCatalog(cat, query, lim);
       },
-      describe(name) {
+      async describe(name) {
         const cat = catalog.length ? catalog : refreshCatalog();
         return describeTool(cat, name);
       },
@@ -101,25 +120,24 @@ export default function piSupernova(pi) {
       async callMany(calls) {
         return bridge.callMany(calls);
       },
-      async speculate(fn) {
+      speculateBegin() {
         bridge.beginSpeculation();
-        try {
-          const val = await fn();
-          await bridge.commitSpeculation();
-          return { ok: true, committed: true, value: val };
-        } catch (err) {
-          bridge.rollbackSpeculation();
-          return { ok: false, committed: false, error: err instanceof Error ? err.message : String(err) };
-        }
+      },
+      async speculateCommit() {
+        await bridge.commitSpeculation();
+      },
+      speculateRollback() {
+        bridge.rollbackSpeculation();
+      },
+      names() {
+        const cat = catalog.length ? catalog : refreshCatalog();
+        return [...new Set([...cat.map((t) => t.name), ...bridge.executors.keys(), ...Object.keys(bridge.natives)])];
       },
       async surface(filePath) {
         return unwrapStructuredResult(await bridge.call("surface", { path: filePath }), "surface");
       },
       async snap(query, targetPath) {
         return unwrapStructuredResult(await bridge.call("snap", { query, path: targetPath }), "snap");
-      },
-      has(name) {
-        return bridge.hasExecutor(name) || catalog.some((t) => t.name === name);
       },
     };
   }
@@ -128,23 +146,13 @@ export default function piSupernova(pi) {
     name: "supernova",
     label: "Supernova",
     description: TOOL_DESCRIPTION,
-    promptSnippet: "Compose multiple host tools in one JavaScript program via supernova",
+    promptSnippet: "Compose host tools in one JavaScript program",
     promptGuidelines: [
-      "Use supernova when a task needs multi-step tool composition, loops, filtering, or parallel reads.",
-      "Discover tools with nova.search / nova.describe inside the program — do not guess full schemas.",
-      "Return a compact shaped value; intermediates stay in the runtime.",
+      "Use supernova for multi-step tool work: loops, filtering, parallel reads, read→edit chains. Return a compact shaped value; keep raw tool output inside the program.",
     ],
     parameters: Type.Object({
-      code: Type.String({
-        description:
-          "JavaScript async body or arrow. Globals: nova/tools, parallel, pipeline, console.",
-      }),
-      timeoutMs: Type.Optional(
-        Type.Integer({
-          minimum: 1000,
-          description: "Hard timeout in ms (default from supernova.json / package default)",
-        }),
-      ),
+      code: Type.String({ description: "JavaScript program: async body or arrow function." }),
+      timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, description: "Hard timeout in ms." })),
     }),
     // One self-owned result frame is shared by Pi and OMP; renderCall stays empty
     // so separate call/result slots cannot duplicate the lifecycle card.
@@ -163,49 +171,13 @@ export default function piSupernova(pi) {
       bridge.resetCallBudget();
       refreshCatalog();
       bridge.beginSpeculation();
+      const emitProgress = progressEmitter(onUpdate);
+      bridge.setCallListener((_record, allTrace) => emitProgress(allTrace));
+      emitProgress([]);
 
-      bridge.setCallListener((_record, allTrace) => {
-        if (isFunction(onUpdate)) {
-          try {
-            onUpdate({
-              content: [{ type: "text", text: "" }],
-              details: { trace: allTrace, running: true },
-            });
-          } catch {}
-        }
-      });
-
-      if (isFunction(onUpdate)) {
-        try {
-          onUpdate({
-            content: [{ type: "text", text: "" }],
-            details: { trace: [], running: true },
-          });
-        } catch {}
-      }
-
-      const runConfig = {
-        ...config,
-        timeoutMs: Number.isInteger(params?.timeoutMs) ? params.timeoutMs : config.timeoutMs,
-      };
-
-      const runStartedAt = performance.now();
       let outcome;
       try {
-        outcome = await runGuestProgram({
-          code: String(params?.code || ""),
-          nova: makeNovaApi(),
-          config: runConfig,
-          signal: runController.signal,
-          onTimeout: abortRun,
-        });
-      } catch (error) {
-        outcome = {
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-          logs: [],
-          wallMs: Math.round(performance.now() - runStartedAt),
-        };
+        outcome = await runProgram(params, runController.signal, abortRun);
       } finally {
         bridge.setCallListener(null);
         signal?.removeEventListener("abort", abortRun);
@@ -214,23 +186,10 @@ export default function piSupernova(pi) {
       const trace = bridge.getTrace();
       if (!outcome.ok) {
         bridge.rollbackSpeculation();
-        let text = `Supernova error (${outcome.wallMs}ms):\n${outcome.error}`;
-        if (outcome.logs?.length) text += `\n\nLogs:\n${outcome.logs.join("\n")}`;
-        return result(text, {
-          ok: false,
-          error: outcome.error,
-          wallMs: outcome.wallMs,
-          logs: outcome.logs,
-          trace,
-        });
+        return result(errorText(outcome), { ok: false, error: outcome.error, wallMs: outcome.wallMs, logs: outcome.logs, trace });
       }
-
       await bridge.commitSpeculation();
-      let text = `Supernova ok (${outcome.wallMs}ms)`;
-      if (outcome.returnTruncated) text += " [return truncated]";
-      if (outcome.logs?.length) text += `\n\nLogs:\n${outcome.logs.join("\n")}`;
-      text += `\n\nResult:\n${outcome.resultText}`;
-      return result(text, {
+      return result(successText(outcome), {
         ok: true,
         wallMs: outcome.wallMs,
         returnTruncated: outcome.returnTruncated,
@@ -242,9 +201,28 @@ export default function piSupernova(pi) {
     },
   });
 
+  async function runProgram(params, signal, onTimeout) {
+    const runStartedAt = performance.now();
+    const runConfig = {
+      ...config,
+      timeoutMs: Number.isInteger(params?.timeoutMs) ? params.timeoutMs : config.timeoutMs,
+    };
+    try {
+      return await runGuestProgram({ code: String(params?.code || ""), nova: makeNovaApi(), config: runConfig, signal, onTimeout });
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        logs: [],
+        wallMs: Math.round(performance.now() - runStartedAt),
+      };
+    }
+  }
+
   pi.on("session_start", (_event, ctx) => {
     if (ctx && isString(ctx.cwd) && ctx.cwd) cwd = ctx.cwd;
     refreshCatalog();
+    warmGuestWorker(config).catch(() => {});
   });
 
   pi.registerCommand("supernova", {
@@ -257,7 +235,7 @@ export default function piSupernova(pi) {
         `pi-supernova catalog: ${catalog.length} tools`,
         `captured executors: ${captured.length ? captured.join(", ") : "(none yet — load this package early)"}`,
         `native adapters: ${natives.join(", ")}`,
-        `timeoutMs=${config.timeoutMs} maxCallResultChars=${config.maxCallResultChars} maxBridgeCalls=${config.maxBridgeCalls}`,
+        `timeoutMs=${config.timeoutMs} maxCallResultChars=${config.maxCallResultChars} maxReturnChars=${config.maxReturnChars} maxBridgeCalls=${config.maxBridgeCalls} maxHeapMb=${config.maxHeapMb}`,
       ];
       ctx.ui.notify(lines.join("\n"), "info");
     },

@@ -1,42 +1,13 @@
-
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isString, isObject } from "./decode.js";
-
-export function truncateChars(text, maxChars, label = "value") {
-  const normalized = isString(text) ? text : String(text ?? "");
-  const numericLimit = Number(maxChars);
-  const limit = Number.isFinite(numericLimit) ? Math.max(0, Math.floor(numericLimit)) : numericLimit === Infinity ? normalized.length : 0;
-  if (normalized.length <= limit) return { text: normalized, truncated: false };
-  if (limit <= 100) {
-    return {
-      text: normalized.slice(0, limit),
-      truncated: true,
-      originalChars: normalized.length,
-    };
-  }
-  const head = Math.floor(limit * 0.7);
-  let tail = Math.max(0, limit - head);
-  let marker = "";
-  let previousTail = -1;
-  while (tail !== previousTail) {
-    previousTail = tail;
-    const omitted = normalized.length - head - tail;
-    marker = `\n…[${label} truncated ${omitted} chars]…\n`;
-    tail = Math.max(0, limit - head - marker.length);
-  }
-  return {
-    text: normalized.slice(0, head) + marker + (tail > 0 ? normalized.slice(-tail) : ""),
-    truncated: true,
-    originalChars: normalized.length,
-  };
-}
+import { truncateChars, formatValue } from "./format.js";
 
 export function serializeBounded(value, maxChars, label = "value") {
   let serialized;
   try {
-    serialized = isString(value) ? value : JSON.stringify(value, null, 2);
+    serialized = isString(value) ? value : JSON.stringify(value);
   } catch {
     serialized = String(value);
   }
@@ -79,13 +50,28 @@ function maybeSpill(cappedText, fullText, config) {
   }
 }
 
+function batchItems(details, maxChars) {
+  if (!isObject(details) || details.batch !== true) return undefined;
+  if (!Array.isArray(details.items)) return undefined;
+  return details.items.map((item) => truncateChars(item, maxChars, "host-result").text);
+}
+
+function spillSuffix(capped, text, config) {
+  const spill = maybeSpill(capped.text, text, config);
+  if (!spill?.pointer) return { spill, value: capped.text };
+  return { spill, value: `${capped.text}\n\n[full output spilled to ${spill.pointer}]` };
+}
+
 export function packageHostResult(raw, config) {
   const maxChars = config.maxCallResultChars ?? 65536;
   const isError = isObject(raw) && raw.isError === true;
   const details = isObject(raw) ? raw.details : undefined;
   const upstreamTruncated = isObject(details) && details.outputTruncated === true;
   const text = extractRawString(raw, maxChars);
-  const summarizedDetails = details === undefined ? undefined : summarizeDetails(details, 2000);
+  const items = batchItems(details, maxChars);
+  // Batch items travel as their own field; keep the details summary small and parseable.
+  const summarizedDetails =
+    details === undefined ? undefined : summarizeDetails(items ? { ...details, items: undefined } : details, 2000);
 
   const capped = truncateChars(text, maxChars, "host-result");
   if (!capped.truncated) {
@@ -94,13 +80,11 @@ export function packageHostResult(raw, config) {
       value: capped.text,
       truncated: upstreamTruncated,
       details: summarizedDetails,
+      items,
     };
   }
 
-  const spill = maybeSpill(capped.text, text, config);
-  const value = spill?.pointer
-    ? `${capped.text}\n\n[full output spilled to ${spill.pointer}]`
-    : capped.text;
+  const { spill, value } = spillSuffix(capped, text, config);
 
   return {
     ok: !isError,
@@ -109,24 +93,31 @@ export function packageHostResult(raw, config) {
     originalChars: capped.originalChars,
     spill: spill?.pointer,
     details: summarizedDetails,
+    items,
   };
 }
 
-export function packageFinalReturn(value, logs, config) {
-  const maxReturn = config.maxReturnChars ?? 200000;
-  const serialized = serializeBounded(value, maxReturn, "return");
+function clipLogs(logs, config) {
   const logLines = Array.isArray(logs) ? logs : [];
   const maxLogLines = config.maxLogLines ?? 100;
   const maxLogLineChars = config.maxLogLineChars ?? 4096;
   const clippedLogs = logLines.slice(0, maxLogLines).map((line) => {
     const s = isString(line) ? line : String(line);
-    return s.length > maxLogLineChars ? s.slice(0, maxLogLineChars) + "…" : s;
+    if (s.length <= maxLogLineChars) return s;
+    return s.slice(0, maxLogLineChars) + "…";
   });
+  return { clippedLogs, logTruncated: logLines.length > maxLogLines };
+}
+
+export function packageFinalReturn(value, logs, config) {
+  const maxReturn = config.maxReturnChars ?? 32000;
+  const serialized = truncateChars(isString(value) ? value.replace(/\n+$/, "") : formatValue(value), maxReturn, "return");
+  const { clippedLogs, logTruncated } = clipLogs(logs, config);
   return {
     returnValue: serialized.truncated ? serialized.text : value,
     returnText: serialized.text,
     returnTruncated: serialized.truncated,
     logs: clippedLogs,
-    logTruncated: logLines.length > maxLogLines,
+    logTruncated,
   };
 }

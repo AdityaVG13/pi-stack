@@ -25,27 +25,62 @@ export function measureWidth(text) {
 	return width;
 }
 
+const ZERO_RANGES = [
+	[0x00, 0x1f],
+	[0x7f, 0x9f],
+	[0x0300, 0x036f],
+	[0x1ab0, 0x1aff],
+	[0x1dc0, 0x1dff],
+	[0x20d0, 0x20ff],
+	[0xfe00, 0xfe0e],
+	[0xfe20, 0xfe2f],
+];
+
+const WIDE_RANGES = [
+	[0x1100, 0x115f],
+	[0x2e80, 0xa4cf],
+	[0xac00, 0xd7a3],
+	[0xf900, 0xfaff],
+	[0xfe10, 0xfe19],
+	[0xfe30, 0xfe6f],
+	[0xff00, 0xff60],
+	[0xffe0, 0xffe6],
+	[0x1f000, 0x1faff],
+	[0x20000, 0x3fffd],
+];
+
+const WIDE_SINGLES = [0x2329, 0x232a, 0x26a1, 0x2b50, 0x2728];
+
+function inRanges(cp, ranges) {
+	for (const [lo, hi] of ranges) {
+		if (cp >= lo && cp <= hi) return true;
+	}
+	return false;
+}
+
 function codePointWidth(cp) {
-	if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) return 0;
-	if (cp === 0xfe0f) return 1; // Emoji presentation can widen an otherwise narrow symbol.
-	if (cp === 0x200d || (cp >= 0x0300 && cp <= 0x036f) || (cp >= 0x1ab0 && cp <= 0x1aff) ||
-		(cp >= 0x1dc0 && cp <= 0x1dff) || (cp >= 0x20d0 && cp <= 0x20ff) ||
-		(cp >= 0xfe00 && cp <= 0xfe0e) || (cp >= 0xfe20 && cp <= 0xfe2f)) return 0;
-	// Fullwidth / wide ranges (CJK, Hangul, emoji blocks we actually emit).
-	if (cp >= 0x1100 && cp <= 0x115f) return 2;
-	if (cp === 0x2329 || cp === 0x232a) return 2;
-	if (cp >= 0x2e80 && cp <= 0xa4cf) return 2;
-	if (cp >= 0xac00 && cp <= 0xd7a3) return 2;
-	if (cp >= 0xf900 && cp <= 0xfaff) return 2;
-	if (cp >= 0xfe10 && cp <= 0xfe19) return 2;
-	if (cp >= 0xfe30 && cp <= 0xfe6f) return 2;
-	if (cp >= 0xff00 && cp <= 0xff60) return 2;
-	if (cp >= 0xffe0 && cp <= 0xffe6) return 2;
-	if (cp >= 0x1f000 && cp <= 0x1faff) return 2;
-	if (cp >= 0x20000 && cp <= 0x3fffd) return 2;
-	// Ambiguous emoji/symbols pi-tui treats as wide (⚡ U+26A1 was the 92>91 footgun).
-	if (cp === 0x26a1 || cp === 0x2b50 || cp === 0x2728) return 2;
+	if (cp === 0xfe0f) return 1;
+	if (cp === 0x200d) return 0;
+	if (inRanges(cp, ZERO_RANGES)) return 0;
+	if (WIDE_SINGLES.includes(cp)) return 2;
+	if (inRanges(cp, WIDE_RANGES)) return 2;
 	return 1;
+}
+
+function takeChunk(text, start, width) {
+	let end = start;
+	let visible = 0;
+	let lastBreak = -1;
+	while (end < text.length) {
+		const cp = text.codePointAt(end);
+		const ch = cp > 0xffff ? text.slice(end, end + 2) : text[end];
+		const cw = measureWidth(ch);
+		if (visible + cw > width) break;
+		visible += cw;
+		end += ch.length;
+		if (ch === "/" || ch === " ") lastBreak = end;
+	}
+	return { end, lastBreak };
 }
 
 /**
@@ -57,25 +92,16 @@ export function hardTruncate(text, maxWidth, ellipsis = ELLIPSIS) {
 	if (w === 0) return "";
 	const raw = String(text ?? "").replace(/\t/g, "   ");
 	if (measureWidth(raw) <= w) return raw;
-
 	const ell = String(ellipsis);
 	const ellW = measureWidth(ell);
 	if (ellW >= w) {
 		if (ellW === 0) return "";
 		return ell.slice(0, w);
 	}
-
 	const budget = w - ellW;
 	const plain = stripVTControlCharacters(raw);
-	let out = "";
-	let visible = 0;
-	for (const ch of plain) {
-		const cw = measureWidth(ch);
-		if (visible + cw > budget) break;
-		out += ch;
-		visible += cw;
-	}
-	return out + ell;
+	const { end } = takeChunk(plain, 0, budget);
+	return plain.slice(0, end) + ell;
 }
 
 /**
@@ -102,33 +128,22 @@ export function wrapPlainToWidth(plain, width) {
 	const text = String(plain ?? "");
 	if (text.length === 0) return [""];
 	if (measureWidth(text) <= w) return [text];
-
 	const lines = [];
 	let i = 0;
 	while (i < text.length) {
-		let end = i;
-		let visible = 0;
-		let lastBreak = -1;
-		while (end < text.length) {
-			const cp = text.codePointAt(end);
-			const ch = String.fromCodePoint(cp);
-			const cw = measureWidth(ch);
-			if (visible + cw > w) break;
-			visible += cw;
-			end += ch.length;
-			if (ch === "/" || ch === " ") lastBreak = end;
-		}
+		const { end, lastBreak } = takeChunk(text, i, w);
 		if (end === i) {
-			const ch = String.fromCodePoint(text.codePointAt(i));
+			const ch = text.codePointAt(i) > 0xffff ? text.slice(i, i + 2) : text[i];
 			lines.push(hardTruncate(ch, w));
 			i += ch.length;
 			continue;
 		}
-		if (end < text.length && lastBreak > i + Math.floor(w * 0.35)) end = lastBreak;
-		lines.push(text.slice(i, end));
-		i = end;
+		let cut = end;
+		if (end < text.length && lastBreak > i + Math.floor(w * 0.35)) cut = lastBreak;
+		lines.push(text.slice(i, cut));
+		i = cut;
 	}
-	return lines.length > 0 ? lines : [""];
+	return lines;
 }
 
 /**
@@ -138,7 +153,6 @@ export function fitPath(pathText, budget) {
 	const w = Math.max(1, budget | 0);
 	let p = String(pathText ?? "").replace(/\\/g, "/");
 	if (measureWidth(p) <= w) return p;
-
 	const parts = p.split("/").filter(Boolean);
 	const base = parts.length > 0 ? parts[parts.length - 1] : p;
 	const suffix = parts.length > 1 ? `…/${base}` : base;

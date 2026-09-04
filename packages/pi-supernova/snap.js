@@ -63,35 +63,39 @@ export function scorePathTopology(filePath, tokens, { wantsTest, wantsDoc, wants
   return score;
 }
 
-function scoreContentDefinitions(content, tokens) {
-  const lines = content.split("\n");
+function isSkippableLine(line) {
+  return !line || line.startsWith("//") || line.startsWith("#") || line.startsWith("*");
+}
+
+function lineScoreFor(line, tokens, isDef) {
+  const lower = line.toLowerCase();
+  let lineScore = 0;
+  for (const token of tokens) {
+    if (lower.includes(token)) lineScore += isDef ? 40 : 5;
+  }
+  return lineScore;
+}
+
+function accumulateContentScore(lines, tokens, defPattern) {
   let score = 0;
   let bestLine = 1;
   let bestLineScore = 0;
-
-  const defRegex = /^(?:pub\s+)?(?:export\s+)?(?:async\s+)?(?:default\s+)?(function|class|def|fn|const|let|interface|type|struct|enum)\s+([a-zA-Z0-9_$]+)/;
-
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
-    if (!line || line.startsWith("//") || line.startsWith("#") || line.startsWith("*")) continue;
-
-    let lineScore = 0;
-    const isDef = defRegex.test(line);
-
-    for (const token of tokens) {
-      if (line.toLowerCase().includes(token)) {
-        lineScore += isDef ? 40 : 5;
-      }
-    }
-
+    if (isSkippableLine(line)) continue;
+    const lineScore = lineScoreFor(line, tokens, defPattern.test(line));
     if (lineScore > bestLineScore) {
       bestLineScore = lineScore;
       bestLine = i + 1;
     }
     score += lineScore;
   }
-
   return { totalScore: score, bestLine, bestLineScore };
+}
+
+function scoreContentDefinitions(content, tokens) {
+  const defRegex = /^(?:pub\s+)?(?:export\s+)?(?:async\s+)?(?:default\s+)?(function|class|def|fn|const|let|interface|type|struct|enum)\s+([a-zA-Z0-9_$]+)/;
+  return accumulateContentScore(content.split("\n"), tokens, defRegex);
 }
 
 function relativeHasSegment(relativePath, segmentName) {
@@ -102,78 +106,83 @@ function relativeHasHiddenSegment(relativePath) {
   return relativePath.split(path.sep).some((segment) => segment.startsWith(".") && segment.length > 1);
 }
 
-export async function executeSnap({ query, searchDir, includeHidden = false, vfs, runCommand, pendingPaths = [] }) {
-  const { tokens, wantsTest, wantsType, wantsDoc } = tokenizeQuery(query);
-  if (tokens.length === 0) {
-    throw new Error("snap requires at least one searchable concept keyword");
-  }
-
-  const dir = searchDir || process.cwd();
-  if (path.resolve(dir).split(path.sep).includes(".git")) {
-    throw new Error("snap cannot search Git metadata");
-  }
-  let fileList = [];
+async function listCandidateFiles(dir, includeHidden, runCommand) {
+  const rgArgs = ["rg", "--files"];
+  if (includeHidden) rgArgs.push("--hidden");
+  rgArgs.push("-g", "!.git/**", "-g", "!**/.git/**", dir);
   try {
-    const rgArgs = ["rg", "--files"];
-    if (includeHidden) rgArgs.push("--hidden");
-    rgArgs.push("-g", "!.git/**", "-g", "!**/.git/**", dir);
     const res = await runCommand(rgArgs, { timeoutMs: 15_000 });
-    fileList = res.stdout.split("\n").map((f) => f.trim()).filter(Boolean);
+    // rg --files is multithreaded and emits in nondeterministic order; ties must rank stably.
+    return res.stdout.split("\n").map((f) => f.trim()).filter(Boolean).sort();
   } catch {
-    fileList = [];
+    return [];
   }
+}
 
+function mergePendingPaths(fileList, pendingPaths, dir, includeHidden = false) {
+  const resolvedDir = path.resolve(dir);
   const seenPaths = new Set(fileList.map((filePath) => path.resolve(filePath)));
   for (const pendingPath of pendingPaths) {
     const absolutePath = path.resolve(pendingPath);
-    const relativePath = path.relative(path.resolve(dir), absolutePath);
+    const relativePath = path.relative(resolvedDir, absolutePath);
     const escapesDir = relativePath === ".." || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath);
     const hiddenRelativePath = relativeHasHiddenSegment(relativePath);
     if (escapesDir || relativeHasSegment(relativePath, ".git") || (!includeHidden && hiddenRelativePath) || seenPaths.has(absolutePath)) continue;
     seenPaths.add(absolutePath);
     fileList.push(absolutePath);
   }
+  return fileList;
+}
 
-  if (fileList.length === 0) {
-    throw new Error(`no files found to search in ${dir}`);
+function mergeGrepHits(candidates, grepHits) {
+  const seen = new Set(candidates);
+  for (const h of grepHits) {
+    if (seen.has(h)) continue;
+    seen.add(h);
+    candidates.push(h);
+    if (candidates.length >= 15) break;
   }
+  return candidates;
+}
 
-  const scoredPaths = [];
-  for (const f of fileList) {
-    const score = scorePathTopology(f, tokens, { wantsTest, wantsDoc, wantsType });
-    if (score > 0) scoredPaths.push({ path: f, score });
+async function expandCandidatesWithGrep(candidates, fileList, tokens, flags, dir, includeHidden, runCommand) {
+  if (candidates.length >= 5) return candidates;
+  try {
+    // Tokens are lowercased; identifiers are not.
+    const grepArgs = ["-l", "-i", "--max-count=1", "-g", "!.git/**", "-g", "!**/.git/**"];
+    if (includeHidden) grepArgs.push("--hidden");
+    if (!flags.wantsTest) {
+      grepArgs.push("-g", "!test/**", "-g", "!tests/**", "-g", "!*.test.*", "-g", "!*.spec.*");
+    }
+    const salient = tokens.filter((t) => t.length > 2).slice(0, 4);
+    for (const t of salient) grepArgs.push("-e", t);
+    const res = await runCommand(["rg", ...grepArgs, dir], { timeoutMs: 15_000 });
+    mergeGrepHits(candidates, res.stdout.split("\n").map((f) => f.trim()).filter(Boolean).sort());
+  } catch {
+    if (candidates.length === 0) candidates = fileList.slice(0, 5);
   }
+  return candidates;
+}
 
-  scoredPaths.sort((a, b) => b.score - a.score);
-
-  let candidates = scoredPaths.filter((p) => p.score >= 25).slice(0, 10).map((p) => p.path);
-
-  if (candidates.length < 5) {
-    try {
-      const grepArgs = ["-l", "--max-count=1", "-g", "!.git/**", "-g", "!**/.git/**"];
-      if (includeHidden) grepArgs.push("--hidden");
-      if (!wantsTest) {
-        grepArgs.push("-g", "!test/**", "-g", "!tests/**", "-g", "!*.test.*", "-g", "!*.spec.*");
-      }
-      const salient = tokens.filter((t) => t.length > 2).slice(0, 4);
-      for (const t of salient) grepArgs.push("-e", t);
-      const res = await runCommand(["rg", ...grepArgs, dir], { timeoutMs: 15_000 });
-      const grepHits = res.stdout.split("\n").map((f) => f.trim()).filter(Boolean);
-      const seen = new Set(candidates);
-      for (const h of grepHits) {
-        if (!seen.has(h)) {
-          seen.add(h);
-          candidates.push(h);
-          if (candidates.length >= 15) break;
-        }
-      }
-    } catch {
-      if (candidates.length === 0) candidates = fileList.slice(0, 5);
+function scoreSurfaceItems(items, tokens, fallbackLine) {
+  let bonus = 0;
+  let signature = "";
+  let anchorLine = fallbackLine;
+  for (const item of items) {
+    const nameLower = item.name.toLowerCase();
+    for (const token of tokens) {
+      if (!nameLower.includes(token)) continue;
+      bonus += item.isExport ? 80 : 50;
+      if (signature) continue;
+      signature = item.signature;
+      anchorLine = item.line;
     }
   }
+  return { bonus, signature, anchorLine };
+}
 
+async function scoreCandidateContents(candidates, tokens, flags, vfs) {
   const candidateScores = [];
-
   for (const filePath of candidates) {
     let content = "";
     try {
@@ -181,71 +190,81 @@ export async function executeSnap({ query, searchDir, includeHidden = false, vfs
     } catch {
       continue;
     }
-
     const { totalScore, bestLine, bestLineScore } = scoreContentDefinitions(content, tokens);
-    const ext = path.extname(filePath);
-    const surface = extractStructuralSurface(content, ext);
-
-    let surfaceBonus = 0;
-    let signature = "";
-    let anchorLine = bestLine;
-
-    for (const item of surface.items) {
-      const nameLower = item.name.toLowerCase();
-      for (const token of tokens) {
-        if (nameLower.includes(token)) {
-          surfaceBonus += item.isExport ? 80 : 50;
-          if (!signature) {
-            signature = item.signature;
-            anchorLine = item.line;
-          }
-        }
-      }
-    }
-
-    const isTestFile = filePath.toLowerCase().includes("test") || filePath.toLowerCase().includes("spec");
-    const testAdjustment = isTestFile && !wantsTest ? -200 : (isTestFile && wantsTest ? 100 : 0);
-    const finalScore = totalScore + surfaceBonus + (bestLineScore * 2) + testAdjustment;
+    const surface = extractStructuralSurface(content, path.extname(filePath));
+    const { bonus: surfaceBonus, signature, anchorLine } = scoreSurfaceItems(surface.items, tokens, bestLine);
+    const lowerPath = filePath.toLowerCase();
+    const isTestFile = lowerPath.includes("test") || lowerPath.includes("spec");
+    const testAdjustment = !isTestFile ? 0 : (flags.wantsTest ? 100 : -200);
     candidateScores.push({
       path: filePath,
-      score: finalScore,
+      score: totalScore + surfaceBonus + (bestLineScore * 2) + testAdjustment,
       anchorLine,
       signature,
       content,
     });
   }
-
   candidateScores.sort((a, b) => b.score - a.score);
+  return candidateScores;
+}
 
+async function rankCandidates(fileList, tokens, flags, dir, includeHidden, runCommand, vfs) {
+  const scoredPaths = [];
+  for (const f of fileList) {
+    const score = scorePathTopology(f, tokens, flags);
+    if (score > 0) scoredPaths.push({ path: f, score });
+  }
+  scoredPaths.sort((a, b) => b.score - a.score);
+  const selected = scoredPaths.filter((p) => p.score >= 25).slice(0, 10).map((p) => p.path);
+  const candidates = await expandCandidatesWithGrep(selected, fileList, tokens, flags, dir, includeHidden, runCommand);
+  const candidateScores = await scoreCandidateContents(candidates, tokens, flags, vfs);
+  return { candidates, candidateScores };
+}
+
+function buildSnapResult(candidates, candidateScores, fileList) {
   if (candidateScores.length === 0 || candidateScores[0].score <= 0) {
-    const fallbackPath = candidates[0] || fileList[0];
     return {
-      path: fallbackPath,
+      path: candidates[0] || fileList[0],
       line: 1,
       signature: "",
       confidence: 0.3,
       context: [],
     };
   }
-
   const best = candidateScores[0];
   const lines = best.content.split("\n");
   const startLine = Math.max(1, best.anchorLine - 3);
   const endLine = Math.min(lines.length, best.anchorLine + 8);
-
-  const contextLines = [];
+  const context = [];
   for (let l = startLine; l <= endLine; l++) {
     const marker = l === best.anchorLine ? "►" : " ";
-    contextLines.push(`${marker} ${String(l).padStart(4)} │ ${lines[l - 1]}`);
+    context.push(`${marker} ${String(l).padStart(4)} │ ${lines[l - 1]}`);
   }
-
   const confidence = Math.min(0.98, Math.max(0.65, best.score / 150));
-
   return {
     path: best.path,
     line: best.anchorLine,
     signature: best.signature,
     confidence: Number(confidence.toFixed(2)),
-    context: contextLines,
+    context,
   };
+}
+
+export async function executeSnap({ query, searchDir, includeHidden = false, vfs, runCommand, pendingPaths = [] }) {
+  const { tokens, wantsTest, wantsType, wantsDoc } = tokenizeQuery(query);
+  if (tokens.length === 0) {
+    throw new Error("snap requires at least one searchable concept keyword");
+  }
+  const dir = searchDir || process.cwd();
+  if (path.resolve(dir).split(path.sep).includes(".git")) {
+    throw new Error("snap cannot search Git metadata");
+  }
+  const fileList = await listCandidateFiles(dir, includeHidden, runCommand);
+  mergePendingPaths(fileList, pendingPaths, dir, includeHidden);
+  if (fileList.length === 0) {
+    throw new Error(`no files found to search in ${dir}`);
+  }
+  const flags = { wantsTest, wantsDoc, wantsType };
+  const { candidates, candidateScores } = await rankCandidates(fileList, tokens, flags, dir, includeHidden, runCommand, vfs);
+  return buildSnapResult(candidates, candidateScores, fileList);
 }

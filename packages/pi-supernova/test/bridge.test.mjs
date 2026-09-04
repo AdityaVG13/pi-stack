@@ -201,6 +201,13 @@ describe("host bridge and adapters", () => {
     assert.equal(wave.reason, "empty");
   });
 
+  it("suggests close tool names for an unknown tool", async () => {
+    const bridge = createHostBridge({ pi: null, config, getCwd: () => process.cwd() });
+    await assert.rejects(() => bridge.call("raed", {}), /unknown tool "raed"\. Did you mean "read"/);
+    await assert.rejects(() => bridge.call("apply-patch", {}), /Did you mean "apply_patch"/);
+    await assert.rejects(() => bridge.call("zzzz", {}), /unknown tool "zzzz"\. Use nova\.search/);
+  });
+
   it("tracks trace of executed calls", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "bridge-test-"));
     try {
@@ -220,7 +227,7 @@ describe("host bridge and adapters", () => {
       assert.equal(trace[1].name, "read");
       assert.equal(trace[1].ok, true);
 
-      await assert.rejects(() => bridge.call("read", { path: "missing.txt" }), /ENOENT/);
+      await assert.rejects(() => bridge.call("read", { path: "missing.txt" }), /no such file: .*missing\.txt/);
       trace = bridge.getTrace();
       assert.equal(trace.at(-1).name, "read");
       assert.equal(trace.at(-1).ok, false);
