@@ -71,18 +71,24 @@ function progressEmitter(onUpdate) {
   return emit;
 }
 
+function sessionStats({ programs, returnedChars, collapsedChars, collapsedRuns }) {
+  const total = returnedChars + collapsedChars;
+  const pct = total ? Math.round((collapsedChars / total) * 100) : 0;
+  return `this session: ${programs} programs · ~${Math.round(returnedChars / 4)} tokens returned · ~${Math.round(collapsedChars / 4)} already-seen tokens not re-sent (${pct}%, ${collapsedRuns} runs)`;
+}
+
 function logsBlock(outcome, tail = "") {
   return outcome.logs?.length ? `\n--- logs\n${outcome.logs.join("\n")}${tail}` : "";
 }
 
-function errorText(outcome) {
-  return `error ${outcome.wallMs}ms: ${outcome.error}${logsBlock(outcome)}`;
+function errorText(outcome, call) {
+  return `error #${call} ${outcome.wallMs}ms: ${outcome.error}${logsBlock(outcome)}`;
 }
 
-function successText(outcome) {
+function successText(outcome, call) {
   const truncated = outcome.returnTruncated ? " [return truncated]" : "";
   const hint = outcome.undefinedReturn ? " (no return statement — add \`return\` to get a value)" : "";
-  return `ok ${outcome.wallMs}ms${truncated}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
+  return `ok #${call} ${outcome.wallMs}ms${truncated}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
 }
 function unwrapStructuredResult(response, operation) {
   if (response?.ok === false) {
@@ -100,19 +106,22 @@ function unwrapStructuredResult(response, operation) {
 const TOOL_DESCRIPTION = `Run one JavaScript program that composes host tools. Async body or arrow; \`return\` a small shaped value (compact literal, capped; strings raw; console.log is captured).
 
 Globals (async):
-read(path|paths, offset?, limit?) → text | text[] · read(path, {about}) → whole-file outline, relevant bodies expanded
-write(path, text) · edit(path, oldText, newText) · patch(path, unifiedDiff)
+read(path|paths, offset?, limit?) → text | text[] · read(path, {about}) → whole-file outline, only relevant bodies expanded
+write(path, text) · edit(path, oldText, newText) → post-edit lines (no re-read needed) · patch(path, unifiedDiff)
 bash(cmd, {cwd?, timeoutMs?}) → output, throws on non-zero exit · exec(cmd, argv?) quotes argv
 evidence(query, {k?}) → {spans: [{path, lines, name, text}]} top-K spans that answer a question — use before read
 snap(query, root?) → {path, line, signature, context} · surface(path) → {items: [{name, kind, line}]}
 nova.call(name, args) → {ok, value} for any host tool · nova.callMany([{name, args}]) parallel when read-only
 nova.search(query) → [{name, description}] · nova.describe(name) → parameters · nova.has(name) sync
-parallel(thunks) · pipeline(items, ...stages)`;
+parallel(thunks) · pipeline(items, ...stages)
+
+Already-seen lines collapse to "⋯ N lines same as #12 · path:a–b ⋯"; read(path, a, n) re-shows them.`;
 
 export default function piSupernova(pi) {
   const config = loadConfig();
   let cwd = process.cwd();
   let catalog = [];
+  let programSeq = 0;
 
   const bridge = createHostBridge({
     pi,
@@ -202,6 +211,8 @@ export default function piSupernova(pi) {
       bridge.resetCallBudget();
       refreshCatalog();
       bridge.beginSpeculation();
+      const call = ++programSeq;
+      bridge.ledger.beginProgram(call);
       const emitProgress = progressEmitter(onUpdate);
       bridge.setCallListener((_record, allTrace) => emitProgress(allTrace));
       emitProgress([]);
@@ -218,10 +229,10 @@ export default function piSupernova(pi) {
       const trace = bridge.getTrace();
       if (!outcome.ok) {
         bridge.rollbackSpeculation();
-        return result(errorText(outcome), { ok: false, error: outcome.error, wallMs: outcome.wallMs, logs: outcome.logs, trace });
+        return result(bridge.ledger.dedupe(errorText(outcome, call), call), { ok: false, error: outcome.error, wallMs: outcome.wallMs, logs: outcome.logs, trace });
       }
       await bridge.commitSpeculation();
-      return result(successText(outcome), {
+      return result(bridge.ledger.dedupe(successText(outcome, call), call), {
         ok: true,
         wallMs: outcome.wallMs,
         returnTruncated: outcome.returnTruncated,
@@ -253,6 +264,9 @@ export default function piSupernova(pi) {
 
   pi.on("session_start", (_event, ctx) => {
     if (ctx && isString(ctx.cwd) && ctx.cwd) cwd = ctx.cwd;
+    // A new session is a new model context: nothing has been seen yet.
+    bridge.ledger.reset();
+    programSeq = 0;
     refreshCatalog();
     warmGuestWorker(config).catch(() => {});
   });
@@ -268,6 +282,7 @@ export default function piSupernova(pi) {
         `captured executors: ${captured.length ? captured.join(", ") : "(none yet — load this package early)"}`,
         `native adapters: ${natives.join(", ")}`,
         `timeoutMs=${config.timeoutMs} maxCallResultChars=${config.maxCallResultChars} maxReturnChars=${config.maxReturnChars} maxBridgeCalls=${config.maxBridgeCalls} maxHeapMb=${config.maxHeapMb}`,
+        sessionStats(bridge.ledger.stats),
       ];
       ctx.ui.notify(lines.join("\n"), "info");
     },

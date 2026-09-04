@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.0.14] - 2026-09-04
+
+### Added
+
+- **Seen-ledger.** The model's context window is treated as memory: a result never re-sends a run of lines (≥6, mostly substantive) that an earlier result in the session already contained. The run collapses to `⋯ N lines same as #12 · path:a–b ⋯`, citing the earlier program and, when the lines came from a file, the exact range — so one `read(path, a, n)` recovers them. Changed lines are never collapsed, so a re-read after an edit is exactly the delta. Lines the current program read with an explicit `offset`/`limit` are pinned and always shown. Programs are numbered (`ok #12 3ms`) to anchor the citations; the window is `seenWindow` programs (default 40) and resets on `session_start`. Not compression: every collapsed line already exists verbatim in the model's context. `/supernova` reports the session's returned vs. not-re-sent tokens.
+- **Edits close the loop.** `edit` returns the post-edit lines with numbers (±2 context, ≤40 lines) so no verification re-read is needed; a quick structural check (`check: unclosed '{' opened at line 1`, JSON parsed exactly; brackets/strings/templates/regex-aware, 0 false positives over 6,100 source files); and `X also referenced in a.js:12, b.js:40` for every declaration the edit changed, so callers are not forgotten.
+- **Failures carry their source.** A failing `bash` appends `--- source` with ±2 lines around each `path:line` it printed (≤4 sites), so a stack trace or test failure does not cost a read turn.
+- **Outlines carry relations.** Expanded spans in `read(path, {about})` end with `// used by: a.js:12, b.js:40`.
+
+Measured on a read→edit→verify→edit→verify→outline→outline loop: 20,967 tokens naive vs **3,098** (−85%); the verification re-read costs 49 tokens instead of 1,078.
+
+### Changed
+
+- README documents the research (Zero-Mem, Agent Zero Memory, Harness-of-Harness, SPACE) and the fff port precisely: which formulas and constants are fff's, what was not ported, and that the code was reimplemented in JavaScript after reading fff's Rust sources.
+
 ## [0.0.13] - 2026-09-04
 
 ### Fixed

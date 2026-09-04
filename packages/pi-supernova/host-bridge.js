@@ -12,6 +12,9 @@ import { selectEvidence } from "./evidence.js";
 import { WorkspaceIndex, globToRegExp } from "./repo-index.js";
 import { outlineFile } from "./outline.js";
 import { rankPaths, smartCase, fuzzyMatch } from "./fuzzy.js";
+import { SeenLedger } from "./ledger.js";
+import { quickCheck } from "./check.js";
+import { declaredName } from "./repo-index.js";
 import { CausalVfs } from "./vfs.js";
 import { applyPatchToText } from "./patch.js";
 import { resolveWorkspacePath, runCommand, clearPathCache } from "./workspace.js";
@@ -247,7 +250,7 @@ async function listIndexed(index, root, cwd, pattern) {
   return hits.length ? hits.join("\n") + "\n" : "";
 }
 
-function createNativeAdapters(getCwd, vfs, config, index) {
+function createNativeAdapters(getCwd, vfs, config, index, ledger) {
   async function readAdapter(params, signal) {
       const cwd = getCwd();
       const targetParam = params?.path ?? params?.target;
@@ -288,15 +291,127 @@ function createNativeAdapters(getCwd, vfs, config, index) {
   /** Plain text, a line window, or — with `about` — a relevance-folded outline of the whole file. */
   async function readFile(targetPath, params) {
     const cwd = getCwd();
+    const rel = relativeSlash(cwd, targetPath);
     const text = await vfs.read(targetPath);
-    index.touch(relativeSlash(cwd, targetPath));
+    index.touch(rel);
     if (isString(params?.about)) {
       const pending = vfs.getOverlay(targetPath);
       const entry = pending === undefined ? index.entry(targetPath) : WorkspaceIndex.fromText(targetPath, pending);
-      const outline = entry && outlineFile(entry, relativeSlash(cwd, targetPath), params.about, params?.maxChars ? { maxChars: params.maxChars } : {});
-      if (outline) return textResult(outline.text, { path: targetPath, outline: true, expanded: outline.expanded, declarations: outline.declarations });
+      const outline = entry && outlineFile(entry, rel, params.about, outlineOptions(params, await referenceFinder(cwd, targetPath)));
+      if (outline) {
+        recordOutlineOrigins(rel, outline.text);
+        return textResult(outline.text, { path: targetPath, outline: true, expanded: outline.expanded, declarations: outline.declarations });
+      }
     }
-    return textResult(sliceLines(text, params?.offset, params?.limit), { path: targetPath });
+    const explicit = isNumber(params?.offset) || isNumber(params?.limit);
+    const firstLine = isNumber(params?.offset) ? Math.max(1, Math.floor(params.offset)) : 1;
+    const sliced = sliceLines(text, params?.offset, params?.limit);
+    ledger.recordOrigin(rel, firstLine, sliced.split("\n"), explicit);
+    return textResult(sliced, { path: targetPath });
+  }
+
+  /**
+   * The edit result answers the follow-ups a model would otherwise spend turns on: the post-edit
+   * lines with numbers (so no verification re-read), a quick structural check, and every other
+   * place a changed declaration is referenced (so callers are not forgotten).
+   */
+  async function editSummary(cwd, target, original, updated, diff) {
+    const rel = relativeSlash(cwd, target);
+    const newLines = updated.split("\n");
+    const added = diff.lines.filter((l) => l.type === "add");
+    const first = added.length ? Math.max(1, added[0].lineNum - 2) : 1;
+    const last = added.length ? Math.min(newLines.length, added[added.length - 1].lineNum + 2) : Math.min(newLines.length, first + 6);
+    const window = [];
+    for (let l = first; l <= last && window.length < 40; l++) window.push(String(l).padStart(5) + " " + newLines[l - 1]);
+    ledger.recordOrigin(rel, first, newLines.slice(first - 1, first - 1 + window.length));
+    let out = `edited ${rel}:${first}–${first + window.length - 1}\n${window.join("\n")}`;
+    const check = quickCheck(updated, path.extname(target));
+    if (check && !check.ok) out += `\ncheck: ${check.message}`;
+    const refs = await changedDeclarationRefs(cwd, target, original, updated, diff);
+    if (refs) out += `\n${refs}`;
+    return out;
+  }
+
+  async function changedDeclarationRefs(cwd, target, original, updated, diff) {
+    // Diff rows carry the replaced fragments; declarations live on whole file lines.
+    const oldLines = original.split("\n");
+    const newLines = updated.split("\n");
+    const names = new Set();
+    for (const l of diff.lines) {
+      if (l.type === "context") continue;
+      const name = declaredName((l.type === "remove" ? oldLines : newLines)[l.lineNum - 1] ?? "");
+      if (name) names.add(name);
+    }
+    if (names.size === 0) return "";
+    const find = await referenceFinder(cwd, target);
+    const parts = [];
+    for (const name of [...names].slice(0, 3)) {
+      const refs = find(name).filter((r) => !r.startsWith(relativeSlash(cwd, target) + ":"));
+      if (refs.length) parts.push(`${name} also referenced in ${refs.slice(0, 6).join(", ")}${refs.length > 6 ? " (+" + (refs.length - 6) + ")" : ""}`);
+    }
+    return parts.join("\n");
+  }
+
+  const SOURCE_REF = /((?:[\w.@-]+\/)*[\w.@-]+\.(?:m?[jt]sx?|c[jt]s|py|rs|go|java|kt|rb|php|c|cc|cpp|h|hpp|cs|swift|json|ya?ml|toml))(?::|\()(\d+)/g;
+
+  /** Source window (±2 lines, ► on the cited line) for one path:line, or null when it is outside the workspace/index. */
+  function sourceWindow(cwd, file, lineNo) {
+    const candidate = path.resolve(cwd, file);
+    if (!candidate.startsWith(path.resolve(cwd) + path.sep)) return null;
+    const entry = index.entry(candidate);
+    if (!entry) return null;
+    const { raw } = WorkspaceIndex.linesOf(entry);
+    if (lineNo < 1 || lineNo > raw.length) return null;
+    const rel = relativeSlash(cwd, candidate);
+    const start = Math.max(1, lineNo - 2);
+    const rows = [];
+    for (let l = start; l <= Math.min(raw.length, lineNo + 2); l++) rows.push((l === lineNo ? "►" : " ") + String(l).padStart(4) + " " + raw[l - 1]);
+    ledger.recordOrigin(rel, start, rows);
+    return rel + ":" + lineNo + "\n" + rows.join("\n");
+  }
+
+  /** A failing command names path:line; the model wants those lines next. Attach them (≤4 sites). */
+  function sourceForReferences(cwd, output) {
+    const seen = new Set();
+    const blocks = [];
+    for (const m of output.matchAll(SOURCE_REF)) {
+      const key = m[1] + ":" + m[2];
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const block = sourceWindow(cwd, m[1], Number(m[2]));
+      if (block) blocks.push(block);
+      if (blocks.length >= 4) break;
+    }
+    return blocks.length ? "\n--- source\n" + blocks.join("\n") : "";
+  }
+
+  function outlineOptions(params, references) {
+    const options = { references };
+    if (params?.maxChars) options.maxChars = params.maxChars;
+    return options;
+  }
+
+  /** Outline lines carry their own line numbers ("  330 text"); provenance follows them. */
+  function recordOutlineOrigins(rel, outlineText) {
+    for (const line of outlineText.split("\n")) {
+      const m = /^\s*(\d+) (.*)$/.exec(line);
+      if (m && !/ … \d+ lines$/.test(line)) ledger.recordOrigin(rel, Number(m[1]), [line]);
+    }
+  }
+
+  /** Where else a name appears (declaration line excluded), for outlines and edit results. */
+  async function referenceFinder(cwd, targetPath) {
+    const files = await index.files(cwd);
+    if (!index.canScan(files)) return () => [];
+    return (name, excludeLine) => {
+      if (!name || name.length < 3) return [];
+      const escaped = name.replace(/[$]/g, (c) => "\\" + c);
+      const regex = new RegExp("\\b" + escaped + "\\b");
+      return index
+        .grepRows(files, regex, cwd)
+        .filter((r) => !(r.line === excludeLine && r.rel === relativeSlash(cwd, targetPath)))
+        .map((r) => r.rel + ":" + r.line);
+    };
   }
 
   return {
@@ -348,7 +463,8 @@ function createNativeAdapters(getCwd, vfs, config, index) {
           ? buildEditDiff(target, content, matches[0].oldText, matches[0].newText)
           : buildMultiEditDiff(target, content, matches);
       const tag = speculative ? " (speculative)" : "";
-      return textResult(`edited ${target}${tag}`, { path: target, speculative, diff });
+      const summary = await editSummary(cwd, target, content, updated, diff);
+      return textResult(summary, { path: target, speculative, diff });
     },
     async apply_patch(params, signal) {
       const cwd = getCwd();
@@ -406,6 +522,7 @@ function createNativeAdapters(getCwd, vfs, config, index) {
       if (Number.isInteger(params?.k) && params.k > 0) options.k = params.k;
       if (Number.isInteger(params?.maxChars) && params.maxChars > 0) options.maxChars = params.maxChars;
       const res = await selectEvidence({ query: params.query, root: cwd, searchDir, index, overlayText: (p) => vfs.getOverlay(p), options });
+      for (const span of res.spans) ledger.recordOrigin(span.path, span.lines[0], span.text.split("\n"));
       return textResult(JSON.stringify(res), { route: res.route, count: res.spans.length });
     },
     async surface(params, signal) {
@@ -441,7 +558,8 @@ function createNativeAdapters(getCwd, vfs, config, index) {
         index.invalidate();
       }
       const { stdout, stderr } = res;
-      const text = stdout && stderr ? stdout + (stdout.endsWith("\n") ? "" : "\n") + stderr : stdout || stderr;
+      let text = stdout && stderr ? stdout + (stdout.endsWith("\n") ? "" : "\n") + stderr : stdout || stderr;
+      if (res.exitCode !== 0) text += sourceForReferences(cwd, text);
       return {
         content: [{ type: "text", text }],
         details: { exitCode: res.exitCode, outputTruncated: res.outputTruncated, transactionBarrier },
@@ -512,9 +630,10 @@ function createNativeAdapters(getCwd, vfs, config, index) {
 
 export function createHostBridge({ pi, config, getCwd }) {
   const index = new WorkspaceIndex((argv, opts) => runCommand(argv, opts));
+  const ledger = new SeenLedger({ window: config.seenWindow ?? 40 });
   const vfs = new CausalVfs(() => index.invalidate());
   const executors = new Map();
-  const natives = createNativeAdapters(getCwd, vfs, config, index);
+  const natives = createNativeAdapters(getCwd, vfs, config, index, ledger);
   let callCount = 0;
   let activeCtx = null;
   let activeSignal = undefined;
@@ -723,6 +842,7 @@ export function createHostBridge({ pi, config, getCwd }) {
     getOverlayDepth: () => vfs.getOverlayDepth(),
     call,
     callMany,
+    ledger,
     isMutating: (name) => isMutatingTool(name, config),
   };
 }

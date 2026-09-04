@@ -24,6 +24,11 @@ const IDENT_TOKEN = /[A-Za-z_$][\w$]*/g;
 const EMPTY = Object.freeze([]);
 const DEF_PATTERN = /^(?:pub\s+)?(?:export\s+)?(?:async\s+)?(?:default\s+)?(function|class|def|fn|const|let|interface|type|struct|enum)\s+([a-zA-Z0-9_$]+)/;
 
+/** Declared identifier on a line (function/class/const/…), or "" — the same rule snap and grep use. */
+export function declaredName(line) {
+  return DEF_PATTERN.exec(String(line).trim())?.[2] ?? "";
+}
+
 export function isTextCandidate(filePath) {
   return !BINARY_EXT.has(path.extname(filePath).toLowerCase());
 }

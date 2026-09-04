@@ -5,6 +5,7 @@
   "maxCallResultChars": 65536,
   "maxReturnChars": 32000,
   "maxHeapMb": 512,
+  "seenWindow": 40,
   "maxLogLines": 100,
   "maxLogLineChars": 4096,
   "maxSearchResults": 12,

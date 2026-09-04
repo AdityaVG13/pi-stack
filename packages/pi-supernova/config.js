@@ -18,6 +18,7 @@ const POSITIVE_INTEGER_KEYS = new Set([
   "maxLogLineChars",
   "maxSearchResults",
   "maxHeapMb",
+  "seenWindow",
 ]);
 
 const VALIDATORS = {
