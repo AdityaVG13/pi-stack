@@ -48,13 +48,15 @@ async () => {
 
 Globals: `nova` / `tools`, `parallel`, `pipeline`, `console`, plus shorthand `read`, `write`, `edit`, `patch`, `surface`, `snap`, `bash`, and `exec`.
 
-Compact terminal ledger—the host supplies the surrounding tool chrome:
+Structured terminal ledger—the host supplies the surrounding tool chrome:
 
 ```text
 nova · 3 calls · 84ms
-  ✓ read    packages/pi-supernova/host-bridge.js
-  ✓ edit    packages/pi-supernova/diff.js +2/-1
-  ✓ snap    "render lifecycle" → packages
+  ├─ ✓ read    packages/pi-supernova/host-bridge.js
+  │
+  ├─ ✓ edit    packages/pi-supernova/diff.js +2/-1
+  │
+  └─ ✓ snap    "render lifecycle" → packages
 ```
 
 Collapsed cards keep this command ledger visible. Press Enter to inspect bounded diff hunks, logs, and the returned value.

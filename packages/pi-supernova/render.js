@@ -421,8 +421,10 @@ export function renderSupernovaCall(a, b, c) {
 	if (ops.length === 0) {
 		out += " " + theme.fg("dim", "· composing");
 	} else {
-		for (const op of ops) {
-			out += `\n  ${formatOpBodyLine(theme, op)}`;
+		for (const [index, op] of ops.entries()) {
+			if (index > 0) out += "\n  │";
+			const branch = index === ops.length - 1 ? "└─" : "├─";
+			out += `\n  ${branch} ${formatOpBodyLine(theme, op)}`;
 		}
 	}
 
@@ -475,8 +477,11 @@ function buildResultBody(theme, { payload, context, args, expanded, isPartial, i
 		? tracedOps
 		: extractOperationsFromCode(args?.code).map((op) => displayOperation(op.tool, op.target)).filter(Boolean);
 	const maxOps = expanded ? 12 : 8;
-	for (const op of ops.slice(0, maxOps)) {
-		out += (out ? "\n" : "") + formatResultOperation(theme, op, isPartial, isError);
+	const visibleOps = ops.slice(0, maxOps);
+	for (const [index, op] of visibleOps.entries()) {
+		if (index > 0) out += "\n│";
+		const branch = index === visibleOps.length - 1 && ops.length <= maxOps ? "└─" : "├─";
+		out += (out ? "\n" : "") + `${branch} ${formatResultOperation(theme, op, isPartial, isError)}`;
 	}
 	if (ops.length > maxOps) out += `\n${theme.fg("dim", `… ${ops.length - maxOps} more calls`)}`;
 

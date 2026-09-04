@@ -2,11 +2,18 @@
 
 ## [Unreleased]
 
-## [0.0.5] - 2026-09-03
+## [0.0.6] - 2026-09-03
 
 ### Changed
 
-- Pi and OMP now render one compact command ledger and leave backgrounds and borders to the host, avoiding nested frames and oversized padded panels.
+- Pi and OMP now render one connected command ledger with visual separation between calls while leaving backgrounds and borders to the host, avoiding nested frames and oversized padded panels.
+
+### Fixed
+
+- Direct `nova.snap()` and `nova.surface()` helpers now return structured objects instead of host result envelopes.
+- Package metadata now matches the official Pi package contract: every `files` entry exists, and only the actually imported `typebox` host dependency remains declared as a peer.
+
+## [0.0.5] - 2026-09-03
 
 ### Fixed
 

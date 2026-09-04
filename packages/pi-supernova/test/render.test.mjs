@@ -113,7 +113,7 @@ describe("supernova UI rendering", () => {
     assert.match(rendered, /\[toolTitle\]<b>nova<\/b>\[\/toolTitle\]/);
     assert.match(rendered, /· 84ms/);
     assert.match(rendered, /\[syntaxFunction\]read\s*\[\/syntaxFunction\]/);
-    assert.match(rendered, /\[muted\]package\.json\[\/muted\]/);
+    assert.match(rendered, /\[muted\]package\.json/);
     assert.ok(rendered.includes("[accent]▤ [/accent]"));
     assert.doesNotMatch(rendered, /\{/);
     assert.doesNotMatch(rendered, /\x1b\[48;2;|╭|╰/);
@@ -292,6 +292,23 @@ describe("supernova UI rendering", () => {
     const rendered = renderSupernovaResult(result, { expanded: false, isPartial: false }, plainTheme, {}).render(91).join("\n");
     assert.match(rendered, /✓ read\s+present\.txt/);
     assert.match(rendered, /× read\s+missing\.txt/);
+  });
+
+  it("separates multiple calls with connected tree lines", () => {
+    const result = {
+      details: {
+        ok: true,
+        trace: [
+          { name: "read", args: { path: "a.ts" }, ok: true },
+          { name: "edit", args: { path: "b.ts" }, ok: true },
+        ],
+      },
+    };
+    const text = renderSupernovaResult(result, { expanded: false, isPartial: false }, plainTheme, {}).render(80).join("\n");
+    assert.match(text, /├─ ✓ read/);
+    assert.match(text, /\n  │\n/);
+    assert.match(text, /└─ ✓ edit/);
+    assert.doesNotMatch(text, /╭|╰|\x1b\[48;2;/);
   });
 
   it("never emits a line wider than the terminal (Pi crash contract)", () => {

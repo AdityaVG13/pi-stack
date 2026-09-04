@@ -1,6 +1,6 @@
 {
   "name": "pi-supernova",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Dual-host CodeMode for Pi/OMP: progressive tool discovery, result bottleneck, and Amdahl Auto parallel.",
   "type": "module",
   "author": "AdityaVG13",
@@ -38,7 +38,6 @@
     "diff.js",
     "render.js",
     "render-measure.js",
-    "omp-frame.js",
     "surface.js",
     "decode.js"
   ],
@@ -57,24 +56,15 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "peerDependenciesMeta": {
-    "@earendil-works/pi-coding-agent": {
-      "optional": true
-    },
-    "@earendil-works/pi-tui": {
-      "optional": true
-    },
     "typebox": {
       "optional": true
     }
   },
   "devDependencies": {
-    "typebox": "^1.0.0",
-    "@earendil-works/pi-tui": "^0.84.0"
+    "typebox": "^1.0.0"
   },
   "publishConfig": {
     "access": "public"
