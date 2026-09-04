@@ -483,6 +483,11 @@ class UnifiedResultCard {
 	render(width = 80) {
 		const { theme, model } = this;
 		if (!theme || !model) return [];
+		// A program with no host calls has nothing to frame: one status line, no empty box.
+		const probe = buildBodyLines(theme, Math.max(1, width - 4), model);
+		if (probe.lines.length === 0) {
+			return [clampLine(novaStatusLine(theme, { icon: model.isError ? "error" : model.isPartial ? "running" : undefined, title: "nova", description: describeCard(model, 0) }), width)];
+		}
 		if (!this.frame) {
 			this.frame = novaFramedBlock(theme, (frameWidth) => {
 				const contentWidth = Math.max(1, frameWidth - 4);
@@ -493,7 +498,7 @@ class UnifiedResultCard {
 						title: "nova",
 						description: describeCard(model, view.opCount),
 					}),
-					sections: view.lines.length > 0 ? [{ lines: view.lines }] : [],
+					sections: [{ lines: view.lines }],
 					state: model.isError ? "error" : model.isPartial ? "pending" : "success",
 					// borderMuted is invisible on OMP's card background; dim matches the duration column.
 					borderColor: model.isError ? "error" : "dim",

@@ -186,6 +186,17 @@ describe("supernova UI rendering", () => {
     assert.doesNotMatch(text, /static\.txt/);
   });
 
+  it("renders a program with no host calls as one status line, not an empty frame", () => {
+    const result = { details: { ok: true, wallMs: 386, result: 42 } };
+    const pi = renderSupernovaResult(result, { expanded: false, isPartial: false }, plainTheme, { state: {}, args: { code: "return 42" } }).render(60);
+    const omp = renderSupernovaResult(result, { expanded: false, isPartial: false }, plainTheme, { code: "return 42" }).render(60);
+    assert.deepEqual(pi, ["nova: complete · 386ms"]);
+    assert.deepEqual(omp, pi);
+    const expanded = renderSupernovaResult(result, { expanded: true, isPartial: false }, plainTheme, {}).render(60).join("\n");
+    assert.match(expanded, /╭.*nova: complete · 386ms/);
+    assert.match(expanded, /── result ──\s+│\n│ 42/);
+  });
+
   it("keeps a compact completion card when no file edits occurred", () => {
     const result = {
       content: [{ type: "text", text: "ok" }],

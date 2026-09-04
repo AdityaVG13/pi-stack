@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.13] - 2026-09-04
+
+### Fixed
+
+- A program that made no host calls rendered an empty frame (`╭─ nova: complete ─╮ / ╰──╯`); it is now a single status line. Expanded view still frames the returned value.
+
 ## [0.0.12] - 2026-09-04
 
 ### Added

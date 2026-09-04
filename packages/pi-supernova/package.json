@@ -1,6 +1,6 @@
 {
   "name": "pi-supernova",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "description": "Dual-host CodeMode for Pi/OMP: progressive tool discovery, result bottleneck, and Amdahl Auto parallel.",
   "type": "module",
   "author": "AdityaVG13",
