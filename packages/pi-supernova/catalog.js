@@ -34,6 +34,15 @@ export const NATIVE_TOOL_DEFINITIONS = [
     }, required: ["query"] },
   },
   {
+    name: "evidence", description: "Top-K source spans (with path and line provenance) that answer a concept question; read these instead of whole files.",
+    parameters: { type: "object", properties: {
+      query: { type: "string", description: "Concept, symbol, or question" },
+      path: { type: "string", description: "Optional search root" },
+      k: { type: "number", description: "Main spans to return (default 5)" },
+      maxChars: { type: "number", description: "Total text budget (default 6000)" },
+    }, required: ["query"] },
+  },
+  {
     name: "surface", description: "Extract a structural outline from a workspace source file.",
     parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
   },

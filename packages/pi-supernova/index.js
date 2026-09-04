@@ -103,6 +103,7 @@ Globals (async):
 read(path|paths, offset?, limit?) → text | text[]
 write(path, text) · edit(path, oldText, newText) · patch(path, unifiedDiff)
 bash(cmd, {cwd?, timeoutMs?}) → output, throws on non-zero exit · exec(cmd, argv?) quotes argv
+evidence(query, {k?}) → {spans: [{path, lines, name, text}]} top-K spans that answer a question — use before read
 snap(query, root?) → {path, line, signature, context} · surface(path) → {items: [{name, kind, line}]}
 nova.call(name, args) → {ok, value} for any host tool · nova.callMany([{name, args}]) parallel when read-only
 nova.search(query) → [{name, description}] · nova.describe(name) → parameters · nova.has(name) sync
@@ -178,7 +179,7 @@ export default function piSupernova(pi) {
     description: TOOL_DESCRIPTION,
     promptSnippet: "Compose host tools in one JavaScript program",
     promptGuidelines: [
-      "Use supernova for multi-step tool work: loops, filtering, parallel reads, read→edit chains. Return a compact shaped value; keep raw tool output inside the program.",
+      "Use supernova for multi-step tool work: loops, filtering, parallel reads, read→edit chains. To understand code, call evidence(question) and read only the returned spans; read whole files only to edit them. Return a compact shaped value; keep raw tool output inside the program.",
     ],
     parameters: Type.Object({
       code: Type.String({ description: "JavaScript program: async body or arrow function." }),

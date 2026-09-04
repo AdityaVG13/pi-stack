@@ -46,7 +46,9 @@ async () => {
 }
 ```
 
-Globals: `nova` / `tools`, `parallel`, `pipeline`, `console`, plus shorthand `read` (path or path array), `write`, `edit`, `patch`, `surface`, `snap`, `bash`, and `exec`.
+Globals: `nova` / `tools`, `parallel`, `pipeline`, `console`, plus shorthand `read` (path or path array), `write`, `edit`, `patch`, `evidence`, `surface`, `snap`, `bash`, and `exec`.
+
+Read discipline that keeps context small: `surface(path)` (names only) → `evidence(question)` (the spans that answer it) → `read(path, offset, limit)` only for the lines you will edit.
 
 The returned value is rendered as a compact JS literal (unquoted keys, one item per line only when a container exceeds 120 columns) and capped at `maxReturnChars`. Strings are returned raw. This costs ~43% fewer tokens than pretty JSON — return small shaped values, not raw file dumps.
 
@@ -75,6 +77,7 @@ Multi-line commands show their first line plus a hidden-line count. Press Enter 
 | `nova.describe(name)` | Parameter summary on demand |
 | `nova.call(name, args)` | Host tool or native adapter |
 | `nova.callMany([{name,args}])` | Auto parallel wave — iterable array with `.mode` / `.results` |
+| `nova.evidence(query, {k?, path?, maxChars?})` | Top-K source spans (path, lines, verbatim text) that answer a question — zero-token evidence selection after Zero-Mem; ~68% fewer tokens than reading the files |
 | `nova.surface(path)` | Structural outline for a source file |
 | `nova.snap(query, searchRoot?)` | Defining file (workspace-relative), line, signature, confidence, and context for a concept; served from the in-process index in well under 1ms |
 | `nova.has(name)` | Whether a catalog or native tool is callable (sync) |

@@ -16,6 +16,8 @@ const BINARY_EXT = new Set([
   ".jar", ".so", ".dylib", ".dll", ".exe", ".bin", ".o", ".a", ".node", ".lock", ".sqlite", ".sqlite3", ".db",
 ]);
 const REGEX_SPECIAL = /[.+^${}()|\\]/g;
+const IDENT_TOKEN = /[A-Za-z_$][\w$]*/g;
+const EMPTY = Object.freeze([]);
 const DEF_PATTERN = /^(?:pub\s+)?(?:export\s+)?(?:async\s+)?(?:default\s+)?(function|class|def|fn|const|let|interface|type|struct|enum)\s+([a-zA-Z0-9_$]+)/;
 
 export function isTextCandidate(filePath) {
@@ -121,18 +123,20 @@ export class WorkspaceIndex {
     return { text, lower: text.toLowerCase(), ext: path.extname(filePath), surface: undefined, lines: undefined };
   }
 
-  /** Per-line lowercase text and declared identifier (or ""), computed once per entry. */
+  /** Per-line raw text, lowercase text, declared identifier (or ""), and identifier tokens — computed once per entry. */
   static linesOf(entry) {
     if (entry.lines) return entry.lines;
     const raw = entry.text.split("\n");
     const lower = new Array(raw.length);
     const defNames = new Array(raw.length);
+    const idents = new Array(raw.length);
     for (let i = 0; i < raw.length; i++) {
       const trimmed = raw[i].trim();
       lower[i] = trimmed.toLowerCase();
       defNames[i] = DEF_PATTERN.exec(trimmed)?.[2].toLowerCase() ?? "";
+      idents[i] = trimmed.match(IDENT_TOKEN) || EMPTY;
     }
-    entry.lines = { lower, defNames };
+    entry.lines = { raw, lower, defNames, idents };
     return entry.lines;
   }
 

@@ -8,6 +8,7 @@ import { unknownToolMessage } from "./catalog.js";
 import { extractStructuralSurface } from "./surface.js";
 import { buildEditDiff, buildMultiEditDiff, buildPatchDiff, buildWriteDiff } from "./diff.js";
 import { executeSnap } from "./snap.js";
+import { selectEvidence } from "./evidence.js";
 import { WorkspaceIndex, globToRegExp } from "./repo-index.js";
 import { CausalVfs } from "./vfs.js";
 import { applyPatchToText } from "./patch.js";
@@ -306,6 +307,17 @@ function createNativeAdapters(getCwd, vfs, config, index) {
         pendingPaths: vfs.getOverlayPaths(),
       });
       return textResult(JSON.stringify(res, null, 2), res);
+    },
+    async evidence(params, signal) {
+      const cwd = getCwd();
+      if (!isString(params?.query) || !params.query.trim()) throw new Error("evidence requires query");
+      if (signal?.aborted) throw new Error("aborted");
+      const searchDir = params?.path ? await resolveWorkspacePath(cwd, params.path, "evidence", true) : cwd;
+      const options = {};
+      if (Number.isInteger(params?.k) && params.k > 0) options.k = params.k;
+      if (Number.isInteger(params?.maxChars) && params.maxChars > 0) options.maxChars = params.maxChars;
+      const res = await selectEvidence({ query: params.query, root: cwd, searchDir, index, overlayText: (p) => vfs.getOverlay(p), options });
+      return textResult(JSON.stringify(res), { route: res.route, count: res.spans.length });
     },
     async surface(params, signal) {
       const cwd = getCwd();

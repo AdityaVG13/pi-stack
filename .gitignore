@@ -28,3 +28,4 @@ tools/
 **/.module-coupling-topology/
 .cyclomatic-reduction/
 **/.cyclomatic-reduction/
+.papers/

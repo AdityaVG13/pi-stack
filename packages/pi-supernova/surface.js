@@ -66,13 +66,16 @@ const JS_DECL_PATTERNS = [
   [/^(?:async\s+)?(function\*?|class)\s+([a-zA-Z0-9_$]+)/, false],
   [/^(interface|type)\s+([a-zA-Z0-9_$]+)/, false],
 ];
+// Module-level tables/constants (column 0 only): without them the previous declaration's span swallows them.
+const JS_TOP_LEVEL_BINDING = /^(const|let|var)\s+([a-zA-Z0-9_$]+)\s*=/;
 
 function scanJavaScript(lines) {
   const items = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line || line.startsWith("//") || line.startsWith("/*") || line.startsWith("*")) continue;
-    for (const [pattern, isExport] of JS_DECL_PATTERNS) {
+    const patterns = /^\S/.test(lines[i]) ? [...JS_DECL_PATTERNS, [JS_TOP_LEVEL_BINDING, false]] : JS_DECL_PATTERNS;
+    for (const [pattern, isExport] of patterns) {
       const match = pattern.exec(line);
       if (!match) continue;
       items.push({

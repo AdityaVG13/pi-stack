@@ -11,7 +11,7 @@ const compiledCache = new Map();
 const COMPILED_CACHE_MAX = 256;
 const PARAMS = [
   "nova", "tools", "console", "parallel", "pipeline",
-  "read", "write", "edit", "patch", "surface", "snap", "bash", "exec", "speculate",
+  "read", "write", "edit", "patch", "surface", "snap", "evidence", "bash", "exec", "speculate",
 ];
 // V8 and JSC both place the body on the line after the synthesized header.
 const BODY_LINE_OFFSET = 2;
@@ -229,6 +229,7 @@ function buildGuestApi(available) {
       }
     },
     surface: async (filePath) => unwrapJsonValue(await rpc("surface", [filePath])),
+    evidence: async (query, opts) => unwrapJsonValue(await rpc("call", ["evidence", { query, ...opts }])),
     snap: async (query, targetPath) => unwrapJsonValue(await rpc("snap", [query, targetPath])),
     has: (name) => availableSet.has(name),
   };
@@ -269,7 +270,7 @@ function buildGuestApi(available) {
     return bash([command, ...args].map(quoteShellArg).join(" "), opts);
   };
 
-  return { nova, read, write, edit, patch, surface: nova.surface, snap: nova.snap, bash, exec, speculate: nova.speculate };
+  return { nova, read, write, edit, patch, surface: nova.surface, snap: nova.snap, evidence: nova.evidence, bash, exec, speculate: nova.speculate };
 }
 
 function makeConsole(runId, limits) {
@@ -312,7 +313,7 @@ async function handleRun(msg) {
   try {
     const value = await compiled(
       api.nova, api.nova, scopedConsole, runParallel, runPipeline,
-      api.read, api.write, api.edit, api.patch, api.surface, api.snap, api.bash, api.exec, api.speculate,
+      api.read, api.write, api.edit, api.patch, api.surface, api.snap, api.evidence, api.bash, api.exec, api.speculate,
     );
     if (runId !== activeRunId) return;
     let plain;

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.0.11] - 2026-09-04
+
+### Added
+
+- `evidence(query, {k?, path?, maxChars?})` — zero-token evidence selection over the codebase after Zero-Mem (arXiv:2607.29377), implemented 1:1 with the paper's non-generative pipeline: declared spans are the context units and identifiers the entities (eq.3), entity–span weights `w(d,e)=c(e,d)/Σc` (eq.4), file→span→line hierarchy (eq.5, eq.11), a deterministic query profile and relational/local route (eq.6–7), lexical entity alignment and one IDF-damped co-occurrence propagation step (eq.8–9), personalized PageRank `π=(1−γ)r+γPᵀπ` over spans (eq.10, γ=0.85, 10 iterations, factored through the entity layer so it is O(nnz)), per-view min-max normalisation and ρ-weighted fusion (eq.12–13, ρ=0.7), closure with definition bridges and in-file neighbours (eq.14), and calibration that filters by boundary/answer type/lexical support and ranks by type compatibility (eq.15). Returns top-K (default 5, per the paper's Top-5 ≈ Top-10 finding) verbatim source spans with path and line provenance under a 6000-char budget. Across 8 understanding questions on this repo the correct span ranks first and the result costs **68% fewer tokens** than reading the files the question spans (43,916 → 14,147). Warm latency 1–4ms.
+- Structural surface now records column-0 `const/let/var` bindings, so module-level tables are their own spans (also sharpens `snap`).
+
+### Changed
+
+- Tool guidance: "To understand code, call `evidence(question)` and read only the returned spans; read whole files only to edit them" (Agent Zero Memory's L0→L1→L2 read discipline; Harness-of-Harness progressive disclosure).
+
 ## [0.0.10] - 2026-09-04
 
 ### Changed
