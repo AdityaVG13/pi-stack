@@ -39,17 +39,19 @@ describe("snap-to-file and top-level guest globals", () => {
     assert.ok(sTest > 0);
   });
 
-  it("snaps to exact file and definition line cold in sub-25ms", async () => {
+  it("snaps to the defining file and line, not the busiest call site", async () => {
     const bridge = createHostBridge({
       pi: null,
       config,
       getCwd: () => process.cwd(),
     });
 
+    // host-bridge.js calls resolveWorkspacePath a dozen times; workspace.js defines it once.
     const res = await bridge.call("snap", { query: "resolve workspace path escapes" });
     assert.equal(res.ok, true);
     const data = JSON.parse(res.value);
-    assert.match(data.path, /host-bridge\.js$/);
+    assert.match(data.path, /workspace\.js$/);
+    assert.match(data.signature, /function resolveWorkspacePath/);
     assert.ok(data.line > 0);
     assert.ok(data.confidence >= 0.7);
     assert.ok(data.context.length > 0);

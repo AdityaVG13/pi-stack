@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.0.9] - 2026-09-04
+
+### Fixed
+
+- `snap` returns the defining file and line. `const x = fn(...)` call sites matched the definition regex and earned definition credit, so the busiest caller outranked the definer; definition credit now requires the declared name to contain a query token, mention credit is capped per file, and the anchor is the surface item with the most token matches (`resolveWorkspacePath`, not `getResolvedCwd`).
+- Success cards draw a visible frame. `borderMuted` is background-level in OMP themes, so only error cards had a border; success uses `dim`.
+- Failed calls show their error on the row instead of `done`; rows with no target show nothing.
+- `read([...paths])` rows read `2 files: a.js, b.js` instead of a comma-joined path list.
+
 ## [0.0.8] - 2026-09-04
 
 ### Changed

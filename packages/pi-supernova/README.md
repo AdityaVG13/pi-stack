@@ -76,7 +76,7 @@ Multi-line commands show their first line plus a hidden-line count. Press Enter 
 | `nova.call(name, args)` | Host tool or native adapter |
 | `nova.callMany([{name,args}])` | Auto parallel wave — iterable array with `.mode` / `.results` |
 | `nova.surface(path)` | Structural outline for a source file |
-| `nova.snap(query, searchRoot?)` | Most relevant source path, line, signature, confidence, and context |
+| `nova.snap(query, searchRoot?)` | Defining file, line, signature, confidence, and context for a concept (definitions outrank call sites) |
 | `nova.has(name)` | Whether a catalog or native tool is callable (sync) |
 | `parallel(thunks)` / `pipeline(items, …stages)` | Raw `Promise.all` helpers |
 | `nova.speculate(fn)` | Counterfactual branch (rollback / commit) |

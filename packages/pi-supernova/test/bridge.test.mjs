@@ -389,7 +389,7 @@ describe("host bridge and adapters", () => {
     assert.equal(snapReadRes.ok, true);
     const sDetails = JSON.parse(snapReadRes.details);
     assert.equal(sDetails.isSnap, true);
-    assert.match(sDetails.path, /host-bridge\.js$/);
+    assert.match(sDetails.path, /vfs\.js$/);
   });
 
   it("supports polymorphic edit with unified diff patch directly", async () => {

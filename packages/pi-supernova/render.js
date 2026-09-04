@@ -178,7 +178,7 @@ function displayOperation(tool, target, diff, ok, item) {
 	const rawName = cleanInlineText(tool);
 	if (!rawName) return null;
 	const normalized = rawName === "apply_patch" ? "patch" : rawName;
-	return { tool: normalized, target, diff, ok, ms: item?.ms, exitCode: item?.exitCode, time: item?.time };
+	return { tool: normalized, target, diff, ok, ms: item?.ms, exitCode: item?.exitCode, time: item?.time, error: item?.error };
 }
 
 function isTheme(value) {
@@ -271,6 +271,11 @@ export function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs
 	throw new Error("supernova renderResult: theme missing (expected Pi or OMP signature)");
 }
 
+function batchTarget(paths) {
+	const names = paths.map((p) => String(p).replace(/\\/g, "/").split("/").pop());
+	return `${paths.length} files: ${names.join(", ")}`;
+}
+
 const OPERATION_TARGETS = [
 	[(item) => item?.name === "snap", (item, args) => {
 		const query = args.query ? `"${args.query}"` : "";
@@ -278,6 +283,7 @@ const OPERATION_TARGETS = [
 		return `${query} → ${args.path}`;
 	}],
 	[(item) => item?.name === "search", (item, args) => (args.query ? `"${args.query}"` : "")],
+	[(item, args) => Array.isArray(args.path), (item, args) => batchTarget(args.path)],
 	[(item, args) => args.path, (item, args) => String(args.path)],
 	[(item) => item?.diff?.path, (item) => String(item.diff.path)],
 	[(item, args) => args.target && isString(args.target), (item, args) => args.target],
@@ -405,8 +411,11 @@ function formatOpRow(theme, op, width, isPartial, isError) {
 		prefix += theme.fg("toolDiffAdded", added) + theme.fg("dim", "/") + theme.fg("toolDiffRemoved", removed) + " ";
 		used += added.length + 1 + removed.length + 1;
 	}
-	const target = formatTarget(op, Math.max(1, width - used));
-	return prefix + (target ? theme.fg("muted", target) : theme.fg("dim", "done"));
+	const budget = Math.max(1, width - used);
+	const target = formatTarget(op, budget);
+	if (target) return prefix + theme.fg("muted", target);
+	if (op.ok === false && op.error) return prefix + theme.fg("error", clampLine(cleanInlineText(op.error), budget));
+	return prefix.trimEnd();
 }
 
 function operationsFor(payload, context, args) {
@@ -486,7 +495,8 @@ class UnifiedResultCard {
 					}),
 					sections: view.lines.length > 0 ? [{ lines: view.lines }] : [],
 					state: model.isError ? "error" : model.isPartial ? "pending" : "success",
-					borderColor: model.isError ? "error" : "borderMuted",
+					// borderMuted is invisible on OMP's card background; dim matches the duration column.
+					borderColor: model.isError ? "error" : "dim",
 					width: frameWidth,
 				};
 			});

@@ -514,6 +514,7 @@ export function createHostBridge({ pi, config, getCwd }) {
     } catch (error) {
       record.ok = false;
       record.ms = Date.now() - record.time;
+      record.error = error instanceof Error ? error.message : String(error);
       notifyCall(record);
       throw error;
     }

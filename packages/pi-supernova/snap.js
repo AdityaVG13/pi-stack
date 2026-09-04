@@ -67,30 +67,39 @@ function isSkippableLine(line) {
   return !line || line.startsWith("//") || line.startsWith("#") || line.startsWith("*");
 }
 
-function lineScoreFor(line, tokens, isDef) {
+/** A line defines a token only when the declared name contains it; `const x = foo(token)` is a mention. */
+function lineScoreFor(line, tokens, definedName) {
   const lower = line.toLowerCase();
   let lineScore = 0;
   for (const token of tokens) {
-    if (lower.includes(token)) lineScore += isDef ? 40 : 5;
+    if (!lower.includes(token)) continue;
+    lineScore += definedName.includes(token) ? 40 : 5;
   }
   return lineScore;
 }
 
+// Mentions are capped so a file that calls a symbol many times cannot outrank the file that defines it.
+const MAX_MENTION_SCORE = 60;
+
 function accumulateContentScore(lines, tokens, defPattern) {
-  let score = 0;
+  let defScore = 0;
+  let mentionScore = 0;
   let bestLine = 1;
   let bestLineScore = 0;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (isSkippableLine(line)) continue;
-    const lineScore = lineScoreFor(line, tokens, defPattern.test(line));
+    const definedName = defPattern.exec(line)?.[2].toLowerCase() ?? "";
+    const isDef = definedName.length > 0;
+    const lineScore = lineScoreFor(line, tokens, definedName);
     if (lineScore > bestLineScore) {
       bestLineScore = lineScore;
       bestLine = i + 1;
     }
-    score += lineScore;
+    if (isDef) defScore += lineScore;
+    else mentionScore += lineScore;
   }
-  return { totalScore: score, bestLine, bestLineScore };
+  return { totalScore: defScore + Math.min(mentionScore, MAX_MENTION_SCORE), bestLine, bestLineScore };
 }
 
 function scoreContentDefinitions(content, tokens) {
@@ -166,19 +175,19 @@ async function expandCandidatesWithGrep(candidates, fileList, tokens, flags, dir
 
 function scoreSurfaceItems(items, tokens, fallbackLine) {
   let bonus = 0;
-  let signature = "";
-  let anchorLine = fallbackLine;
+  let best = null;
+  let bestMatches = 0;
   for (const item of items) {
     const nameLower = item.name.toLowerCase();
-    for (const token of tokens) {
-      if (!nameLower.includes(token)) continue;
-      bonus += item.isExport ? 80 : 50;
-      if (signature) continue;
-      signature = item.signature;
-      anchorLine = item.line;
+    const matches = tokens.filter((token) => nameLower.includes(token)).length;
+    if (matches === 0) continue;
+    bonus += matches * (item.isExport ? 80 : 50);
+    if (matches > bestMatches) {
+      bestMatches = matches;
+      best = item;
     }
   }
-  return { bonus, signature, anchorLine };
+  return { bonus, signature: best?.signature ?? "", anchorLine: best?.line ?? fallbackLine };
 }
 
 async function scoreCandidateContents(candidates, tokens, flags, vfs) {
