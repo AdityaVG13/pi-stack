@@ -146,8 +146,8 @@ export default function piSupernova(pi) {
         }),
       ),
     }),
-    // Return compact content while suppressing the host's raw JSON fallback.
-    // The surrounding tool container remains host-owned.
+    // One self-owned result frame is shared by Pi and OMP; renderCall stays empty
+    // so separate call/result slots cannot duplicate the lifecycle card.
     renderShell: "self",
     mergeCallAndResult: true,
     renderCall: renderSupernovaCall,
@@ -174,6 +174,15 @@ export default function piSupernova(pi) {
           } catch {}
         }
       });
+
+      if (isFunction(onUpdate)) {
+        try {
+          onUpdate({
+            content: [{ type: "text", text: "" }],
+            details: { trace: [], running: true },
+          });
+        } catch {}
+      }
 
       const runConfig = {
         ...config,

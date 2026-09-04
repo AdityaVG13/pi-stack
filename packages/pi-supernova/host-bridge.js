@@ -740,6 +740,18 @@ export function createHostBridge({ pi, config, getCwd }) {
     vfs.clear();
   }
 
+  function resultDiff(response) {
+    let details = response?.details;
+    if (isString(details)) {
+      try {
+        details = JSON.parse(details);
+      } catch {
+        return undefined;
+      }
+    }
+    return details && typeof details === "object" ? details.diff : undefined;
+  }
+
   function notifyCall(record) {
     if (!callListener) return;
     try {
@@ -766,13 +778,27 @@ export function createHostBridge({ pi, config, getCwd }) {
 
     const record = { name, args: args || {}, time: Date.now() };
     trace.push(record);
+    notifyCall(record);
 
     try {
       const exec = executors.get(name);
       if (exec) {
+        let fallbackDiff;
+        if (name === "write" && isString(args?.path) && isString(args?.content)) {
+          const target = await resolveWorkspacePath(getCwd(), args.path, "write", false);
+          let previous = "";
+          try {
+            previous = await vfs.read(target);
+          } catch (error) {
+            if (error?.code !== "ENOENT") throw error;
+          }
+          fallbackDiff = buildWriteDiff(target, previous, args.content);
+        }
         if (isMutatingTool(name, config)) await vfs.prepareExternalMutation(name);
         const res = await exec(`supernova:${name}:${callCount}`, args || {}, activeSignal, undefined, activeCtx);
+        const diff = resultDiff(res) || fallbackDiff;
         record.ok = res?.isError !== true && res?.details?.ok !== false;
+        if (diff && record.ok) record.diff = diff;
         notifyCall(record);
         return res;
       }
@@ -780,8 +806,9 @@ export function createHostBridge({ pi, config, getCwd }) {
       const native = natives[name];
       if (native) {
         const res = await native(args || {}, activeSignal);
-        if (res?.details?.diff) record.diff = res.details.diff;
+        const diff = resultDiff(res);
         record.ok = res?.isError !== true && res?.details?.ok !== false;
+        if (diff && record.ok) record.diff = diff;
         notifyCall(record);
         return res;
       }

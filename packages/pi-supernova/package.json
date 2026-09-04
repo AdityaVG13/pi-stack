@@ -38,6 +38,7 @@
     "diff.js",
     "render.js",
     "render-measure.js",
+    "omp-frame.js",
     "surface.js",
     "decode.js"
   ],

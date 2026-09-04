@@ -6,9 +6,11 @@
 
 ### Changed
 
-- Pi and OMP now render one connected command ledger with visual separation between calls while leaving backgrounds and borders to the host, avoiding nested frames and oversized padded panels.
+- Pi and OMP now share one self-owned framed result card. The hidden call slot prevents duplicate lifecycle cards, and connected rows preserve visual separation between calls.
 
 ### Fixed
+
+- Edit, write, and patch calls now show bounded line-numbered removed/added hunks while collapsed, with a larger budget when expanded; captured host executors propagate their native diff metadata into the same UI.
 
 - Direct `nova.snap()` and `nova.surface()` helpers now return structured objects instead of host result envelopes.
 - Package metadata now matches the official Pi package contract: every `files` entry exists, and only the actually imported `typebox` host dependency remains declared as a peer.

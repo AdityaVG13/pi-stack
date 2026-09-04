@@ -77,18 +77,49 @@ describe("host bridge and adapters", () => {
         getCwd: () => tmpDir,
       });
 
-      const wRes = await bridge.call("write", { path: "hello.txt", content: "hello world" });
+      const wRes = await bridge.call("write", { path: "hello.txt", content: "hello world\n" });
       assert.equal(wRes.ok, true);
+      const createDiff = JSON.parse(wRes.details).diff;
+      assert.equal(createDiff.added, 1);
+      assert.equal(createDiff.removed, 0);
+      assert.deepEqual(createDiff.lines.map((line) => line.type), ["add"]);
 
       const eRes = await bridge.call("edit", { path: "hello.txt", oldText: "world", newText: "pi" });
       assert.equal(eRes.ok, true);
 
       const rRes = await bridge.call("read", { path: "hello.txt" });
-      assert.equal(rRes.value, "hello pi");
+      assert.equal(rRes.value, "hello pi\n");
 
       const lsRes = await bridge.call("ls", { path: "." });
       assert.equal(lsRes.ok, true);
       assert.match(lsRes.value, /hello\.txt/);
+
+      const overwrite = await bridge.call("write", { path: "hello.txt", content: "replacement\n" });
+      const overwriteDiff = JSON.parse(overwrite.details).diff;
+      assert.equal(overwriteDiff.added, 1);
+      assert.equal(overwriteDiff.removed, 1);
+      assert.deepEqual(overwriteDiff.lines.map((line) => line.type), ["remove", "add"]);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not report phantom lines for trailing newlines or deletions", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "bridge-diff-lines-"));
+    try {
+      await fs.writeFile(path.join(tmpDir, "lines.txt"), "alpha\nbeta\n");
+      const bridge = createHostBridge({ pi: null, config, getCwd: () => tmpDir });
+      const replace = await bridge.call("edit", { path: "lines.txt", oldText: "alpha", newText: "first" });
+      const replaceDiff = JSON.parse(replace.details).diff;
+      assert.equal(replaceDiff.lines.some((line) => line.text === ""), false);
+      const expand = await bridge.call("edit", { path: "lines.txt", oldText: "first", newText: "one\ntwo" });
+      const expandDiff = JSON.parse(expand.details).diff;
+      assert.equal(expandDiff.lines.at(-1).type, "context");
+      assert.equal(expandDiff.lines.at(-1).lineNum, 3);
+      const remove = await bridge.call("edit", { path: "lines.txt", oldText: "beta\n", newText: "" });
+      const removeDiff = JSON.parse(remove.details).diff;
+      assert.equal(removeDiff.added, 0);
+      assert.equal(removeDiff.removed, 1);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
@@ -198,6 +229,54 @@ describe("host bridge and adapters", () => {
     }
   });
 
+  it("copies diffs from captured host executors into the trace", async () => {
+    const pi = { registerTool() {} };
+    const bridge = createHostBridge({ pi, config, getCwd: () => process.cwd() });
+    const diff = {
+      path: "captured.ts",
+      op: "edit",
+      added: 1,
+      removed: 1,
+      lines: [
+        { type: "remove", lineNum: 1, text: "old" },
+        { type: "add", lineNum: 1, text: "new" },
+      ],
+    };
+    pi.registerTool({
+      name: "captured_edit",
+      async execute() {
+        return { content: [{ type: "text", text: "edited" }], details: { diff } };
+      },
+    });
+    const observedStates = [];
+    bridge.setCallListener((_record, trace) => observedStates.push(trace.at(-1)?.ok));
+    await bridge.call("captured_edit", { path: "captured.ts" });
+    assert.deepEqual(observedStates, [undefined, true]);
+    assert.deepEqual(bridge.getTrace()[0].diff, diff);
+  });
+
+  it("synthesizes write diffs when the captured host write tool omits details", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "captured-write-diff-"));
+    try {
+      const pi = { registerTool() {} };
+      const bridge = createHostBridge({ pi, config, getCwd: () => tmpDir });
+      pi.registerTool({
+        name: "write",
+        async execute(_id, args) {
+          await fs.writeFile(path.join(tmpDir, args.path), args.content);
+          return { content: [{ type: "text", text: "written" }], details: undefined };
+        },
+      });
+      await bridge.call("write", { path: "captured.txt", content: "actual line\n" });
+      const diff = bridge.getTrace()[0].diff;
+      assert.equal(diff.added, 1);
+      assert.equal(diff.removed, 0);
+      assert.equal(diff.lines[0].text, "actual line");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("supports apply_patch adapter with unified diff and path extraction", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "bridge-patch-test-"));
     try {
@@ -223,6 +302,10 @@ describe("host bridge and adapters", () => {
       const patchDetails = JSON.parse(res1.details);
       assert.equal(patchDetails.diff.added, 2);
       assert.equal(patchDetails.diff.removed, 1);
+      assert.deepEqual(
+        patchDetails.diff.lines.filter((line) => line.type === "add").map((line) => line.lineNum),
+        [3, 4],
+      );
       const read1 = await bridge.call("read", { path: "sample.txt" });
       assert.equal(read1.value, "line1\nline2\nline3_modified\nline3_new\nline4\n");
 

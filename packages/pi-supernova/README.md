@@ -48,18 +48,19 @@ async () => {
 
 Globals: `nova` / `tools`, `parallel`, `pipeline`, `console`, plus shorthand `read`, `write`, `edit`, `patch`, `surface`, `snap`, `bash`, and `exec`.
 
-Structured terminal ledger—the host supplies the surrounding tool chrome:
+Unified Pi/OMP card with bounded mutation diffs visible while collapsed:
 
 ```text
-nova · 3 calls · 84ms
-  ├─ ✓ read    packages/pi-supernova/host-bridge.js
-  │
-  ├─ ✓ edit    packages/pi-supernova/diff.js +2/-1
-  │
-  └─ ✓ snap    "render lifecycle" → packages
+╭─── nova: 2 calls · 84ms ───────────────────────────────╮
+│ ├─ ✓ read    packages/pi-supernova/host-bridge.js       │
+│ │                                                       │
+│ └─ ✓ edit   +1/-1 packages/pi-supernova/diff.js         │
+│       -143 │ - const oldValue = before;                 │
+│       +143 │ + const newValue = after;                  │
+╰─────────────────────────────────────────────────────────╯
 ```
 
-Collapsed cards keep this command ledger visible. Press Enter to inspect bounded diff hunks, logs, and the returned value.
+Collapsed cards show bounded edit/write/patch hunks immediately. Press Enter for a larger hunk budget, logs, and the returned value.
 
 ---
 

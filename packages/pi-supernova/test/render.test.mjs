@@ -80,7 +80,12 @@ describe("supernova UI rendering", () => {
     `;
     const ops = extractOperationsFromCode(code);
     assert.deepEqual(ops.map((op) => op.tool), ["read", "edit", "bash"]);
-    const rendered = renderSupernovaCall({ code }, mockTheme, { state: { wallMs: 12 } }).render(160).join("\n");
+    const rendered = renderSupernovaResult(
+      { details: { trace: [], running: true } },
+      { expanded: false, isPartial: true },
+      mockTheme,
+      { state: {}, args: { code } },
+    ).render(160).join("\n");
     assert.doesNotMatch(rendered, /script/);
     assert.match(rendered, /package\.json/);
     assert.match(rendered, /a\.js/);
@@ -100,116 +105,84 @@ describe("supernova UI rendering", () => {
     assert.equal(ops[1].tool, "write");
   });
 
-  it("renders a compact call ledger without owning host chrome", () => {
-    const args = {
-      code: 'await nova.call("read", { path: "package.json" });',
-    };
-    const comp = renderSupernovaCall(args, mockTheme, {
-      args,
-      state: { wallMs: 84 },
-      isPartial: false,
-    });
-    const rendered = comp.render(91).join("\n");
-    assert.match(rendered, /\[toolTitle\]<b>nova<\/b>\[\/toolTitle\]/);
-    assert.match(rendered, /· 84ms/);
-    assert.match(rendered, /\[syntaxFunction\]read\s*\[\/syntaxFunction\]/);
-    assert.match(rendered, /\[muted\]package\.json/);
-    assert.ok(rendered.includes("[accent]▤ [/accent]"));
-    assert.doesNotMatch(rendered, /\{/);
-    assert.doesNotMatch(rendered, /\x1b\[48;2;|╭|╰/);
-    assert.doesNotMatch(rendered, /"code":/);
-    assert.doesNotMatch(rendered, /▌/);
-  });
-
-  it("accepts OMP renderCall signature (args, options, theme) without throwing", () => {
-    const theme = {
-      fg: (_t, text) => text,
-      bold: (text) => text,
-      dim: (text) => text,
-    };
-    const options = { expanded: false, isPartial: true, executionStarted: true };
+  it("keeps renderCall empty for both Pi and OMP so only the result slot is visible", () => {
     const args = { code: 'await read("package.json");' };
-    // OMP order — if we treated options as theme, theme.fg would throw.
-    const comp = renderSupernovaCall(args, options, theme);
-    const lines = comp.render(80);
-    assert.ok(lines.length > 0);
-    const text = lines.join("\n");
-    assert.match(text, /nova/);
-    assert.match(text, /package\.json/);
-    assert.doesNotMatch(text, /"code":/);
-    assert.doesNotMatch(text, /╭|╰|\x1b\[48;2;/);
-    const norm = normalizeCallRenderArgs(args, options, theme);
-    assert.equal(norm.host, "omp");
-    assert.equal(norm.theme, theme);
-    assert.equal(lines.length, 2);
-    assertLinesFit(lines, 80, "compact OMP call");
+    const piContext = { args, state: { trace: [{ name: "read", args: { path: "package.json" } }] } };
+    assert.deepEqual(renderSupernovaCall(args, plainTheme, piContext).render(80), []);
+
+    const ompOptions = { expanded: false, isPartial: true, executionStarted: true };
+    assert.deepEqual(renderSupernovaCall(args, ompOptions, plainTheme).render(80), []);
+    assert.equal(normalizeCallRenderArgs(args, ompOptions, plainTheme).host, "omp");
+    assert.equal(normalizeCallRenderArgs(args, plainTheme, piContext).host, "pi");
   });
 
-  it("OMP result cards use the same compact ledger without nested framing", () => {
-    const theme = {
-      fg: (_t, text) => text,
-      bold: (text) => text,
-      dim: (text) => text,
-    };
+  it("reuses one result component across partial and final updates in both hosts", () => {
+    const args = { code: 'await read("a.ts");' };
+    const partial = { details: { trace: [{ name: "read", args: { path: "a.ts" } }], running: true } };
+    const final = { details: { ok: true, trace: [{ name: "read", args: { path: "a.ts" }, ok: true }] } };
+
+    const piContext = { state: {}, args };
+    const piComponent = renderSupernovaResult(partial, { isPartial: true }, plainTheme, piContext);
+    assert.strictEqual(renderSupernovaResult(final, { isPartial: false }, plainTheme, piContext), piComponent);
+
+    const ompOptions = { isPartial: true };
+    const ompComponent = renderSupernovaResult(partial, ompOptions, plainTheme, args);
+    ompOptions.isPartial = false;
+    assert.strictEqual(renderSupernovaResult(final, ompOptions, plainTheme, args), ompComponent);
+  });
+
+  it("renders identical framed Pi and OMP results with inline write diffs", () => {
     const result = {
-      content: [{ type: "text", text: "ok" }],
       details: {
         ok: true,
         wallMs: 12,
-        trace: [
-          {
-            name: "write",
-            diff: {
-              path: "a.ts",
-              op: "write",
-              added: 1,
-              removed: 0,
-              lines: [{ type: "add", lineNum: 1, text: "hi" }],
-            },
+        trace: [{
+          name: "write",
+          ok: true,
+          diff: {
+            path: "src/a.ts",
+            op: "write",
+            added: 1,
+            removed: 0,
+            lines: [{ type: "add", lineNum: 1, text: "export const value = 1;" }],
           },
-        ],
+        }],
       },
     };
-    // 4th arg with `code` marks OMP (args), not Pi context.
-    const lines = renderSupernovaResult(result, { expanded: false, isPartial: false }, theme, {
-      code: 'await write("a.ts", "hi");',
-    }).render(80);
-    const text = lines.join("\n");
-    assert.doesNotMatch(text, /╭|╰|\x1b\[48;2;/);
-    assert.match(text, /nova/);
-    assert.match(text, /a\.ts/);
-    assert.equal(lines.length, 2);
-    assertLinesFit(lines, 80, "compact OMP result");
+    const options = { expanded: false, isPartial: false };
+    const args = { code: 'await write("src/a.ts", "export const value = 1;");' };
+    const piLines = renderSupernovaResult(result, options, plainTheme, { state: {}, args }).render(80);
+    const ompLines = renderSupernovaResult(result, options, plainTheme, args).render(80);
+    assert.deepEqual(piLines, ompLines);
+    const text = piLines.join("\n");
+    assert.match(text, /╭.*nova/);
+    assert.match(text, /└─ ✓ write/);
+    assert.match(text, /src\/a\.ts/);
+    assert.match(text, /\+1.*export const value = 1;/);
+    assert.match(text, /╰/);
+    assertLinesFit(piLines, 80, "unified Pi/OMP write result");
   });
 
-  it("still accepts Pi renderCall signature (args, theme, context)", () => {
-    const theme = {
-      fg: (_t, text) => text,
-      bold: (text) => text,
-      dim: (text) => text,
-    };
-    const context = { state: { wallMs: 12 }, isPartial: false };
-    const comp = renderSupernovaCall({ code: 'await read("a.ts");' }, theme, context);
-    assert.match(comp.render(80).join("\n"), /· 12ms/);
-    assert.equal(normalizeCallRenderArgs({ code: "x" }, theme, context).host, "pi");
+  it("normalizes official host edit diff strings into inline rows", () => {
+    const result = { details: { ok: true, trace: [{
+      name: "edit",
+      args: { path: "official.ts" },
+      ok: true,
+      diff: " 9 before\n-10 old value\n+10 new value\n 11 after",
+    }] } };
+    const text = renderSupernovaResult(result, { expanded: false, isPartial: false }, plainTheme, {}).render(90).join("\n");
+    assert.match(text, /edit.*\+1\/-1.*official\.ts/);
+    assert.match(text, /-10.*old value/);
+    assert.match(text, /\+10.*new value/);
   });
 
-  it("prefers dynamic execution trace over static parse when available", () => {
-    const args = { code: '// empty' };
-    const context = {
-      args,
-      state: {
-        trace: [
-          { name: "read", args: { path: "foo.txt" } },
-          { name: "apply_patch", args: { path: "patch.diff" } },
-        ],
-      },
-    };
-    const comp = renderSupernovaCall(args, mockTheme, context);
-    const rendered = comp.render(91).join("\n");
-    assert.match(rendered, /read/);
-    assert.match(rendered, /patch/);
-    assert.match(rendered, /foo\.txt/);
+  it("uses dynamic result trace instead of static source operations", () => {
+    const args = { code: 'await read("static.txt");' };
+    const context = { args, state: { trace: [{ name: "read", args: { path: "dynamic.txt" }, ok: true }] } };
+    const result = { details: { ok: true, wallMs: 7 } };
+    const text = renderSupernovaResult(result, { expanded: false, isPartial: false }, plainTheme, context).render(80).join("\n");
+    assert.match(text, /dynamic\.txt/);
+    assert.doesNotMatch(text, /static\.txt/);
   });
 
   it("keeps a compact completion card when no file edits occurred", () => {
@@ -231,31 +204,6 @@ describe("supernova UI rendering", () => {
     const textExp = compExp.render(91).join("\n");
     assert.match(textExp, /── result ──/);
     assert.match(textExp, /lengths/);
-  });
-
-  it("embeds elapsed time directly at the top header of renderCall", () => {
-    const args = { code: 'read("package.json");' };
-    const context = {
-      args,
-      state: { wallMs: 42 },
-    };
-    const comp = renderSupernovaCall(args, mockTheme, context);
-    const rendered = comp.render(91).join("\n");
-    assert.match(rendered, /nova.*· 42ms/);
-  });
-
-  it("wraps long paths instead of end-truncating mid-segment (screenshot regression)", () => {
-    const args = {
-      code: 'await read("packages/pi-supernova/host-bridge.js"); await edit("packages/pi-supernova/diff.js", "a", "b");',
-    };
-    const lines = renderSupernovaCall(args, plainTheme, { state: { wallMs: 84 } }).render(40);
-    assertLinesFit(lines, 40, "narrow call wrap");
-    const text = lines.join("\n");
-    // Filename must survive intact — old UI died as packages/pi-supern…
-    assert.match(text, /host-bridge\.js/);
-    assert.match(text, /diff\.js/);
-    assert.doesNotMatch(text, /pi-supern…/);
-    assert.doesNotMatch(text, /host-\n/);
   });
 
   it("renders error result cleanly without Done or success badge", () => {
@@ -306,9 +254,10 @@ describe("supernova UI rendering", () => {
     };
     const text = renderSupernovaResult(result, { expanded: false, isPartial: false }, plainTheme, {}).render(80).join("\n");
     assert.match(text, /├─ ✓ read/);
-    assert.match(text, /\n  │\n/);
+    assert.match(text, /\n│ │\s+│\n/);
     assert.match(text, /└─ ✓ edit/);
-    assert.doesNotMatch(text, /╭|╰|\x1b\[48;2;/);
+    assert.match(text, /╭.*nova/);
+    assert.match(text, /╰/);
   });
 
   it("never emits a line wider than the terminal (Pi crash contract)", () => {
@@ -413,11 +362,12 @@ describe("supernova UI rendering", () => {
     assert.match(rendered, /host-bridge\.js/);
     assert.match(rendered, /\+2/);
     assert.match(rendered, /-1/);
-    assert.doesNotMatch(rendered, /resolveWorkspacePath|143/);
+    assert.match(rendered, /resolveWorkspacePath/);
+    assert.match(rendered, /143/);
 
     const expanded = renderSupernovaResult(result, { expanded: true, isPartial: false }, plainTheme, {}).render(140).join("\n");
-    assert.match(expanded, /── changes ──/);
-    assert.match(expanded, /✎/);
+    assert.doesNotMatch(expanded, /── changes ──/);
+    assert.match(expanded, /resolveWorkspacePath/);
     assert.match(expanded, /143/);
 
     // Stats survive narrow width because they precede the path.
@@ -425,6 +375,25 @@ describe("supernova UI rendering", () => {
     assert.match(narrow, /\+2/);
     assert.match(narrow, /-1/);
     assertLinesFit(comp.render(40), 40, "narrow diff");
+  });
+
+  it("shows bounded mutation hunks collapsed and a larger hunk when expanded", () => {
+    const diff = {
+      path: "many-lines.ts",
+      op: "write",
+      added: 12,
+      removed: 0,
+      displayLineCount: 12,
+      lines: Array.from({ length: 12 }, (_, index) => ({ type: "add", lineNum: index + 1, text: `line ${index + 1}` })),
+    };
+    const result = { details: { ok: true, trace: [{ name: "write", ok: true, diff }] } };
+    const collapsed = renderSupernovaResult(result, { expanded: false, isPartial: false }, plainTheme, {}).render(100).join("\n");
+    assert.match(collapsed, /line 8/);
+    assert.doesNotMatch(collapsed, /line 9/);
+    assert.match(collapsed, /4 more lines/);
+    const expanded = renderSupernovaResult(result, { expanded: true, isPartial: false }, plainTheme, {}).render(100).join("\n");
+    assert.match(expanded, /line 12/);
+    assert.doesNotMatch(expanded, /more lines/);
   });
 
   it("cleans up raw result JSON dump and formats output lines without ok/value noise when expanded", () => {
@@ -479,7 +448,8 @@ describe("supernova UI rendering", () => {
     assert.match(textCollapsed, /file2\.ts/);
     assert.match(textCollapsed, /file3\.ts/);
     assert.match(textCollapsed, /file4\.ts/);
-    assert.doesNotMatch(textCollapsed, /added|── changes ──/);
+    assert.match(textCollapsed, /added/);
+    assert.doesNotMatch(textCollapsed, /── changes ──/);
 
     const compExpanded = renderSupernovaResult(result, { expanded: true, isPartial: false }, plainTheme, {});
     const expandedLines = compExpanded.render(140);
@@ -489,7 +459,8 @@ describe("supernova UI rendering", () => {
     assert.match(textExpanded, /file2\.ts/);
     assert.match(textExpanded, /file3\.ts/);
     assert.match(textExpanded, /file4\.ts/);
-    assert.match(textExpanded, /── changes ──/);
+    assert.match(textExpanded, /added/);
+    assert.doesNotMatch(textExpanded, /── changes ──/);
   });
 
   it("keeps partial execution visible when live trace updates replace the call card", () => {
@@ -503,7 +474,7 @@ describe("supernova UI rendering", () => {
       plainTheme,
       { code: `await snap("auth token", "src");` },
     ).render(80).join("\n");
-    assert.match(omp, /nova · 1 call · running/);
+    assert.match(omp, /nova: 1 call · running/);
     assert.match(omp, /snap/);
     assert.match(omp, /"auth token" → src/);
 
@@ -513,7 +484,7 @@ describe("supernova UI rendering", () => {
       plainTheme,
       { state: {}, args: { code: `await snap("auth token", "src");` } },
     ).render(80).join("\n");
-    assert.match(pi, /nova · 1 call · running/);
+    assert.match(pi, /nova: 1 call · running/);
     assert.match(pi, /snap/);
 
     const custom = renderSupernovaResult(
