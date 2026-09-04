@@ -10,6 +10,7 @@ import {
   measureWidth,
   paintNovaRow,
   NOVA_CHROME,
+  normalizeCallRenderArgs,
 } from "../render.js";
 import { stripVTControlCharacters } from "node:util";
 import { createRequire } from "node:module";
@@ -125,6 +126,38 @@ describe("supernova UI rendering", () => {
     assert.ok(piVisibleWidth(row) <= 91);
     assert.match(row, /\x1b\[48;2;24;30;46m/); // successBg
     assert.equal(NOVA_CHROME.successBg[2], 46);
+  });
+
+  it("accepts OMP renderCall signature (args, options, theme) without throwing", () => {
+    const theme = {
+      fg: (_t, text) => text,
+      bold: (text) => text,
+      dim: (text) => text,
+    };
+    const options = { expanded: false, isPartial: true, executionStarted: true };
+    const args = { code: 'await read("package.json");' };
+    // OMP order — if we treated options as theme, theme.fg would throw.
+    const comp = renderSupernovaCall(args, options, theme);
+    const lines = comp.render(80);
+    assert.ok(lines.length > 0);
+    assert.match(lines.join("\n"), /nova/);
+    assert.match(lines.join("\n"), /package\.json/);
+    assert.doesNotMatch(lines.join("\n"), /"code":/);
+    const norm = normalizeCallRenderArgs(args, options, theme);
+    assert.equal(norm.host, "omp");
+    assert.equal(norm.theme, theme);
+  });
+
+  it("still accepts Pi renderCall signature (args, theme, context)", () => {
+    const theme = {
+      fg: (_t, text) => text,
+      bold: (text) => text,
+      dim: (text) => text,
+    };
+    const context = { state: { wallMs: 12 }, isPartial: false };
+    const comp = renderSupernovaCall({ code: 'await read("a.ts");' }, theme, context);
+    assert.match(comp.render(80).join("\n"), /· 12ms/);
+    assert.equal(normalizeCallRenderArgs({ code: "x" }, theme, context).host, "pi");
   });
 
   it("prefers dynamic execution trace over static parse when available", () => {

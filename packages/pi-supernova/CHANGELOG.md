@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-09-03
+
+### Fixed
+
+- OMP TUI: accept `(args, options, theme)` render signature so the custom nova card shows instead of the raw JSON args dump.
+
 ## [0.0.1] - 2026-09-03
 
 ### Added

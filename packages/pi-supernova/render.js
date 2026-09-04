@@ -418,8 +418,78 @@ function formatOpTarget(raw, tool) {
 	return text.replace(/\\/g, "/");
 }
 
-export function renderSupernovaCall(args, theme, context) {
+function isTheme(value) {
+	return !!value && typeof value === "object" && typeof value.fg === "function";
+}
+
+/**
+ * Dual-host renderCall args:
+ *   Pi:  (args, theme, context)
+ *   OMP: (args, options/renderState, theme)
+ */
+export function normalizeCallRenderArgs(a, b, c) {
+	if (isTheme(b)) {
+		const context = c && typeof c === "object" ? c : {};
+		if (!context.state || typeof context.state !== "object") context.state = {};
+		return { args: a, theme: b, context, host: "pi" };
+	}
+	if (isTheme(c)) {
+		const options = b && typeof b === "object" ? b : {};
+		if (!options.state || typeof options.state !== "object") options.state = {};
+		const context = {
+			...options,
+			state: options.state,
+			expanded: options.expanded,
+			isPartial: options.isPartial,
+			executionStarted: options.executionStarted,
+			argsComplete: options.argsComplete,
+			lastComponent: options.lastComponent,
+			invalidate: options.invalidate,
+		};
+		return { args: a, theme: c, context, host: "omp", options };
+	}
+	throw new Error("supernova renderCall: theme missing (expected Pi or OMP signature)");
+}
+
+/**
+ * Dual-host renderResult args:
+ *   Pi:  (result, {expanded,isPartial}, theme, context)
+ *   OMP: (result, {expanded,isPartial}, theme, args)  — 4th is args, not context
+ */
+export function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs) {
+	if (isTheme(themeOrCtx)) {
+		const opts = options && typeof options === "object" ? options : {};
+		let context;
+		if (ctxOrArgs && typeof ctxOrArgs === "object" && !isTheme(ctxOrArgs) && ("lastComponent" in ctxOrArgs || "state" in ctxOrArgs || "invalidate" in ctxOrArgs)) {
+			context = ctxOrArgs;
+		} else {
+			context = { ...(opts.state ? { state: opts.state } : {}), lastComponent: opts.lastComponent };
+		}
+		if (!context.state || typeof context.state !== "object") context.state = {};
+		return {
+			result,
+			expanded: !!opts.expanded,
+			isPartial: !!opts.isPartial,
+			theme: themeOrCtx,
+			context,
+			host: isTheme(options) ? "pi" : "omp",
+			options: opts,
+		};
+	}
+	// Extremely defensive: (result, theme, context) oddball
+	if (isTheme(options)) {
+		const context = themeOrCtx && typeof themeOrCtx === "object" ? themeOrCtx : {};
+		if (!context.state || typeof context.state !== "object") context.state = {};
+		return { result, expanded: !!context.expanded, isPartial: !!context.isPartial, theme: options, context, host: "pi" };
+	}
+	throw new Error("supernova renderResult: theme missing (expected Pi or OMP signature)");
+}
+
+export function renderSupernovaCall(a, b, c) {
+	const { args, theme, context, options } = normalizeCallRenderArgs(a, b, c);
 	const comp = context?.lastComponent instanceof SafeText ? context.lastComponent : new SafeText();
+	if (options) options.lastComponent = comp;
+	else if (context) context.lastComponent = comp;
 
 	let ops = [];
 	const stateTrace = context?.state?.trace;
@@ -457,7 +527,7 @@ export function renderSupernovaCall(args, theme, context) {
 		timeStr = elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s` : `${elapsed}ms`;
 	}
 
-	// Compact aesthetic — never dump raw JSON args (the stock Pi tool fallback).
+	// Compact aesthetic — never dump raw JSON args (the stock tool fallback).
 	let out = theme.fg("toolTitle", theme.bold("nova"));
 	if (timeStr) {
 		out += " " + theme.fg("dim", `· ${timeStr}`);
@@ -489,8 +559,16 @@ export function renderSupernovaCall(args, theme, context) {
 	return comp;
 }
 
-export function renderSupernovaResult(result, { expanded, isPartial }, theme, context) {
+export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextArg) {
+	const { result, expanded, isPartial, theme, context, options } = normalizeResultRenderArgs(
+		resultArg,
+		optionsArg,
+		themeArg,
+		contextArg,
+	);
 	const comp = context?.lastComponent instanceof SafeText ? context.lastComponent : new SafeText();
+	if (options) options.lastComponent = comp;
+	else if (context) context.lastComponent = comp;
 
 	const payload = result?.details;
 	if (context?.state && payload) {
