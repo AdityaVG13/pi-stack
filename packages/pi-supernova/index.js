@@ -38,8 +38,12 @@ Inside the program you get:
   nova.describe(name)          — full parameter summary on demand
   nova.call(name, args)        — invoke a host tool (or native adapter)
   nova.callMany([{name,args}]) — Auto parallel wave (serial if any mutating)
+  nova.snap(query, root?)       — resolve a concept to a source location
+  nova.surface(path)            — structural source outline
+  nova.has(name)                — test host-tool availability
   parallel(thunks) / pipeline(items, ...stages)
 
+Shorthand globals: read, write, edit, patch, exec, snap, surface.
 Prefer search→describe→call. Keep intermediates in the program; return a shaped value.
 Schemas are NOT dumped into the system prompt — discover them inside the runtime.`;
 

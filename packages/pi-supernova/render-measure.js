@@ -27,9 +27,10 @@ export function measureWidth(text) {
 
 function codePointWidth(cp) {
 	if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) return 0;
+	if (cp === 0xfe0f) return 1; // Emoji presentation can widen an otherwise narrow symbol.
 	if (cp === 0x200d || (cp >= 0x0300 && cp <= 0x036f) || (cp >= 0x1ab0 && cp <= 0x1aff) ||
 		(cp >= 0x1dc0 && cp <= 0x1dff) || (cp >= 0x20d0 && cp <= 0x20ff) ||
-		(cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xfe20 && cp <= 0xfe2f)) return 0;
+		(cp >= 0xfe00 && cp <= 0xfe0e) || (cp >= 0xfe20 && cp <= 0xfe2f)) return 0;
 	// Fullwidth / wide ranges (CJK, Hangul, emoji blocks we actually emit).
 	if (cp >= 0x1100 && cp <= 0x115f) return 2;
 	if (cp === 0x2329 || cp === 0x232a) return 2;

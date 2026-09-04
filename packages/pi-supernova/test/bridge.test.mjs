@@ -182,10 +182,17 @@ describe("host bridge and adapters", () => {
       await bridge.call("write", { path: "a.txt", content: "1" });
       await bridge.call("read", { path: "a.txt" });
 
-      const trace = bridge.getTrace();
+      let trace = bridge.getTrace();
       assert.equal(trace.length, 2);
       assert.equal(trace[0].name, "write");
+      assert.equal(trace[0].ok, true);
       assert.equal(trace[1].name, "read");
+      assert.equal(trace[1].ok, true);
+
+      await assert.rejects(() => bridge.call("read", { path: "missing.txt" }), /ENOENT/);
+      trace = bridge.getTrace();
+      assert.equal(trace.at(-1).name, "read");
+      assert.equal(trace.at(-1).ok, false);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

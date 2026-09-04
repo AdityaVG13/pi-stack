@@ -94,10 +94,6 @@ function scoreContentDefinitions(content, tokens) {
   return { totalScore: score, bestLine, bestLineScore };
 }
 
-function hasHiddenSegment(filePath) {
-  return path.resolve(filePath).split(path.sep).some((segment) => segment.startsWith(".") && segment.length > 1);
-}
-
 function relativeHasSegment(relativePath, segmentName) {
   return relativePath.split(path.sep).includes(segmentName);
 }
@@ -106,19 +102,21 @@ function relativeHasHiddenSegment(relativePath) {
   return relativePath.split(path.sep).some((segment) => segment.startsWith(".") && segment.length > 1);
 }
 
-export async function executeSnap({ query, searchDir, vfs, runCommand, pendingPaths = [] }) {
+export async function executeSnap({ query, searchDir, includeHidden = false, vfs, runCommand, pendingPaths = [] }) {
   const { tokens, wantsTest, wantsType, wantsDoc } = tokenizeQuery(query);
   if (tokens.length === 0) {
     throw new Error("snap requires at least one searchable concept keyword");
   }
 
   const dir = searchDir || process.cwd();
-  const includeHidden = hasHiddenSegment(dir);
+  if (path.resolve(dir).split(path.sep).includes(".git")) {
+    throw new Error("snap cannot search Git metadata");
+  }
   let fileList = [];
   try {
     const rgArgs = ["rg", "--files"];
     if (includeHidden) rgArgs.push("--hidden");
-    rgArgs.push("-g", "!.git/**", dir);
+    rgArgs.push("-g", "!.git/**", "-g", "!**/.git/**", dir);
     const res = await runCommand(rgArgs, { timeoutMs: 15_000 });
     fileList = res.stdout.split("\n").map((f) => f.trim()).filter(Boolean);
   } catch {
@@ -152,7 +150,7 @@ export async function executeSnap({ query, searchDir, vfs, runCommand, pendingPa
 
   if (candidates.length < 5) {
     try {
-      const grepArgs = ["-l", "--max-count=1", "-g", "!.git/**"];
+      const grepArgs = ["-l", "--max-count=1", "-g", "!.git/**", "-g", "!**/.git/**"];
       if (includeHidden) grepArgs.push("--hidden");
       if (!wantsTest) {
         grepArgs.push("-g", "!test/**", "-g", "!tests/**", "-g", "!*.test.*", "-g", "!*.spec.*");

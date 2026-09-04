@@ -82,6 +82,51 @@ describe("snap-to-file and top-level guest globals", () => {
     }
   });
 
+  it("refuses an explicitly targeted .git directory", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "snap-git-metadata-test-"));
+    try {
+      await fs.mkdir(path.join(tmpDir, ".git"));
+      await fs.writeFile(path.join(tmpDir, ".git", "config"), "privateNebulaToken = secret\n");
+      const bridge = createHostBridge({ pi: null, config, getCwd: () => tmpDir });
+      await assert.rejects(
+        () => bridge.call("snap", { query: "private nebula token", path: ".git" }),
+        /cannot search Git metadata/,
+      );
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("excludes nested Git metadata below an explicit hidden root", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "snap-nested-git-test-"));
+    try {
+      const hiddenRoot = path.join(tmpDir, ".fixtures");
+      await fs.mkdir(path.join(hiddenRoot, "nested", ".git"), { recursive: true });
+      await fs.writeFile(path.join(hiddenRoot, "nested", ".git", "config"), "privateNebulaToken = secret\n");
+      await fs.writeFile(path.join(hiddenRoot, "visible.js"), "export const visibleFallback = true;\n");
+      const bridge = createHostBridge({ pi: null, config, getCwd: () => tmpDir });
+      const res = await bridge.call("snap", { query: "private nebula token", path: ".fixtures" });
+      assert.match(JSON.parse(res.value).path, /visible\.js$/);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not infer hidden-file permission from a hidden workspace ancestor", async () => {
+    const parentDir = await fs.mkdtemp(path.join(os.tmpdir(), "snap-hidden-ancestor-test-"));
+    const workspace = path.join(parentDir, ".workspace");
+    try {
+      await fs.mkdir(path.join(workspace, ".secrets"), { recursive: true });
+      await fs.writeFile(path.join(workspace, ".secrets", "token.js"), "export const privateNebulaToken = true;\n");
+      await fs.writeFile(path.join(workspace, "visible.js"), "export const visibleFallback = true;\n");
+      const bridge = createHostBridge({ pi: null, config, getCwd: () => workspace });
+      const res = await bridge.call("snap", { query: "private nebula token" });
+      assert.match(JSON.parse(res.value).path, /visible\.js$/);
+    } finally {
+      await fs.rm(parentDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not scan hidden files from the workspace root", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "snap-hidden-scope-test-"));
     try {

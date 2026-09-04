@@ -76,6 +76,8 @@ Collapsed cards keep this command ledger visible. Press Enter to inspect bounded
 | `parallel(thunks)` / `pipeline(items, …stages)` | Raw `Promise.all` helpers |
 | `nova.speculate(fn)` | Counterfactual branch (rollback / commit) |
 
+Root Snap searches ignore hidden files. Passing a hidden search root includes hidden files beneath that root; Git metadata is always excluded.
+
 ---
 
 ## Configuration

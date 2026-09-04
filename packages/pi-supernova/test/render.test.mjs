@@ -288,6 +288,23 @@ describe("supernova UI rendering", () => {
     assert.doesNotMatch(rendered, /✓/);
   });
 
+  it("renders mixed command outcomes accurately", () => {
+    const result = {
+      isError: true,
+      details: {
+        ok: false,
+        error: "second call failed",
+        trace: [
+          { name: "read", args: { path: "present.txt" }, ok: true },
+          { name: "read", args: { path: "missing.txt" }, ok: false },
+        ],
+      },
+    };
+    const rendered = renderSupernovaResult(result, { expanded: false, isPartial: false }, plainTheme, {}).render(91).join("\n");
+    assert.match(rendered, /✓ read\s+present\.txt/);
+    assert.match(rendered, /× read\s+missing\.txt/);
+  });
+
   it("never emits a line wider than the terminal (Pi crash contract)", () => {
     const longNames = Array.from({ length: 40 }, (_, i) => `meta_tool_with_a_very_long_name_${i}`);
     const result = {
@@ -502,6 +519,11 @@ describe("supernova UI rendering", () => {
     assert.match(custom, /custom_tool/);
   });
 
+  it("accounts for emoji-presentation variation selectors", () => {
+    assert.equal(measureWidth("❤️"), 2);
+    assert.ok(measureWidth(clampLine("❤️x", 2)) <= 2);
+  });
+
   it("never exceeds ultra-narrow OMP render widths", () => {
     const result = { details: { trace: [{ name: "custom_tool", args: { query: "value" } }] } };
     for (const width of [1, 2, 4, 7]) {
@@ -520,8 +542,8 @@ describe("supernova UI rendering", () => {
       isError: true,
       details: {
         ok: false,
-        error: "boom\u001b[2J",
-        logs: ["one-log\u001b[31m"],
+        error: "boom\u001b[2J\u0007\u0008\u202e",
+        logs: ["one-log\u001b[31m\u0000"],
         trace: [{ name: "read", args: { path: "src/a.js\nspoof" } }],
       },
     };
@@ -531,7 +553,9 @@ describe("supernova UI rendering", () => {
       plainTheme,
       { code: `await read("src/a.js");` },
     ).render(100).join("\n");
-    assert.equal(text.includes("\u001b"), false);
+    for (const control of ["\u001b", "\u0000", "\u0007", "\u0008", "\u202e"]) {
+      assert.equal(text.includes(control), false);
+    }
     assert.match(text, /src\/a\.js spoof/);
     assert.equal(text.match(/one-log/g)?.length, 1);
   });

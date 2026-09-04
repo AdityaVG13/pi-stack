@@ -71,6 +71,22 @@ describe("workspace jail", () => {
     }
   });
 
+  it("allows in-workspace names beginning with two dots", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "supernova-dotdot-name-"));
+    try {
+      await fs.writeFile(path.join(tmp, "..fixture.txt"), "valid");
+      const b = createHostBridge({
+        pi: null,
+        config: { maxBridgeCalls: 32, maxCallResultChars: 8000 },
+        getCwd: () => tmp,
+      });
+      const result = await b.call("read", { path: "..fixture.txt" });
+      assert.equal(result.value, "valid");
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("allows read of package.json under cwd", async () => {
     const b = bridge();
     const r = await b.call("read", { path: "package.json" });

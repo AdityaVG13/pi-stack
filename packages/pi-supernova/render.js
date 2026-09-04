@@ -275,18 +275,21 @@ export function renderDiffBox(diff, theme, width = 60) {
 }
 
 function cleanBlockText(value) {
-	return stripVTControlCharacters(String(value ?? "")).replace(/\r\n?/g, "\n");
+	return stripVTControlCharacters(String(value ?? ""))
+		.replace(/\r\n?/g, "\n")
+		.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "")
+		.replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
 }
 
 function cleanInlineText(value) {
 	return cleanBlockText(value).replace(/\s*\n\s*/g, " ").trim();
 }
 
-function displayOperation(tool, target, diff) {
+function displayOperation(tool, target, diff, ok) {
 	const rawName = cleanInlineText(tool);
 	if (!rawName) return null;
 	const normalized = rawName === "apply_patch" ? "patch" : rawName;
-	return { tool: normalized, target, diff };
+	return { tool: normalized, target, diff, ok };
 }
 
 function formatOpTarget(raw, tool) {
@@ -424,7 +427,7 @@ function operationTarget(item) {
 function operationsFromTrace(trace) {
 	if (!Array.isArray(trace)) return [];
 	return trace
-		.map((item) => displayOperation(item?.name || "tool", operationTarget(item), item?.diff))
+		.map((item) => displayOperation(item?.name || "tool", operationTarget(item), item?.diff, item?.ok))
 		.filter(Boolean);
 }
 
@@ -598,11 +601,13 @@ function formatDiffStats(theme, diff) {
 }
 
 function formatResultOperation(theme, op, isPartial, isError) {
-	const marker = isPartial
-		? theme.fg("dim", "· ")
-		: isError
-			? theme.fg("error", "× ")
-			: theme.fg("success", "✓ ");
+	const marker = op.ok === false
+		? theme.fg("error", "× ")
+		: isPartial && op.ok !== true
+			? theme.fg("dim", "· ")
+			: isError && op.ok !== true
+				? theme.fg("error", "× ")
+				: theme.fg("success", "✓ ");
 	const tool = theme.fg("syntaxFunction", op.tool.padEnd(7, " "));
 	const targetText = formatOpTarget(op.target, op.tool);
 	const target = targetText ? theme.fg("muted", targetText) : theme.fg("dim", "done");

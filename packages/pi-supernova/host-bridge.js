@@ -33,7 +33,7 @@ async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = false) {
   const resolvedCwd = getResolvedCwd(cwd);
   const target = path.resolve(resolvedCwd, inputPath.trim());
   const rel = path.relative(resolvedCwd, target);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+  if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
     throw new Error(`${opName} path escapes workspace`);
   }
   if (!allowRoot && target === resolvedCwd) {
@@ -54,7 +54,7 @@ async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = false) {
     }
   }
   const realRel = path.relative(realRoot, probe);
-  if (realRel.startsWith("..") || path.isAbsolute(realRel)) {
+  if (realRel === ".." || realRel.startsWith(`..${path.sep}`) || path.isAbsolute(realRel)) {
     throw new Error(`${opName} path escapes workspace through symlink`);
   }
   return target;
@@ -545,9 +545,14 @@ function createNativeAdapters(getCwd, vfs, config) {
       }
       if (signal?.aborted) throw new Error("aborted");
       const snapTarget = params?.path ? await resolveWorkspacePath(cwd, params.path, "snap", true) : cwd;
+      const relativeRoot = path.relative(cwd, snapTarget);
+      const includeHidden = Boolean(params?.path) && relativeRoot
+        .split(path.sep)
+        .some((segment) => segment.startsWith(".") && segment.length > 1);
       const res = await executeSnap({
         query: params.query,
         searchDir: snapTarget,
+        includeHidden,
         vfs: {
           read: async (candidate) => {
             // Jail each snap candidate (symlink files must not escape the workspace).
@@ -735,6 +740,13 @@ export function createHostBridge({ pi, config, getCwd }) {
     vfs.clear();
   }
 
+  function notifyCall(record) {
+    if (!callListener) return;
+    try {
+      callListener(record, [...trace]);
+    } catch {}
+  }
+
   async function invokeRaw(name, args) {
     const maxCalls = config.maxBridgeCalls ?? 256;
     callCount += 1;
@@ -755,33 +767,33 @@ export function createHostBridge({ pi, config, getCwd }) {
     const record = { name, args: args || {}, time: Date.now() };
     trace.push(record);
 
-    const exec = executors.get(name);
-    if (exec) {
-      if (isMutatingTool(name, config)) await vfs.prepareExternalMutation(name);
-      const res = await exec(`supernova:${name}:${callCount}`, args || {}, activeSignal, undefined, activeCtx);
-      if (callListener) {
-        try {
-          callListener(record, [...trace]);
-        } catch {}
+    try {
+      const exec = executors.get(name);
+      if (exec) {
+        if (isMutatingTool(name, config)) await vfs.prepareExternalMutation(name);
+        const res = await exec(`supernova:${name}:${callCount}`, args || {}, activeSignal, undefined, activeCtx);
+        record.ok = res?.isError !== true && res?.details?.ok !== false;
+        notifyCall(record);
+        return res;
       }
-      return res;
-    }
 
-    const native = natives[name];
-    if (native) {
-      const res = await native(args || {}, activeSignal);
-      if (res?.details?.diff) record.diff = res.details.diff;
-      if (callListener) {
-        try {
-          callListener(record, [...trace]);
-        } catch {}
+      const native = natives[name];
+      if (native) {
+        const res = await native(args || {}, activeSignal);
+        if (res?.details?.diff) record.diff = res.details.diff;
+        record.ok = res?.isError !== true && res?.details?.ok !== false;
+        notifyCall(record);
+        return res;
       }
-      return res;
-    }
 
-    throw new Error(
-      `no executor for tool "${name}" (not captured via registerTool and no native adapter). Use nova.describe to inspect; ensure pi-supernova loads before other extensions, or call a core adapter: ${Object.keys(natives).join(", ")}`,
-    );
+      throw new Error(
+        `no executor for tool "${name}" (not captured via registerTool and no native adapter). Use nova.describe to inspect; ensure pi-supernova loads before other extensions, or call a core adapter: ${Object.keys(natives).join(", ")}`,
+      );
+    } catch (error) {
+      record.ok = false;
+      notifyCall(record);
+      throw error;
+    }
   }
 
   async function call(name, args) {
