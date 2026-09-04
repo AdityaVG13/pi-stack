@@ -8,7 +8,7 @@ import { renderSupernovaCall, renderSupernovaResult } from "./render.js";
 
 export { renderSupernovaCall, renderSupernovaResult };
 
-// Sync only — never top-level await. Dynamic import of host/deps hung OMP plugin load.
+// Sync only, never top-level await. Dynamic import of host/deps hung OMP plugin load.
 const require = createRequire(import.meta.url);
 let Type;
 try {
@@ -82,7 +82,7 @@ function errorText(outcome, call) {
 
 function successText(outcome, call) {
   const truncated = outcome.returnTruncated ? " [return truncated]" : "";
-  const hint = outcome.undefinedReturn ? " (no return statement — add \`return\` to get a value)" : "";
+  const hint = outcome.undefinedReturn ? " (no return statement; add \`return\` to get a value)" : "";
   return `ok #${call} ${outcome.wallMs}ms${truncated}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
 }
 const TOOL_DESCRIPTION = `Run one JavaScript program that composes host tools. Async body or arrow; \`return\` a small shaped value (compact literal, capped; strings raw; console.log is captured).
@@ -91,7 +91,7 @@ Globals (async):
 read(path|paths, offset?, limit?) → text | text[] · read(path, {about}) → whole-file outline, only relevant bodies expanded
 write(path, text) · edit(path, oldText, newText) → post-edit lines (no re-read needed) · patch(path, unifiedDiff)
 bash(cmd, {cwd?, timeoutMs?}) → output, throws on non-zero exit · exec(cmd, argv?) quotes argv
-evidence(query, {k?}) → {spans: [{path, lines, name, text}]} top-K spans that answer a question — use before read
+evidence(query, {k?}) → {spans: [{path, lines, name, text}]} top-K spans that answer a question; use before read
 snap(query, root?) → {path, line, signature, context} · surface(path) → {items: [{name, kind, line}]}
 nova.call(name, args) → {ok, value} for any host tool · nova.callMany([{name, args}]) parallel when read-only
 nova.search(query) → [{name, description}] · nova.describe(name) → parameters · nova.has(name) sync
@@ -164,7 +164,7 @@ export default function piSupernova(pi) {
     description: TOOL_DESCRIPTION,
     promptSnippet: "Compose host tools in one JavaScript program",
     promptGuidelines: [
-      "Use supernova for multi-step tool work: loops, filtering, parallel reads, read→edit chains. To understand code: evidence(question) across the repo, or read(path, {about: question}) for one file — full structure, only relevant bodies expanded. Plain read(path) only for lines you will edit. Return a compact shaped value; keep raw tool output inside the program.",
+      "Use supernova for multi-step tool work: loops, filtering, parallel reads, read→edit chains. To understand code: evidence(question) across the repo, or read(path, {about: question}) for one file: full structure, only relevant bodies expanded. Plain read(path) only for lines you will edit. Return a compact shaped value; keep raw tool output inside the program.",
     ],
     parameters: Type.Object({
       code: Type.String({ description: "JavaScript program: async body or arrow function." }),
@@ -255,7 +255,7 @@ export default function piSupernova(pi) {
       const natives = Object.keys(bridge.natives).sort();
       const lines = [
         `pi-supernova catalog: ${catalog.length} tools`,
-        `captured executors: ${captured.length ? captured.join(", ") : "(none yet — load this package early)"}`,
+        `captured executors: ${captured.length ? captured.join(", ") : "(none yet; load this package early)"}`,
         `native adapters: ${natives.join(", ")}`,
         `timeoutMs=${config.timeoutMs} maxCallResultChars=${config.maxCallResultChars} maxReturnChars=${config.maxReturnChars} maxBridgeCalls=${config.maxBridgeCalls} maxHeapMb=${config.maxHeapMb}`,
         sessionStats(bridge.ledger.stats),

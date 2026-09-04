@@ -1,7 +1,7 @@
 /**
  * Shared Pi/OMP rounded tool chrome for supernova.
  *
- * Intentionally self-contained — never dynamic-imports `@oh-my-pi/pi-coding-agent`
+ * Intentionally self-contained: never dynamic-imports `@oh-my-pi/pi-coding-agent`
  * (that hung OMP plugin load). Portable geometry matches native edit/write cards.
  */
 

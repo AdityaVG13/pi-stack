@@ -1,4 +1,4 @@
-// Quick structural check after an edit — not a parser. Catches the edit failures models make
+// Quick structural check after an edit, not a parser. Catches the edit failures models make
 // most: an unbalanced brace/bracket/paren or an unterminated string, with the line it happened
 // on, so a broken edit is known now instead of after a test run. JSON is checked exactly.
 
@@ -144,7 +144,7 @@ function scan(text, start, stack, stopDepth) {
 
 const CODE_EXT = new Set([".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts", ".java", ".kt", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".go", ".rs", ".swift", ".css", ".scss"]);
 
-/** { ok: true } | { ok: false, message } — message names the problem and line. */
+/** { ok: true } | { ok: false, message }; message names the problem and line. */
 export function quickCheck(text, ext) {
   if (ext === ".json") {
     try {

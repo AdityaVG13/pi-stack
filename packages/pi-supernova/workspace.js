@@ -41,7 +41,7 @@ async function realpathNearest(target) {
   }
 }
 
-/** Workspace-relative path with "/" separators — the form every model-facing surface uses. */
+/** Workspace-relative path with "/" separators, the form every model-facing surface uses. */
 export function relativeSlash(root, absolute) {
   return (path.relative(root, absolute) || absolute).split(path.sep).join("/");
 }

@@ -104,7 +104,7 @@ export function normalizeCallRenderArgs(a, b, c) {
 /**
  * Dual-host renderResult args:
  *   Pi:  (result, {expanded,isPartial}, theme, context)
- *   OMP: (result, {expanded,isPartial}, theme, args)  — 4th is args, not context
+ *   OMP: (result, {expanded,isPartial}, theme, args)  (4th is args, not context)
  *
  * Call shapes share the first three positions, so host is inferred from the
  * fourth argument's context-versus-args shape.

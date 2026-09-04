@@ -1,12 +1,12 @@
 // Seen-ledger: the model's context window is a memory. Nothing that already reached the
 // model in this session is sent again verbatim. A run of identical lines (≥ MIN_RUN, with
 // enough substantive lines) collapses to one marker that cites the earlier program and,
-// when the lines came from a file, path:a–b — so one read(path, a, n) recovers them.
+// when the lines came from a file, path:a–b, so one read(path, a, n) recovers them.
 //
 // This is not compression: every collapsed line already exists, verbatim, in the model's
 // context. Changed lines are never collapsed, so a re-read after an edit shows exactly the
 // delta. Lines the current program read with an explicit offset/limit are pinned and always
-// shown — that is the model asking for a specific window on purpose.
+// shown: that is the model asking for a specific window on purpose.
 
 const MIN_RUN = 6;
 const MIN_SUBSTANTIVE = 4;

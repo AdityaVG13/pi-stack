@@ -18,7 +18,7 @@ const mockTheme = {
   dim: (text) => `<dim>${text}</dim>`,
 };
 
-/** Pass-through theme — markers must not inflate visible width (matches real ANSI themes). */
+/** Pass-through theme: markers must not inflate visible width (matches real ANSI themes). */
 const plainTheme = {
   fg: (_token, text) => text,
   bold: (text) => text,
@@ -32,7 +32,7 @@ try {
   const tui = require("@earendil-works/pi-tui");
   if (isFunction(tui.visibleWidth)) piVisibleWidth = tui.visibleWidth;
 } catch {
-  // path-install / CI without pi-tui — measureWidth is the fallback contract
+  // path-install / CI without pi-tui: measureWidth is the fallback contract
 }
 
 /** Synthetic long path for width-crash fixtures (no machine-specific home). */
@@ -44,7 +44,7 @@ function assertLinesFit(lines, width, label) {
     const vw = piVisibleWidth(line);
     assert.ok(
       vw <= width,
-      `${label}: visible width ${vw} > ${width} — ${stripVTControlCharacters(line).slice(0, 120)}`,
+      `${label}: visible width ${vw} > ${width}: ${stripVTControlCharacters(line).slice(0, 120)}`,
     );
   }
 }
@@ -277,7 +277,7 @@ describe("supernova UI rendering", () => {
       assert.ok(piVisibleWidth(out) <= w, `clampLine(${w}) => ${piVisibleWidth(out)}`);
       assert.ok(piVisibleWidth(hardTruncate(line, w)) <= w, `hardTruncate(${w})`);
     }
-    // Exact prior crash shape at width 91 (synthetic path — same length class).
+    // Exact prior crash shape at width 91 (synthetic path: same length class).
     const crash = `  ENOENT: no such file or directory, open '${LONG_ENOENT_PATH}'`;
     assert.equal(piVisibleWidth(crash) > 91, true);
     const fixed = clampLine(crash, 91);

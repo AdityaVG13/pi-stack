@@ -25,7 +25,7 @@ const IDENT_TOKEN = /[A-Za-z_$][\w$]*/g;
 const EMPTY = Object.freeze([]);
 const DEF_PATTERN = /^(?:pub\s+)?(?:export\s+)?(?:async\s+)?(?:default\s+)?(function|class|def|fn|const|let|interface|type|struct|enum)\s+([a-zA-Z0-9_$]+)/;
 
-/** Declared identifier on a line (function/class/const/…), or "" — the same rule snap and grep use. */
+/** Declared identifier on a line (function/class/const/…), or ""; the same rule snap and grep use. */
 export function declaredName(line) {
   return DEF_PATTERN.exec(String(line).trim())?.[2] ?? "";
 }
@@ -197,7 +197,7 @@ export class WorkspaceIndex {
     return { text, lower: text.toLowerCase(), ext: path.extname(filePath), surface: undefined, lines: undefined, spans: undefined };
   }
 
-  /** Per-line raw text, lowercase text, declared identifier (or ""), and identifier tokens — computed once per entry. */
+  /** Per-line raw text, lowercase text, declared identifier (or ""), and identifier tokens, computed once per entry. */
   static linesOf(entry) {
     if (entry.lines) return entry.lines;
     const raw = entry.text.split("\n");

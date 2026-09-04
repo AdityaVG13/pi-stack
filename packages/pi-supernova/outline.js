@@ -2,7 +2,7 @@ import { WorkspaceIndex } from "./repo-index.js";
 import { tokenizeQuery } from "./snap.js";
 import { stem } from "./evidence.js";
 
-// read(path, { about }) — one call, whole-file structure, only the relevant bodies expanded.
+// read(path, { about }): one call, whole-file structure, only the relevant bodies expanded.
 // L0 (names) and L1 (signatures + line ranges) for every declaration; L2 (full text) for the
 // spans that match the question, within a character budget. The model reads a 600-line file
 // in ~15% of its tokens and knows the exact read(path, offset, limit) to issue for anything folded.

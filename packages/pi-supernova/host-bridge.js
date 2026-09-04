@@ -149,7 +149,7 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger) {
       return readFile(targetPath, params);
   }
 
-  /** Plain text, a line window, or — with `about` — a relevance-folded outline of the whole file. */
+  /** Plain text, a line window, or (with `about`) a relevance-folded outline of the whole file. */
   async function readFile(targetPath, params) {
     const cwd = getCwd();
     const rel = relativeSlash(cwd, targetPath);

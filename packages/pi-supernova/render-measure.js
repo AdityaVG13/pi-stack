@@ -9,9 +9,9 @@ import { stripVTControlCharacters } from "node:util";
 const ELLIPSIS = "…";
 
 /**
- * Visible columns — ANSI/OSC stripped, tabs → 3 spaces.
+ * Visible columns: ANSI/OSC stripped, tabs → 3 spaces.
  * ASCII-fast; non-ASCII uses a wide-char heuristic aligned with typical terminal
- * / pi-tui behavior (emoji & symbols like ⚡ are 2 cols — undercount ⇒ 92>91 crash).
+ * / pi-tui behavior (emoji & symbols like ⚡ are 2 cols; an undercount is the 92>91 crash).
  */
 export function measureWidth(text) {
 	const raw = String(text ?? "").replace(/\t/g, "   ");

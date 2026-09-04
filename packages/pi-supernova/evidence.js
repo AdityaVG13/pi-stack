@@ -5,7 +5,7 @@ import { isTestPath } from "./workspace.js";
 
 // Zero-token evidence selection over source code, after Zero-Mem (arXiv:2607.29377).
 // The codebase is the interaction history H; declared spans are the context units;
-// identifiers are the entities. Every step below is deterministic — no model call —
+// identifiers are the entities. Every step below is deterministic (no model call)
 // and every returned unit carries provenance (path, lines) back to the raw source.
 //
 //   eq.3  G = (Vd ∪ Ve, Ede ∪ Edd)         span/identifier nodes, co-occurrence + adjacency edges
@@ -48,7 +48,7 @@ function splitIdentifier(name) {
   return name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 }
 
-/** eq.6 — query profile: subjects, keywords/stems, answer type, test/doc flags, route. */
+/** eq.6: query profile with subjects, keywords/stems, answer type, test/doc flags, route. */
 export function profileQuery(query) {
   const { tokens, wantsTest, wantsType, wantsDoc } = tokenizeQuery(query);
   const words = query.match(IDENT) || [];
