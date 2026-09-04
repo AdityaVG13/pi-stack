@@ -9,6 +9,7 @@ import {
   hardTruncate,
   measureWidth,
   paintNovaRow,
+  wrapPlainToWidth,
   NOVA_CHROME,
   normalizeCallRenderArgs,
 } from "../render.js";
@@ -61,13 +62,15 @@ describe("supernova UI rendering", () => {
       const d = await nova.describe("read");
     `;
     const ops = extractOperationsFromCode(code);
-    assert.equal(ops.length, 3);
+    assert.equal(ops.length, 4);
     assert.equal(ops[0].tool, "read");
     assert.equal(ops[0].target, "package.json");
     assert.equal(ops[1].tool, "bash");
     assert.equal(ops[1].target, "git status");
     assert.equal(ops[2].tool, "search");
     assert.equal(ops[2].target, '"testing"');
+    assert.equal(ops[3].tool, "describe");
+    assert.equal(ops[3].target, "read");
   });
 
   it("renders canonical direct globals instead of a generic script row", () => {
@@ -274,12 +277,15 @@ describe("supernova UI rendering", () => {
         ok: false,
         wallMs: 15,
         error: "read path escapes workspace",
+        trace: [{ name: "read", args: { path: "outside.txt" } }],
       },
     };
     const comp = renderSupernovaResult(result, { expanded: false, isPartial: false }, mockTheme, {});
     const rendered = comp.render(91).join("\n");
     assert.match(rendered, /nova/);
     assert.match(rendered, /read path escapes workspace/);
+    assert.match(rendered, /×/);
+    assert.doesNotMatch(rendered, /✓/);
   });
 
   it("never emits a line wider than the terminal (Pi crash contract)", () => {
@@ -345,6 +351,10 @@ describe("supernova UI rendering", () => {
     const fixed = clampLine(crash, 91);
     assert.ok(piVisibleWidth(fixed) <= 91);
     assert.notEqual(piVisibleWidth(fixed), 92);
+    assert.equal(measureWidth("🚀"), 2);
+    const wrappedEmoji = wrapPlainToWidth("a🚀b", 1);
+    assert.deepEqual(wrappedEmoji, ["a", "…", "b"]);
+    assert.ok(wrappedEmoji.every((line) => measureWidth(line) <= 1));
   });
 
   it("renders diff card with added/removed stats and gutter matching Screenshot 2", () => {
@@ -482,6 +492,48 @@ describe("supernova UI rendering", () => {
     ).render(80).join("\n");
     assert.match(pi, /nova · 1 call · running/);
     assert.match(pi, /snap/);
+
+    const custom = renderSupernovaResult(
+      { content: [{ type: "text", text: "" }], details: { trace: [{ name: "custom_tool", args: { action: "run" } }] } },
+      { expanded: false, isPartial: true },
+      plainTheme,
+      { code: `await nova.call("custom_tool", { action: "run" });` },
+    ).render(80).join("\n");
+    assert.match(custom, /custom_tool/);
+  });
+
+  it("never exceeds ultra-narrow OMP render widths", () => {
+    const result = { details: { trace: [{ name: "custom_tool", args: { query: "value" } }] } };
+    for (const width of [1, 2, 4, 7]) {
+      const lines = renderSupernovaResult(
+        result,
+        { expanded: false, isPartial: true },
+        plainTheme,
+        { code: `await nova.call("custom_tool", {});` },
+      ).render(width);
+      assertLinesFit(lines, width, `OMP width ${width}`);
+    }
+  });
+
+  it("strips terminal controls and renders error logs once", () => {
+    const result = {
+      isError: true,
+      details: {
+        ok: false,
+        error: "boom\u001b[2J",
+        logs: ["one-log\u001b[31m"],
+        trace: [{ name: "read", args: { path: "src/a.js\nspoof" } }],
+      },
+    };
+    const text = renderSupernovaResult(
+      result,
+      { expanded: true, isPartial: false },
+      plainTheme,
+      { code: `await read("src/a.js");` },
+    ).render(100).join("\n");
+    assert.equal(text.includes("\u001b"), false);
+    assert.match(text, /src\/a\.js spoof/);
+    assert.equal(text.match(/one-log/g)?.length, 1);
   });
 
 });

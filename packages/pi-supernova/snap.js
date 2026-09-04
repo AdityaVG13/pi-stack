@@ -94,6 +94,18 @@ function scoreContentDefinitions(content, tokens) {
   return { totalScore: score, bestLine, bestLineScore };
 }
 
+function hasHiddenSegment(filePath) {
+  return path.resolve(filePath).split(path.sep).some((segment) => segment.startsWith(".") && segment.length > 1);
+}
+
+function relativeHasSegment(relativePath, segmentName) {
+  return relativePath.split(path.sep).includes(segmentName);
+}
+
+function relativeHasHiddenSegment(relativePath) {
+  return relativePath.split(path.sep).some((segment) => segment.startsWith(".") && segment.length > 1);
+}
+
 export async function executeSnap({ query, searchDir, vfs, runCommand, pendingPaths = [] }) {
   const { tokens, wantsTest, wantsType, wantsDoc } = tokenizeQuery(query);
   if (tokens.length === 0) {
@@ -101,9 +113,13 @@ export async function executeSnap({ query, searchDir, vfs, runCommand, pendingPa
   }
 
   const dir = searchDir || process.cwd();
+  const includeHidden = hasHiddenSegment(dir);
   let fileList = [];
   try {
-    const res = await runCommand(["rg", "--files", "--hidden", "-g", "!.git/**", dir], { timeoutMs: 15_000 });
+    const rgArgs = ["rg", "--files"];
+    if (includeHidden) rgArgs.push("--hidden");
+    rgArgs.push("-g", "!.git/**", dir);
+    const res = await runCommand(rgArgs, { timeoutMs: 15_000 });
     fileList = res.stdout.split("\n").map((f) => f.trim()).filter(Boolean);
   } catch {
     fileList = [];
@@ -113,7 +129,9 @@ export async function executeSnap({ query, searchDir, vfs, runCommand, pendingPa
   for (const pendingPath of pendingPaths) {
     const absolutePath = path.resolve(pendingPath);
     const relativePath = path.relative(path.resolve(dir), absolutePath);
-    if (relativePath.startsWith("..") || path.isAbsolute(relativePath) || seenPaths.has(absolutePath)) continue;
+    const escapesDir = relativePath === ".." || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath);
+    const hiddenRelativePath = relativeHasHiddenSegment(relativePath);
+    if (escapesDir || relativeHasSegment(relativePath, ".git") || (!includeHidden && hiddenRelativePath) || seenPaths.has(absolutePath)) continue;
     seenPaths.add(absolutePath);
     fileList.push(absolutePath);
   }
@@ -134,7 +152,8 @@ export async function executeSnap({ query, searchDir, vfs, runCommand, pendingPa
 
   if (candidates.length < 5) {
     try {
-      const grepArgs = ["-l", "--max-count=1"];
+      const grepArgs = ["-l", "--max-count=1", "-g", "!.git/**"];
+      if (includeHidden) grepArgs.push("--hidden");
       if (!wantsTest) {
         grepArgs.push("-g", "!test/**", "-g", "!tests/**", "-g", "!*.test.*", "-g", "!*.spec.*");
       }

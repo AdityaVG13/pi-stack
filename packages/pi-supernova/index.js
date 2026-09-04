@@ -164,6 +164,7 @@ export default function piSupernova(pi) {
         timeoutMs: Number.isInteger(params?.timeoutMs) ? params.timeoutMs : config.timeoutMs,
       };
 
+      const runStartedAt = performance.now();
       let outcome;
       try {
         outcome = await runGuestProgram({
@@ -173,7 +174,15 @@ export default function piSupernova(pi) {
           signal: runController.signal,
           onTimeout: abortRun,
         });
+      } catch (error) {
+        outcome = {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+          logs: [],
+          wallMs: Math.round(performance.now() - runStartedAt),
+        };
       } finally {
+        bridge.setCallListener(null);
         signal?.removeEventListener("abort", abortRun);
       }
 

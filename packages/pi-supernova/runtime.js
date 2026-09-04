@@ -59,23 +59,32 @@ export async function runGuestProgram(options) {
 
   let compiled = compiledCache.get(body);
   if (!compiled) {
-    compiled = new AsyncFunction(
-      "nova",
-      "tools",
-      "console",
-      "parallel",
-      "pipeline",
-      "read",
-      "write",
-      "edit",
-      "patch",
-      "surface",
-      "snap",
-      "bash",
-      "exec",
-      "speculate",
-      body,
-    );
+    try {
+      compiled = new AsyncFunction(
+        "nova",
+        "tools",
+        "console",
+        "parallel",
+        "pipeline",
+        "read",
+        "write",
+        "edit",
+        "patch",
+        "surface",
+        "snap",
+        "bash",
+        "exec",
+        "speculate",
+        body,
+      );
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        logs,
+        wallMs: Math.round(performance.now() - started),
+      };
+    }
     if (compiledCache.size >= COMPILED_CACHE_MAX) {
       const first = compiledCache.keys().next().value;
       if (first !== undefined) compiledCache.delete(first);

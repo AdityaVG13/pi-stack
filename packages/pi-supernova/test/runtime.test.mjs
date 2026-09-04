@@ -63,6 +63,44 @@ describe("guest runtime", () => {
     assert.match(outcome.error, /non-empty|code/i);
   });
 
+  it("returns syntax errors without throwing", async () => {
+    const outcome = await runGuestProgram({ code: "return (;", nova: {}, config });
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.error, /unexpected|syntax/i);
+  });
+
+  it("rolls back the outer transaction after a syntax error", async () => {
+    let supernovaTool;
+    const pi = {
+      getAllTools: () => [],
+      registerTool(tool) {
+        if (tool.name === "supernova") supernovaTool = tool;
+      },
+      registerCommand() {},
+      on() {},
+    };
+    piSupernova(pi);
+
+    const failed = await supernovaTool.execute(
+      "syntax-error",
+      { code: "return (;" },
+      new AbortController().signal,
+      undefined,
+      { cwd: process.cwd(), state: {} },
+    );
+    assert.equal(failed.details.ok, false);
+
+    const recovered = await supernovaTool.execute(
+      "after-syntax-error",
+      { code: 'return await bash("printf recovered");' },
+      new AbortController().signal,
+      undefined,
+      { cwd: process.cwd(), state: {} },
+    );
+    assert.equal(recovered.details.ok, true);
+    assert.equal(recovered.details.result, "recovered");
+  });
+
   it("exposes the real process to guest code", async () => {
     const outcome = await runGuestProgram({
       code: `

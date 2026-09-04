@@ -103,7 +103,15 @@ function bgFnForState(theme, state) {
 }
 
 export function renderPortableFrame(theme, { header, sections = [], state = "pending", borderColor, width }) {
-	const w = Math.max(8, width | 0);
+	const w = Math.max(1, width | 0);
+	if (w < 8) {
+		const rawLines = [header];
+		for (const section of sections) {
+			if (section.label) rawLines.push(section.label);
+			rawLines.push(...(section.lines || []));
+		}
+		return rawLines.filter(Boolean).map((line) => clampLine(line, w));
+	}
 	const box = boxOf(theme);
 	const border = borderPaint(theme, state, borderColor);
 	const bgFn = bgFnForState(theme, state);

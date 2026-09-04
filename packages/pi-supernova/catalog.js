@@ -28,7 +28,10 @@ export const NATIVE_TOOL_DEFINITIONS = [
   },
   {
     name: "snap", description: "Resolve a concept query to the most relevant workspace source location.",
-    parameters: { type: "object", properties: { query: { type: "string" }, path: { type: "string" } }, required: ["query"] },
+    parameters: { type: "object", properties: {
+      query: { type: "string", description: "Source concept to resolve" },
+      path: { type: "string", description: "Optional workspace search root; explicitly targeting a hidden directory includes its hidden files" },
+    }, required: ["query"] },
   },
   {
     name: "surface", description: "Extract a structural outline from a workspace source file.",

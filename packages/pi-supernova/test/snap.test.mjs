@@ -68,6 +68,49 @@ describe("snap-to-file and top-level guest globals", () => {
     }
   });
 
+  it("ranks explicitly targeted hidden files by content", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "snap-hidden-content-test-"));
+    try {
+      await fs.mkdir(path.join(tmpDir, ".fixtures"));
+      await fs.writeFile(path.join(tmpDir, ".fixtures", "a.js"), "export const unrelatedValue = true;\n");
+      await fs.writeFile(path.join(tmpDir, ".fixtures", "b.js"), "export const exactQuasarHandshake = true;\n");
+      const bridge = createHostBridge({ pi: null, config, getCwd: () => tmpDir });
+      const res = await bridge.call("snap", { query: "quasar handshake", path: ".fixtures" });
+      assert.match(JSON.parse(res.value).path, /b\.js$/);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not scan hidden files from the workspace root", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "snap-hidden-scope-test-"));
+    try {
+      await fs.mkdir(path.join(tmpDir, ".secrets"));
+      await fs.writeFile(path.join(tmpDir, ".secrets", "token.js"), "export const privateNebulaToken = true;\n");
+      await fs.writeFile(path.join(tmpDir, "visible.js"), "export const visibleFallback = true;\n");
+      const bridge = createHostBridge({ pi: null, config, getCwd: () => tmpDir });
+      const res = await bridge.call("snap", { query: "private nebula token" });
+      assert.match(JSON.parse(res.value).path, /visible\.js$/);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not merge hidden pending writes into a root Snap", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "snap-hidden-overlay-test-"));
+    try {
+      await fs.writeFile(path.join(tmpDir, "visible.js"), "export const visibleFallback = true;\n");
+      const bridge = createHostBridge({ pi: null, config, getCwd: () => tmpDir });
+      bridge.beginSpeculation();
+      await bridge.call("write", { path: ".secrets/token.js", content: "export const privateNebulaToken = true;\n" });
+      const res = await bridge.call("snap", { query: "private nebula token" });
+      assert.match(JSON.parse(res.value).path, /visible\.js$/);
+      bridge.rollbackSpeculation();
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("finds a pending VFS write before the outer transaction commits", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "snap-overlay-test-"));
     try {

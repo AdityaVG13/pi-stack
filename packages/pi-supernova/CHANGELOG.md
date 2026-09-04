@@ -12,6 +12,9 @@
 - Live command activity remains visible across partial updates and final merged cards.
 - Collapsed cards show a compact, correctly labeled call ledger with paths and change counts; diff hunks are bounded and shown only when expanded.
 - Multi-replacement edits report only the changed hunks instead of presenting the entire file as replaced.
+- Syntax errors now roll back the outer VFS transaction instead of leaking speculative depth into the next Supernova call.
+- Root-level Snap searches continue to ignore hidden files; hidden discovery is enabled only when the caller explicitly targets a hidden search root.
+- Command cards cover custom tools, mark failed traces accurately, sanitize terminal controls, and remain width-safe for narrow terminals and wide emoji.
 
 ## [0.0.4] - 2026-09-03
 

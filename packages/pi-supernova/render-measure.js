@@ -27,6 +27,9 @@ export function measureWidth(text) {
 
 function codePointWidth(cp) {
 	if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) return 0;
+	if (cp === 0x200d || (cp >= 0x0300 && cp <= 0x036f) || (cp >= 0x1ab0 && cp <= 0x1aff) ||
+		(cp >= 0x1dc0 && cp <= 0x1dff) || (cp >= 0x20d0 && cp <= 0x20ff) ||
+		(cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0xfe20 && cp <= 0xfe2f)) return 0;
 	// Fullwidth / wide ranges (CJK, Hangul, emoji blocks we actually emit).
 	if (cp >= 0x1100 && cp <= 0x115f) return 2;
 	if (cp === 0x2329 || cp === 0x232a) return 2;
@@ -37,8 +40,7 @@ function codePointWidth(cp) {
 	if (cp >= 0xfe30 && cp <= 0xfe6f) return 2;
 	if (cp >= 0xff00 && cp <= 0xff60) return 2;
 	if (cp >= 0xffe0 && cp <= 0xffe6) return 2;
-	if (cp >= 0x1f300 && cp <= 0x1f64f) return 2;
-	if (cp >= 0x1f900 && cp <= 0x1f9ff) return 2;
+	if (cp >= 0x1f000 && cp <= 0x1faff) return 2;
 	if (cp >= 0x20000 && cp <= 0x3fffd) return 2;
 	// Ambiguous emoji/symbols pi-tui treats as wide (⚡ U+26A1 was the 92>91 footgun).
 	if (cp === 0x26a1 || cp === 0x2b50 || cp === 0x2728) return 2;
@@ -107,18 +109,21 @@ export function wrapPlainToWidth(plain, width) {
 		let visible = 0;
 		let lastBreak = -1;
 		while (end < text.length) {
-			const ch = text[end];
+			const cp = text.codePointAt(end);
+			const ch = String.fromCodePoint(cp);
 			const cw = measureWidth(ch);
 			if (visible + cw > w) break;
 			visible += cw;
-			if (ch === "/" || ch === " ") lastBreak = end + 1;
-			end++;
+			end += ch.length;
+			if (ch === "/" || ch === " ") lastBreak = end;
 		}
 		if (end === i) {
-			end = i + 1;
-		} else if (end < text.length && lastBreak > i + Math.floor(w * 0.35)) {
-			end = lastBreak;
+			const ch = String.fromCodePoint(text.codePointAt(i));
+			lines.push(hardTruncate(ch, w));
+			i += ch.length;
+			continue;
 		}
+		if (end < text.length && lastBreak > i + Math.floor(w * 0.35)) end = lastBreak;
 		lines.push(text.slice(i, end));
 		i = end;
 	}

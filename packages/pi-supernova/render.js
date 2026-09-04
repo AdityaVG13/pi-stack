@@ -194,9 +194,11 @@ export function extractOperationsFromCode(code) {
 			wrap: (c) => (c.length > 32 ? c.slice(0, 29) + "…" : c),
 		},
 		{ regex: /(?:^|[^\w$.])(?:nova\.)?exec\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "exec", wrap: (c) => c },
-		{ regex: /(?:nova\.)?search\s*\(\s*["'`]([^"'`]+)["'`]/g, tool: "search", wrap: (q) => `"${q}"` },
-		{ regex: /(?:nova\.)?surface\s*\(\s*["'`]([^"'`]+)["'`]/g, tool: "surface", wrap: (p) => p },
-		{ regex: /(?:nova\.)?snap\s*\(\s*["'`]([^"'`]+)["'`]/g, tool: "snap", wrap: (q) => `"${q}"` },
+		{ regex: /(?:^|[^\w$.])(?:nova\.)?search\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "search", wrap: (q) => `"${q}"` },
+		{ regex: /(?:^|[^\w$.])nova\.describe\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "describe", wrap: (name) => name },
+		{ regex: /(?:^|[^\w$.])nova\.has\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "has", wrap: (name) => name },
+		{ regex: /(?:^|[^\w$.])(?:nova\.)?surface\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "surface", wrap: (p) => p },
+		{ regex: /(?:^|[^\w$.])(?:nova\.)?snap\s*\(\s*["'`]([^"'`]+)["'`]/gm, tool: "snap", wrap: (q) => `"${q}"` },
 	];
 	for (const item of namedCalls) {
 		while ((match = item.regex.exec(trimmed)) !== null) {
@@ -248,17 +250,17 @@ export function renderDiffBox(diff, theme, width = 60) {
 		if (item.type === "remove") {
 			const gut = theme.fg("toolDiffRemoved", `-${num}`.padStart(5));
 			const sep = theme.fg("borderMuted", " │ ");
-			const txt = theme.fg("toolDiffRemoved", `- ${item.text}`);
+			const txt = theme.fg("toolDiffRemoved", `- ${cleanInlineText(item.text)}`);
 			row = `${gut}${sep}${txt}`;
 		} else if (item.type === "add") {
 			const gut = theme.fg("toolDiffAdded", `+${num}`.padStart(5));
 			const sep = theme.fg("borderMuted", " │ ");
-			const txt = theme.fg("toolDiffAdded", `+ ${item.text}`);
+			const txt = theme.fg("toolDiffAdded", `+ ${cleanInlineText(item.text)}`);
 			row = `${gut}${sep}${txt}`;
 		} else {
 			const gut = theme.fg("dim", ` ${num}`.padStart(5));
 			const sep = theme.fg("borderMuted", " │ ");
-			const txt = theme.fg("toolDiffContext", `  ${item.text}`);
+			const txt = theme.fg("toolDiffContext", `  ${cleanInlineText(item.text)}`);
 			row = `${gut}${sep}${txt}`;
 		}
 		body.push(row);
@@ -272,16 +274,23 @@ export function renderDiffBox(diff, theme, width = 60) {
 	return `${header}\n${divider}\n${body.join("\n")}\n${divider}`;
 }
 
+function cleanBlockText(value) {
+	return stripVTControlCharacters(String(value ?? "")).replace(/\r\n?/g, "\n");
+}
+
+function cleanInlineText(value) {
+	return cleanBlockText(value).replace(/\s*\n\s*/g, " ").trim();
+}
+
 function displayOperation(tool, target, diff) {
-	const normalized = tool === "apply_patch" ? "patch" : tool;
-	if (!["write", "edit", "patch", "bash", "exec", "read", "surface", "snap", "search", "grep", "find", "ls", "speculate"].includes(normalized)) {
-		return null;
-	}
+	const rawName = cleanInlineText(tool);
+	if (!rawName) return null;
+	const normalized = rawName === "apply_patch" ? "patch" : rawName;
 	return { tool: normalized, target, diff };
 }
 
 function formatOpTarget(raw, tool) {
-	const text = String(raw ?? "");
+	const text = cleanInlineText(raw);
 	if (!text) return "";
 	if (tool === "bash") {
 		// Keep commands readable; wrap handles the rest at render time.
@@ -478,9 +487,9 @@ function renderOmpCallCard(theme, { ops, timeStr, expanded, code }) {
 		const bodyLines = ops.map((op) => formatOpBodyLine(theme, op));
 		if (expanded && code) {
 			bodyLines.push(theme.fg("dim", "── source ──"));
-			for (const line of String(code).trim().split("\n")) {
-				bodyLines.push(theme.fg("toolOutput", line));
-			}
+			const sourceLines = cleanBlockText(code).trim().split("\n");
+			for (const line of sourceLines.slice(0, 24)) bodyLines.push(theme.fg("toolOutput", line));
+			if (sourceLines.length > 24) bodyLines.push(theme.fg("dim", `… ${sourceLines.length - 24} more lines`));
 		}
 		return {
 			header,
@@ -495,15 +504,17 @@ function renderOmpCallCard(theme, { ops, timeStr, expanded, code }) {
 function renderOmpResultCard(theme, { isErr, payload, expanded, bodyText, isPartial, spinnerFrame, opCount = 0 }) {
 	if (isErr) {
 		const errLines = String(bodyText || "").trim() ? String(bodyText).split("\n") : [];
-		if (payload?.error) errLines.push(theme.fg("error", String(payload.error)));
+		if (payload?.error) errLines.push(theme.fg("error", cleanBlockText(payload.error)));
 		if (expanded && payload?.logs?.length) {
 			errLines.push(theme.fg("dim", "── logs ──"));
-			for (const log of payload.logs) errLines.push(theme.fg("dim", String(log)));
+			for (const log of payload.logs.slice(0, 24)) errLines.push(theme.fg("dim", cleanBlockText(log)));
 		}
+		const wall = payload?.wallMs != null ? `${payload.wallMs}ms` : "";
+		const calls = opCount > 0 ? `${opCount} call${opCount === 1 ? "" : "s"}` : "";
 		const header = novaStatusLine(theme, {
 			icon: "error",
 			title: "nova",
-			description: payload?.error ? String(payload.error).split("\n")[0] : "error",
+			description: [calls, "failed", wall].filter(Boolean).join(" · "),
 		});
 		return novaFramedBlock(theme, (width) => ({
 			header,
@@ -570,7 +581,7 @@ export function renderSupernovaCall(a, b, c) {
 
 	if (context?.expanded && args?.code) {
 		out += "\n" + theme.fg("dim", "── source ──");
-		out += "\n" + theme.fg("toolOutput", String(args.code).trim());
+		out += "\n" + theme.fg("toolOutput", cleanBlockText(args.code).trim());
 	}
 
 	if (context?.isError) comp.setTone("error");
@@ -586,8 +597,12 @@ function formatDiffStats(theme, diff) {
 	return " " + theme.fg("toolDiffAdded", `+${diff.added || 0}`) + theme.fg("dim", "/") + theme.fg("toolDiffRemoved", `-${diff.removed || 0}`);
 }
 
-function formatResultOperation(theme, op, isPartial) {
-	const marker = isPartial ? theme.fg("dim", "· ") : theme.fg("success", "✓ ");
+function formatResultOperation(theme, op, isPartial, isError) {
+	const marker = isPartial
+		? theme.fg("dim", "· ")
+		: isError
+			? theme.fg("error", "× ")
+			: theme.fg("success", "✓ ");
 	const tool = theme.fg("syntaxFunction", op.tool.padEnd(7, " "));
 	const targetText = formatOpTarget(op.target, op.tool);
 	const target = targetText ? theme.fg("muted", targetText) : theme.fg("dim", "done");
@@ -601,13 +616,13 @@ function boundedResult(value) {
 	} catch {
 		text = String(value);
 	}
-	const lines = String(text).split("\n");
+	const lines = cleanBlockText(text).split("\n");
 	const clipped = lines.slice(0, 24).join("\n");
 	const suffix = lines.length > 24 ? `\n… ${lines.length - 24} more lines` : "";
 	return (clipped + suffix).slice(0, 4000);
 }
 
-function buildResultBody(theme, { payload, context, args, expanded, isPartial }) {
+function buildResultBody(theme, { payload, context, args, expanded, isPartial, isError }) {
 	let out = "";
 	const trace = payload?.trace || context?.state?.trace || [];
 	const tracedOps = operationsFromTrace(trace);
@@ -616,7 +631,7 @@ function buildResultBody(theme, { payload, context, args, expanded, isPartial })
 		: extractOperationsFromCode(args?.code).map((op) => displayOperation(op.tool, op.target)).filter(Boolean);
 	const maxOps = expanded ? 12 : 8;
 	for (const op of ops.slice(0, maxOps)) {
-		out += (out ? "\n" : "") + formatResultOperation(theme, op, isPartial);
+		out += (out ? "\n" : "") + formatResultOperation(theme, op, isPartial, isError);
 	}
 	if (ops.length > maxOps) out += `\n${theme.fg("dim", `… ${ops.length - maxOps} more calls`)}`;
 
@@ -634,9 +649,9 @@ function buildResultBody(theme, { payload, context, args, expanded, isPartial })
 			out += (out ? "\n" : "") + theme.fg("dim", "── result ──");
 			out += "\n" + theme.fg("toolOutput", boundedResult(payload.result));
 		}
-		if (payload?.logs?.length) {
+		if (!isError && payload?.logs?.length) {
 			out += (out ? "\n" : "") + theme.fg("dim", "── logs ──");
-			for (const log of payload.logs.slice(0, 24)) out += `\n  ${theme.fg("dim", String(log))}`;
+			for (const log of payload.logs.slice(0, 24)) out += `\n  ${theme.fg("dim", cleanBlockText(log))}`;
 		}
 	}
 	return { body: out, opCount: ops.length };
@@ -669,7 +684,7 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 	}
 
 	const isErr = result?.isError || payload?.ok === false;
-	const view = buildResultBody(theme, { payload, context, args, expanded, isPartial });
+	const view = buildResultBody(theme, { payload, context, args, expanded, isPartial, isError: isErr });
 
 	if (shouldUseOmpFrame(host)) {
 		return renderOmpResultCard(theme, {
@@ -690,14 +705,14 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 	const wall = payload?.wallMs != null ? `${payload.wallMs}ms` : "";
 	const calls = view.opCount > 0 ? `${view.opCount} call${view.opCount === 1 ? "" : "s"}` : "complete";
 	let out = theme.fg("toolTitle", theme.bold("nova"));
-	out += " " + theme.fg("dim", `· ${[calls, isPartial ? "running" : "", wall].filter(Boolean).join(" · ")}`);
+	out += " " + theme.fg("dim", `· ${[calls, isErr ? "failed" : isPartial ? "running" : "", wall].filter(Boolean).join(" · ")}`);
 	if (view.body) out += `\n  ${view.body.replaceAll("\n", "\n  ")}`;
 
 	if (isErr) {
-		out += `\n  ${theme.fg("error", payload?.error ? String(payload.error) : "error")}`;
+		out += `\n  ${theme.fg("error", payload?.error ? cleanBlockText(payload.error) : "error")}`;
 		if (expanded && payload?.logs?.length) {
 			out += `\n${theme.fg("dim", "── logs ──")}`;
-			for (const log of payload.logs.slice(0, 24)) out += `\n  ${theme.fg("dim", String(log))}`;
+			for (const log of payload.logs.slice(0, 24)) out += `\n  ${theme.fg("dim", cleanBlockText(log))}`;
 		}
 		comp.setTone("error");
 	} else {

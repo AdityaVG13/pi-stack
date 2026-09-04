@@ -46,15 +46,19 @@ async () => {
 }
 ```
 
-Globals: `nova` / `tools`, `parallel`, `pipeline`, `console`, plus shorthand `read` / `write` / `edit` / `bash` / …
+Globals: `nova` / `tools`, `parallel`, `pipeline`, `console`, plus shorthand `read`, `write`, `edit`, `patch`, `surface`, `snap`, `bash`, and `exec`.
 
 Terminal card (muted violet / grey-blue — not a raw JSON args dump):
 
 ```text
-  nova · 84ms
-    ▤ read  packages/pi-supernova/host-bridge.js
-    ✎ edit  packages/pi-supernova/diff.js
+╭─── nova: 3 calls · 84ms ───────────────────────╮
+│ ✓ read    packages/pi-supernova/host-bridge.js │
+│ ✓ edit    packages/pi-supernova/diff.js +2/-1  │
+│ ✓ snap    "render lifecycle" → packages        │
+╰────────────────────────────────────────────────╯
 ```
+
+Collapsed cards keep this command ledger visible. Press Enter to inspect bounded diff hunks, logs, and the returned value.
 
 ---
 
@@ -66,6 +70,9 @@ Terminal card (muted violet / grey-blue — not a raw JSON args dump):
 | `nova.describe(name)` | Parameter summary on demand |
 | `nova.call(name, args)` | Host tool or native adapter |
 | `nova.callMany([{name,args}])` | Auto parallel wave — iterable array with `.mode` / `.results` |
+| `nova.surface(path)` | Structural outline for a source file |
+| `nova.snap(query, searchRoot?)` | Most relevant source path, line, signature, confidence, and context |
+| `nova.has(name)` | Whether a catalog or native tool is callable |
 | `parallel(thunks)` / `pipeline(items, …stages)` | Raw `Promise.all` helpers |
 | `nova.speculate(fn)` | Counterfactual branch (rollback / commit) |
 
@@ -126,7 +133,7 @@ Pair with DCE last if you use it: `omp install npm:pi-deferred-context-engine`.
 
 - Guest JS is **unsandboxed**. Adapter path jails are not a boundary against `import("node:fs")`.
 - `bash` / mutating tools flush speculative writes (transaction barrier); error rollback cannot undo that.
-- First public cut (`0.0.1`) — APIs and TUI will iterate.
+- Pre-1.0 package — APIs and TUI may still evolve between minor releases.
 
 ## License
 
