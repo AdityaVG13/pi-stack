@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3
+
+- Make optional tool arguments explicitly nullable for strict-schema hosts and ignore null placeholders before action-specific validation.
+
 ## 0.3.2
 
 - Dual-host: declare `"omp".extensions` alongside `"pi"` so `omp install npm:pi-papercuts` loads the same extension.

@@ -37,10 +37,25 @@ function rendered(component, width = 120) {
   return component.render(width).map((line) => line.trimEnd()).join("\n");
 }
 
-test("registers the papercuts tool with the promoted name", () => {
+test("registers the papercuts tool with nullable optional fields", () => {
   const tool = captureTool();
   assert.equal(tool.name, "papercuts");
   assert.ok(tool.description.includes("complaint box"));
+  assert.ok(tool.parameters.properties.status.anyOf.some((branch) => branch.type === "null"));
+});
+
+test("strict-schema null placeholders are treated as absent", () => {
+  const params = {
+    action: "add",
+    text: "strict host placeholders should not break action parsing",
+    tags: null, severity: null, evidence: null, cmd: null, exit: null, stderr: null,
+    status: null, tag: null, limit: null, format: null, ids: null, note: null,
+    target: null, agent: null, file: null,
+  };
+  const parsed = parsePapercutsParams(params);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.value.action, "add");
+  assert.equal(parsed.value.severity, "minor");
 });
 
 test("current Pi execute signature reads cwd from the fifth argument", async () => {

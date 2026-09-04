@@ -34,6 +34,7 @@ try {
     Optional: (s) => s,
     Union: (arr) => ({ anyOf: arr }),
     Literal: (v) => ({ const: v }),
+    Null: () => ({ type: "null" }),
   };
 }
 
@@ -60,8 +61,9 @@ const SeveritySchema = Type.Union(
   { description: "minor=annoyance (default), major=time sink, blocker=hard wall; closed SEVERITIES only" },
 );
 
-const FileField = Type.Optional(Type.String({ description: "override the log file path (else git root .papercuts.jsonl)" }));
-const AgentField = Type.Optional(Type.String({ description: "filter by agent (list) or override recorded agent name (add/resolve)" }));
+const OptionalField = (schema) => Type.Optional(Type.Union([schema, Type.Null()]));
+const FileField = OptionalField(Type.String({ description: "override the log file path (else git root .papercuts.jsonl)" }));
+const AgentField = OptionalField(Type.String({ description: "filter by agent (list) or override recorded agent name (add/resolve)" }));
 
 /**
  * Host Typebox: action-discriminated objects so add-only fields are not co-representable
@@ -77,20 +79,20 @@ const PapercutsParams = Type.Object({
     ["add", "log", "list", "resolve", "prune", "doctor", "schema"].map((a) => Type.Literal(a)),
     { description: "add (log = wire alias) | list | resolve | prune | doctor | schema" },
   ),
-  text: Type.Optional(Type.String({ description: "add: what you hit and what would have prevented it — one line" })),
-  tags: Type.Optional(Type.Array(Type.String(), { description: "add: area tags, e.g. ['tooling','docs']" })),
-  severity: Type.Optional(SeveritySchema),
-  evidence: Type.Optional(Type.String({ description: "add: free-note evidence (XOR with cmd/exit/stderr; not both)" })),
-  cmd: Type.Optional(Type.String({ description: "add: failed command (tool-failure evidence; XOR with free-note evidence)" })),
-  exit: Type.Optional(Type.Integer({ description: "add: failed command exit status (tool-failure evidence path)" })),
-  stderr: Type.Optional(Type.String({ description: `add: sanitized stderr <=${store.MAX_EVIDENCE_FIELD_BYTES} bytes; never env dumps (tool-failure path)` })),
-  status: Type.Optional(Type.Union(LIST_STATUSES.map((s) => Type.Literal(s)), { description: "list: default open" })),
-  tag: Type.Optional(Type.String({ description: "list: filter by tag" })),
-  limit: Type.Optional(Type.Integer({ description: "list: default 50; integer >= 0" })),
-  format: Type.Optional(Type.Union(LIST_FORMATS.map((f) => Type.Literal(f)), { description: "list: default json; md is a human review digest" })),
-  ids: Type.Optional(Type.Array(Type.String(), { description: "resolve: papercut id prefixes (pc_ + at least 4 hex)" })),
-  note: Type.Optional(Type.String({ description: "resolve: resolution note" })),
-  target: Type.Optional(Type.Union(SCHEMA_TARGETS.map((t) => Type.Literal(t)), { description: "schema: all|record|error|exit-codes; default all" })),
+  text: OptionalField(Type.String({ description: "add: what you hit and what would have prevented it — one line" })),
+  tags: OptionalField(Type.Array(Type.String(), { description: "add: area tags, e.g. ['tooling','docs']" })),
+  severity: OptionalField(SeveritySchema),
+  evidence: OptionalField(Type.String({ description: "add: free-note evidence (XOR with cmd/exit/stderr; not both)" })),
+  cmd: OptionalField(Type.String({ description: "add: failed command (tool-failure evidence; XOR with free-note evidence)" })),
+  exit: OptionalField(Type.Integer({ description: "add: failed command exit status (tool-failure evidence path)" })),
+  stderr: OptionalField(Type.String({ description: `add: sanitized stderr <=${store.MAX_EVIDENCE_FIELD_BYTES} bytes; never env dumps (tool-failure path)` })),
+  status: OptionalField(Type.Union(LIST_STATUSES.map((s) => Type.Literal(s)), { description: "list: default open" })),
+  tag: OptionalField(Type.String({ description: "list: filter by tag" })),
+  limit: OptionalField(Type.Integer({ description: "list: default 50; integer >= 0" })),
+  format: OptionalField(Type.Union(LIST_FORMATS.map((f) => Type.Literal(f)), { description: "list: default json; md is a human review digest" })),
+  ids: OptionalField(Type.Array(Type.String(), { description: "resolve: papercut id prefixes (pc_ + at least 4 hex)" })),
+  note: OptionalField(Type.String({ description: "resolve: resolution note" })),
+  target: OptionalField(Type.Union(SCHEMA_TARGETS.map((t) => Type.Literal(t)), { description: "schema: all|record|error|exit-codes; default all" })),
   agent: AgentField,
   file: FileField,
 });
@@ -313,6 +315,10 @@ export function parsePapercutsParams(params) {
       error: errorEnvelope("usage", "papercuts params must be an object.", "papercuts({action:'add', text:'…'})"),
     };
   }
+  // Strict-schema hosts serialize every optional key as null. Treat null as absent
+  // before enforcing the action-specific field allowlist.
+  params = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== null));
+
   const wireAction = params.action;
   if (wireAction == null || wireAction === "") {
     return {
