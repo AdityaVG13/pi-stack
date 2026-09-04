@@ -10,6 +10,8 @@ Pi / OMP packages for [pi.dev](https://pi.dev) and [omp.sh](https://omp.sh). Eac
 
 If you use deferred-context-engine, install it **last** so it sees tools other extensions registered. Load **pi-supernova early** so it can capture `registerTool` executors.
 
+the UI in the TUI for pi-supernova does NOT look good, i'll try and fix it with Astra
+
 ```bash
 # Pi
 pi install npm:pi-supernova
