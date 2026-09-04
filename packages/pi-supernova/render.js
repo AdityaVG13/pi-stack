@@ -5,150 +5,23 @@
  * (classic failure: 92 > 91). Path-install often cannot resolve @earendil-works/pi-tui,
  * so every width/truncate path here is self-contained and must never trust a host
  * truncate that appends ellipsis after cutting to maxWidth.
+ *
+ * OMP path uses rounded framedBlock chrome (same as native write/edit). Pi path
+ * keeps the muted violet SafeText wash (no side rails).
  */
 
 import { stripVTControlCharacters } from "node:util";
 import { isString, isObject } from "./decode.js";
+import {
+	measureWidth,
+	hardTruncate,
+	clampLine,
+	wrapPlainToWidth,
+	fitPath,
+} from "./render-measure.js";
+import { novaFramedBlock, novaStatusLine } from "./omp-frame.js";
 
-const ELLIPSIS = "…";
-
-/**
- * Visible columns — ANSI/OSC stripped, tabs → 3 spaces.
- * ASCII-fast; non-ASCII uses a wide-char heuristic aligned with typical terminal
- * / pi-tui behavior (emoji & symbols like ⚡ are 2 cols — undercount ⇒ 92>91 crash).
- */
-export function measureWidth(text) {
-	const raw = String(text ?? "").replace(/\t/g, "   ");
-	if (raw.length === 0) return 0;
-	const plain = raw.includes("\x1b") ? stripVTControlCharacters(raw) : raw;
-	if (/^[\x20-\x7e]*$/.test(plain)) return plain.length;
-	let width = 0;
-	for (const ch of plain) {
-		width += codePointWidth(ch.codePointAt(0));
-	}
-	return width;
-}
-
-function codePointWidth(cp) {
-	if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) return 0;
-	// Fullwidth / wide ranges (CJK, Hangul, emoji blocks we actually emit).
-	if (cp >= 0x1100 && cp <= 0x115f) return 2;
-	if (cp === 0x2329 || cp === 0x232a) return 2;
-	if (cp >= 0x2e80 && cp <= 0xa4cf) return 2;
-	if (cp >= 0xac00 && cp <= 0xd7a3) return 2;
-	if (cp >= 0xf900 && cp <= 0xfaff) return 2;
-	if (cp >= 0xfe10 && cp <= 0xfe19) return 2;
-	if (cp >= 0xfe30 && cp <= 0xfe6f) return 2;
-	if (cp >= 0xff00 && cp <= 0xff60) return 2;
-	if (cp >= 0xffe0 && cp <= 0xffe6) return 2;
-	if (cp >= 0x1f300 && cp <= 0x1f64f) return 2;
-	if (cp >= 0x1f900 && cp <= 0x1f9ff) return 2;
-	if (cp >= 0x20000 && cp <= 0x3fffd) return 2;
-	// Ambiguous emoji/symbols pi-tui treats as wide (⚡ U+26A1 was the 92>91 footgun).
-	if (cp === 0x26a1 || cp === 0x2b50 || cp === 0x2728) return 2;
-	return 1;
-}
-
-/**
- * Truncate so the result's visible width is ALWAYS ≤ maxWidth, ellipsis included.
- * Strips ANSI in the truncated region (crash-safety > color fidelity on overflow).
- */
-export function hardTruncate(text, maxWidth, ellipsis = ELLIPSIS) {
-	const w = Math.max(0, maxWidth | 0);
-	if (w === 0) return "";
-	const raw = String(text ?? "").replace(/\t/g, "   ");
-	if (measureWidth(raw) <= w) return raw;
-
-	const ell = String(ellipsis);
-	const ellW = measureWidth(ell);
-	if (ellW >= w) {
-		// Degenerate: return as many ellipsis columns as fit.
-		if (ellW === 0) return "";
-		return ell.slice(0, w);
-	}
-
-	const budget = w - ellW;
-	const plain = stripVTControlCharacters(raw);
-	let out = "";
-	let visible = 0;
-	for (const ch of plain) {
-		const cw = measureWidth(ch);
-		if (visible + cw > budget) break;
-		out += ch;
-		visible += cw;
-	}
-	return out + ell;
-}
-
-/**
- * Absolute clamp used by every renderer. Loops + hard truncate; never returns > width.
- * Exported for tests and as the single choke point for the Pi crash contract.
- */
-export function clampLine(line, width) {
-	const w = Math.max(1, width | 0);
-	let out = String(line ?? "").replace(/\t/g, "   ");
-	if (measureWidth(out) <= w) return out;
-	out = hardTruncate(out, w, ELLIPSIS);
-	// Belt-and-suspenders: if anything still disagrees, force plain slice.
-	if (measureWidth(out) <= w) return out;
-	const plain = stripVTControlCharacters(out);
-	if (plain.length <= w) return plain;
-	if (w === 1) return ELLIPSIS;
-	return plain.slice(0, Math.max(0, w - 1)) + ELLIPSIS;
-}
-
-/**
- * Wrap plain text to width, preferring breaks after `/` or space so paths stay readable.
- * Every returned chunk is ≤ width (no ellipsis — caller clamps if needed).
- */
-export function wrapPlainToWidth(plain, width) {
-	const w = Math.max(1, width | 0);
-	const text = String(plain ?? "");
-	if (text.length === 0) return [""];
-	if (measureWidth(text) <= w) return [text];
-
-	const lines = [];
-	let i = 0;
-	while (i < text.length) {
-		let end = i;
-		let visible = 0;
-		let lastBreak = -1;
-		while (end < text.length) {
-			const ch = text[end];
-			const cw = measureWidth(ch);
-			if (visible + cw > w) break;
-			visible += cw;
-			// Only soft-break on path/word separators — never mid-filename (`host-` / `bridge`).
-			if (ch === "/" || ch === " ") lastBreak = end + 1;
-			end++;
-		}
-		if (end === i) {
-			// Single wide char edge case — force one column advance.
-			end = i + 1;
-		} else if (end < text.length && lastBreak > i + Math.floor(w * 0.35)) {
-			end = lastBreak;
-		}
-		lines.push(text.slice(i, end));
-		i = end;
-	}
-	return lines.length > 0 ? lines : [""];
-}
-
-/**
- * Fit a filesystem path into `budget` columns, keeping the basename visible.
- * `packages/pi-supernova/host-bridge.js` → `…/host-bridge.js` when narrow.
- */
-export function fitPath(pathText, budget) {
-	const w = Math.max(1, budget | 0);
-	let p = String(pathText ?? "").replace(/\\/g, "/");
-	if (measureWidth(p) <= w) return p;
-
-	const parts = p.split("/").filter(Boolean);
-	const base = parts.length > 0 ? parts[parts.length - 1] : p;
-	const suffix = parts.length > 1 ? `…/${base}` : base;
-	if (measureWidth(suffix) <= w) return suffix;
-	return hardTruncate(base, w);
-}
+export { measureWidth, hardTruncate, clampLine, wrapPlainToWidth, fitPath };
 
 function fitOutputLines(text, width) {
 	const w = Math.max(1, width | 0);
@@ -455,12 +328,39 @@ export function normalizeCallRenderArgs(a, b, c) {
  * Dual-host renderResult args:
  *   Pi:  (result, {expanded,isPartial}, theme, context)
  *   OMP: (result, {expanded,isPartial}, theme, args)  — 4th is args, not context
+ *
+ * Call shapes share the first three positions, so host is inferred from the 4th
+ * arg / whether the OMP tui framedBlock import resolved.
  */
+function detectResultHost(options, ctxOrArgs) {
+	if (isTheme(options)) return "pi";
+	if (
+		ctxOrArgs &&
+		typeof ctxOrArgs === "object" &&
+		("lastComponent" in ctxOrArgs || "invalidate" in ctxOrArgs)
+	) {
+		return "pi";
+	}
+	if (
+		ctxOrArgs &&
+		typeof ctxOrArgs === "object" &&
+		("code" in ctxOrArgs || "timeoutMs" in ctxOrArgs)
+	) {
+		return "omp";
+	}
+	return "pi";
+}
+
 export function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs) {
 	if (isTheme(themeOrCtx)) {
 		const opts = options && typeof options === "object" ? options : {};
 		let context;
-		if (ctxOrArgs && typeof ctxOrArgs === "object" && !isTheme(ctxOrArgs) && ("lastComponent" in ctxOrArgs || "state" in ctxOrArgs || "invalidate" in ctxOrArgs)) {
+		if (
+			ctxOrArgs &&
+			typeof ctxOrArgs === "object" &&
+			!isTheme(ctxOrArgs) &&
+			("lastComponent" in ctxOrArgs || "state" in ctxOrArgs || "invalidate" in ctxOrArgs)
+		) {
 			context = ctxOrArgs;
 		} else {
 			context = { ...(opts.state ? { state: opts.state } : {}), lastComponent: opts.lastComponent };
@@ -472,7 +372,7 @@ export function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs
 			isPartial: !!opts.isPartial,
 			theme: themeOrCtx,
 			context,
-			host: isTheme(options) ? "pi" : "omp",
+			host: detectResultHost(options, ctxOrArgs),
 			options: opts,
 		};
 	}
@@ -480,21 +380,23 @@ export function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs
 	if (isTheme(options)) {
 		const context = themeOrCtx && typeof themeOrCtx === "object" ? themeOrCtx : {};
 		if (!context.state || typeof context.state !== "object") context.state = {};
-		return { result, expanded: !!context.expanded, isPartial: !!context.isPartial, theme: options, context, host: "pi" };
+		return {
+			result,
+			expanded: !!context.expanded,
+			isPartial: !!context.isPartial,
+			theme: options,
+			context,
+			host: "pi",
+			options: {},
+		};
 	}
 	throw new Error("supernova renderResult: theme missing (expected Pi or OMP signature)");
 }
 
-export function renderSupernovaCall(a, b, c) {
-	const { args, theme, context, options } = normalizeCallRenderArgs(a, b, c);
-	const comp = context?.lastComponent instanceof SafeText ? context.lastComponent : new SafeText();
-	if (options) options.lastComponent = comp;
-	else if (context) context.lastComponent = comp;
-
-	let ops = [];
+function collectCallOps(args, context) {
 	const stateTrace = context?.state?.trace;
 	if (Array.isArray(stateTrace) && stateTrace.length > 0) {
-		ops = stateTrace
+		return stateTrace
 			.map((item) => {
 				const tool = item?.name || "tool";
 				let target = "";
@@ -504,12 +406,24 @@ export function renderSupernovaCall(a, b, c) {
 				return displayOperation(tool, target);
 			})
 			.filter(Boolean);
-	} else {
-		ops = extractOperationsFromCode(args?.code)
-			.map((op) => displayOperation(op.tool, op.target))
-			.filter(Boolean);
 	}
+	return extractOperationsFromCode(args?.code)
+		.map((op) => displayOperation(op.tool, op.target))
+		.filter(Boolean);
+}
 
+function formatElapsed(state) {
+	if (state?.wallMs != null) return `${state.wallMs}ms`;
+	if (state?.startedAt != null) {
+		const elapsed = Math.round(performance.now() - state.startedAt);
+		// Suppress sub-100ms noise on the pending head (matches quiet Write/Edit calls).
+		if (elapsed < 100) return "";
+		return elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s` : `${elapsed}ms`;
+	}
+	return "";
+}
+
+function tickCallTimer(context) {
 	const state = context?.state;
 	if (state && state.startedAt == null) state.startedAt = performance.now();
 	if (state && context?.executionStarted && state.wallMs == null && state.timer == null) {
@@ -518,14 +432,113 @@ export function renderSupernovaCall(a, b, c) {
 			context.invalidate?.();
 		}, 100);
 	}
+}
 
-	let timeStr = "";
-	if (state?.wallMs != null) {
-		timeStr = `${state.wallMs}ms`;
-	} else if (state?.startedAt != null) {
-		const elapsed = Math.round(performance.now() - state.startedAt);
-		timeStr = elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s` : `${elapsed}ms`;
+function formatOpBodyLine(theme, op) {
+	const icon = ACTION_ICONS[op.tool] || "✦ ";
+	const bullet = theme.fg("accent", icon);
+	const toolName = theme.fg("syntaxFunction", op.tool.padEnd(4, " "));
+	const rawTarget = formatOpTarget(op.target, op.tool);
+	const target = rawTarget ? " " + theme.fg("muted", rawTarget) : "";
+	return `${bullet}${toolName}${target}`;
+}
+
+function shouldUseOmpFrame(host) {
+	return host === "omp";
+}
+
+/**
+ * OMP write/edit look: rounded framedBlock + status-line header.
+ * Pending call has no hourglass on the head row (same as native Write/Edit).
+ */
+function renderOmpCallCard(theme, { ops, timeStr, expanded, code }) {
+	const opSummary =
+		ops.length === 0
+			? "composing"
+			: ops.map((op) => op.tool).join(theme.sep?.dot ? ` ${theme.sep.dot} ` : " · ");
+	const description = timeStr ? `${opSummary} · ${timeStr}` : opSummary;
+	// No pending icon on the framed head row — matches native Write/Edit.
+	const header = novaStatusLine(theme, {
+		title: "nova",
+		description,
+	});
+	return novaFramedBlock(theme, (width) => {
+		const bodyLines = ops.map((op) => formatOpBodyLine(theme, op));
+		if (expanded && code) {
+			bodyLines.push(theme.fg("dim", "── source ──"));
+			for (const line of String(code).trim().split("\n")) {
+				bodyLines.push(theme.fg("toolOutput", line));
+			}
+		}
+		return {
+			header,
+			sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
+			state: "pending",
+			borderColor: "borderMuted",
+			width,
+		};
+	});
+}
+
+function renderOmpResultCard(theme, { isErr, payload, expanded, bodyText, isPartial, spinnerFrame }) {
+	if (isErr) {
+		const errLines = [];
+		if (payload?.error) errLines.push(theme.fg("error", String(payload.error)));
+		if (expanded && payload?.logs?.length) {
+			errLines.push(theme.fg("dim", "── logs ──"));
+			for (const log of payload.logs) errLines.push(theme.fg("dim", String(log)));
+		}
+		const header = novaStatusLine(theme, {
+			icon: "error",
+			title: "nova",
+			description: payload?.error ? String(payload.error).split("\n")[0] : "error",
+		});
+		return novaFramedBlock(theme, (width) => ({
+			header,
+			sections: errLines.length > 0 ? [{ lines: errLines }] : [],
+			state: "error",
+			borderColor: "error",
+			width,
+		}));
 	}
+
+	const wall = payload?.wallMs != null ? `${payload.wallMs}ms` : "";
+	const header = novaStatusLine(theme, {
+		icon: isPartial ? "running" : undefined,
+		spinnerFrame,
+		title: "nova",
+		description: wall || undefined,
+	});
+	const bodyLines = String(bodyText || "").split("\n");
+	while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+	while (bodyLines.length > 0 && bodyLines[bodyLines.length - 1].trim() === "") bodyLines.pop();
+	return novaFramedBlock(theme, (width) => ({
+		header,
+		sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
+		state: isPartial ? "pending" : "success",
+		borderColor: "borderMuted",
+		width,
+	}));
+}
+
+export function renderSupernovaCall(a, b, c) {
+	const { args, theme, context, options, host } = normalizeCallRenderArgs(a, b, c);
+	tickCallTimer(context);
+	const ops = collectCallOps(args, context);
+	const timeStr = formatElapsed(context?.state);
+
+	if (shouldUseOmpFrame(host)) {
+		return renderOmpCallCard(theme, {
+			ops,
+			timeStr,
+			expanded: !!context?.expanded,
+			code: args?.code,
+		});
+	}
+
+	const comp = context?.lastComponent instanceof SafeText ? context.lastComponent : new SafeText();
+	if (options) options.lastComponent = comp;
+	else if (context) context.lastComponent = comp;
 
 	// Compact aesthetic — never dump raw JSON args (the stock tool fallback).
 	let out = theme.fg("toolTitle", theme.bold("nova"));
@@ -537,12 +550,7 @@ export function renderSupernovaCall(a, b, c) {
 		out += " " + theme.fg("dim", "· composing");
 	} else {
 		for (const op of ops) {
-			const icon = ACTION_ICONS[op.tool] || "✦ ";
-			const bullet = theme.fg("accent", icon);
-			const toolName = theme.fg("syntaxFunction", op.tool.padEnd(4, " "));
-			const rawTarget = formatOpTarget(op.target, op.tool);
-			const target = rawTarget ? " " + theme.fg("muted", rawTarget) : "";
-			out += `\n  ${bullet}${toolName}${target}`;
+			out += `\n  ${formatOpBodyLine(theme, op)}`;
 		}
 	}
 
@@ -559,58 +567,8 @@ export function renderSupernovaCall(a, b, c) {
 	return comp;
 }
 
-export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextArg) {
-	const { result, expanded, isPartial, theme, context, options } = normalizeResultRenderArgs(
-		resultArg,
-		optionsArg,
-		themeArg,
-		contextArg,
-	);
-	const comp = context?.lastComponent instanceof SafeText ? context.lastComponent : new SafeText();
-	if (options) options.lastComponent = comp;
-	else if (context) context.lastComponent = comp;
-
-	const payload = result?.details;
-	if (context?.state && payload) {
-		let changed = false;
-		if (Array.isArray(payload.trace) && context.state.trace !== payload.trace) {
-			context.state.trace = payload.trace;
-			changed = true;
-		}
-		if (payload.wallMs != null && context.state.wallMs !== payload.wallMs) {
-			context.state.wallMs = payload.wallMs;
-			changed = true;
-		}
-		if (context.state.timer != null && !isPartial) {
-			clearTimeout(context.state.timer);
-			context.state.timer = null;
-		}
-		if (changed) context.invalidate?.();
-	}
-
-	if (isPartial) {
-		comp.setText("");
-		return comp;
-	}
-	const isErr = result?.isError || payload?.ok === false;
-
-	if (isErr) {
-		let out = theme.fg("error", "✗ error");
-		if (payload?.error) {
-			out += `\n  ${theme.fg("error", String(payload.error))}`;
-		}
-		if (expanded && payload?.logs?.length) {
-			out += `\n${theme.fg("dim", "── logs ──")}`;
-			for (const log of payload.logs) out += `\n  ${theme.fg("dim", String(log))}`;
-		}
-		comp.setTone("error");
-		comp.setFraming(true);
-		comp.setText(out);
-		return comp;
-	}
-
+function buildResultBody(theme, { payload, context, expanded }) {
 	let out = "";
-
 	const trace = payload?.trace || context?.state?.trace || [];
 	const diffs = trace.filter((t) => t?.diff && isObject(t.diff)).map((t) => t.diff);
 
@@ -618,7 +576,6 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 		const maxDiffsShown = expanded ? diffs.length : 2;
 		const shownDiffs = diffs.slice(0, maxDiffsShown);
 		for (const diff of shownDiffs) {
-			// Build unconstrained; SafeText.render(terminalWidth) is the hard clamp.
 			const box = renderDiffBox(diff, theme, 120);
 			if (box) out += (out ? "\n\n" : "") + box;
 		}
@@ -650,7 +607,109 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 			for (const log of payload.logs) out += `\n  ${theme.fg("dim", String(log))}`;
 		}
 	}
+	return out;
+}
 
+export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextArg) {
+	const { result, expanded, isPartial, theme, context, options, host } = normalizeResultRenderArgs(
+		resultArg,
+		optionsArg,
+		themeArg,
+		contextArg,
+	);
+
+	const payload = result?.details;
+	if (context?.state && payload) {
+		let changed = false;
+		if (Array.isArray(payload.trace) && context.state.trace !== payload.trace) {
+			context.state.trace = payload.trace;
+			changed = true;
+		}
+		if (payload.wallMs != null && context.state.wallMs !== payload.wallMs) {
+			context.state.wallMs = payload.wallMs;
+			changed = true;
+		}
+		if (context.state.timer != null && !isPartial) {
+			clearTimeout(context.state.timer);
+			context.state.timer = null;
+		}
+		if (changed) context.invalidate?.();
+	}
+
+	const isErr = result?.isError || payload?.ok === false;
+	const useOmp = shouldUseOmpFrame(host);
+
+	if (useOmp) {
+		if (isPartial && !isErr) {
+			// Streaming partials stay quiet until body content exists — same as Pi.
+			const partialBody = buildResultBody(theme, { payload, context, expanded });
+			if (!partialBody.trim()) {
+				return {
+					render: () => [],
+					invalidate() {},
+				};
+			}
+			return renderOmpResultCard(theme, {
+				isErr: false,
+				payload,
+				expanded,
+				bodyText: partialBody,
+				isPartial: true,
+				spinnerFrame: options?.spinnerFrame,
+			});
+		}
+		if (isErr) {
+			return renderOmpResultCard(theme, {
+				isErr: true,
+				payload,
+				expanded,
+				bodyText: "",
+				isPartial: false,
+				spinnerFrame: options?.spinnerFrame,
+			});
+		}
+		const out = buildResultBody(theme, { payload, context, expanded });
+		if (!out.trim()) {
+			return {
+				render: () => [],
+				invalidate() {},
+			};
+		}
+		return renderOmpResultCard(theme, {
+			isErr: false,
+			payload,
+			expanded,
+			bodyText: out,
+			isPartial: false,
+			spinnerFrame: options?.spinnerFrame,
+		});
+	}
+
+	const comp = context?.lastComponent instanceof SafeText ? context.lastComponent : new SafeText();
+	if (options) options.lastComponent = comp;
+	else if (context) context.lastComponent = comp;
+
+	if (isPartial) {
+		comp.setText("");
+		return comp;
+	}
+
+	if (isErr) {
+		let out = theme.fg("error", "✗ error");
+		if (payload?.error) {
+			out += `\n  ${theme.fg("error", String(payload.error))}`;
+		}
+		if (expanded && payload?.logs?.length) {
+			out += `\n${theme.fg("dim", "── logs ──")}`;
+			for (const log of payload.logs) out += `\n  ${theme.fg("dim", String(log))}`;
+		}
+		comp.setTone("error");
+		comp.setFraming(true);
+		comp.setText(out);
+		return comp;
+	}
+
+	const out = buildResultBody(theme, { payload, context, expanded });
 	if (!out.trim()) {
 		comp.setText("");
 		return comp;

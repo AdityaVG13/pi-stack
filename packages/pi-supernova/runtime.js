@@ -108,6 +108,16 @@ export async function runGuestProgram(options) {
     return res;
   };
 
+  const unwrapJsonValue = (res) => {
+    const value = unwrapValue(res);
+    if (!isString(value)) return value;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  };
+
   const guestRead = async (p, off, lim) => {
     if (Array.isArray(p)) {
       return await Promise.all(p.map((item) => guestRead(item, off, lim)));
@@ -123,11 +133,11 @@ export async function runGuestProgram(options) {
   const guestPatch = async (p, d) => unwrapValue(await nova.call("apply_patch", { path: p, patch: d }));
   const guestSurface = async (p) => {
     const res = await (isFunction(nova.surface) ? nova.surface(p) : nova.call("surface", { path: p }));
-    return unwrapValue(res);
+    return unwrapJsonValue(res);
   };
   const guestSnap = async (q, p) => {
     const res = await (isFunction(nova.snap) ? nova.snap(q, p) : nova.call("snap", { query: q, path: p }));
-    return unwrapValue(res);
+    return unwrapJsonValue(res);
   };
   const guestBash = async (cmd, opts) => {
     const res = await nova.call("bash", { command: cmd, ...opts });

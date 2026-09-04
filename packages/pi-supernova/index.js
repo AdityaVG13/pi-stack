@@ -1,18 +1,6 @@
-
-let Type;
-try {
-  Type = (await import("typebox")).Type;
-} catch {
-  Type = {
-    Object: (props, opts) => ({ type: "object", properties: props || {}, additionalProperties: false, ...opts }),
-    String: (opts) => ({ type: "string", ...opts }),
-    Integer: (opts) => ({ type: "integer", ...opts }),
-    Optional: (s) => ({ ...s }),
-  };
-}
-
+import { createRequire } from "node:module";
 import { isString, isFunction } from "./decode.js";
-import { buildCatalog, searchCatalog, describeTool } from "./catalog.js";
+import { buildCatalog, searchCatalog, describeTool, mergeNativeToolDefinitions } from "./catalog.js";
 import { loadConfig } from "./config.js";
 import { createHostBridge } from "./host-bridge.js";
 import { runGuestProgram } from "./runtime.js";
@@ -24,6 +12,20 @@ import {
 } from "./render.js";
 
 export { extractOperationsFromCode, renderSupernovaCall, renderSupernovaResult, SafeText };
+
+// Sync only — never top-level await. Dynamic import of host/deps hung OMP plugin load.
+const require = createRequire(import.meta.url);
+let Type;
+try {
+  Type = require("typebox").Type;
+} catch {
+  Type = {
+    Object: (props, opts) => ({ type: "object", properties: props || {}, additionalProperties: false, ...opts }),
+    String: (opts) => ({ type: "string", ...opts }),
+    Integer: (opts) => ({ type: "integer", ...opts }),
+    Optional: (s) => ({ ...s }),
+  };
+}
 
 function result(text, details) {
   return { content: [{ type: "text", text }], details };
@@ -61,7 +63,8 @@ export default function piSupernova(pi) {
     } catch {
       tools = [];
     }
-    catalog = buildCatalog(tools, config.excludeTools || []);
+    const discoverable = mergeNativeToolDefinitions(tools, bridge.executors.keys());
+    catalog = buildCatalog(discoverable, config.excludeTools || []);
     return catalog;
   }
 
@@ -127,9 +130,10 @@ export default function piSupernova(pi) {
         }),
       ),
     }),
-    // "self" = we paint a muted violet/grey-blue card (see SafeText framing).
-    // "default" uses the host's loud green tool panels and can fall back to raw JSON args.
+    // "self" = we own chrome. OMP uses native framedBlock (write/edit look);
+    // Pi keeps the muted violet SafeText wash. "default" falls back to raw JSON.
     renderShell: "self",
+    mergeCallAndResult: true,
     renderCall: renderSupernovaCall,
     renderResult: renderSupernovaResult,
     async execute(_id, params, signal, onUpdate, ctx) {

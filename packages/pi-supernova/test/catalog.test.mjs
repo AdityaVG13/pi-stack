@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildCatalog, searchCatalog, describeTool } from "../catalog.js";
+import { buildCatalog, searchCatalog, describeTool, mergeNativeToolDefinitions } from "../catalog.js";
 
 describe("catalog progressive discovery", () => {
   const tools = [
@@ -55,5 +55,19 @@ describe("catalog progressive discovery", () => {
     assert.equal(desc.parameters.fields.path.required, true);
     const missing = describeTool(catalog, "nope");
     assert.equal(missing.ok, false);
+  });
+
+  it("makes uncaptured native adapters discoverable with their actual schemas", () => {
+    const catalog = buildCatalog(mergeNativeToolDefinitions(tools), ["supernova"]);
+    const read = describeTool(catalog, "read");
+    const ls = describeTool(catalog, "ls");
+
+    assert.equal(read.parameters.fields.path.type, "string");
+    assert.match(read.description, /UTF-8 workspace files/);
+    assert.equal(ls.ok, true);
+    assert.equal(ls.parameters.fields.path.type, "string");
+
+    const captured = buildCatalog(mergeNativeToolDefinitions(tools, ["read"]), ["supernova"]);
+    assert.equal(describeTool(captured, "read").description, "Read a file from disk");
   });
 });

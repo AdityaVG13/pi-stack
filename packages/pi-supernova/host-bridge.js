@@ -242,6 +242,14 @@ class CausalVfs {
     return undefined;
   }
 
+  getOverlayPaths() {
+    const paths = new Set();
+    for (const overlay of this.overlays) {
+      for (const target of overlay.keys()) paths.add(target);
+    }
+    return [...paths];
+  }
+
   async read(target) {
     const overlay = this.getOverlay(target);
     if (overlay !== undefined) return overlay;
@@ -548,6 +556,7 @@ function createNativeAdapters(getCwd, vfs, config) {
           },
         },
         runCommand: (argv, opts) => runCommand(argv, { cwd: snapTarget, signal, ...opts }),
+        pendingPaths: vfs.getOverlayPaths(),
       });
       return textResult(JSON.stringify(res, null, 2), res);
     },

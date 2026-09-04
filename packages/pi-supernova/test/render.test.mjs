@@ -140,12 +140,54 @@ describe("supernova UI rendering", () => {
     const comp = renderSupernovaCall(args, options, theme);
     const lines = comp.render(80);
     assert.ok(lines.length > 0);
-    assert.match(lines.join("\n"), /nova/);
-    assert.match(lines.join("\n"), /package\.json/);
-    assert.doesNotMatch(lines.join("\n"), /"code":/);
+    const text = lines.join("\n");
+    assert.match(text, /nova/);
+    assert.match(text, /package\.json/);
+    assert.doesNotMatch(text, /"code":/);
+    // OMP uses rounded framedBlock chrome (same geometry as native write/edit).
+    assert.match(text, /╭/);
+    assert.match(text, /╰/);
+    assert.doesNotMatch(text, /\x1b\[48;2;/); // not the Pi violet wash
     const norm = normalizeCallRenderArgs(args, options, theme);
     assert.equal(norm.host, "omp");
     assert.equal(norm.theme, theme);
+    assertLinesFit(lines, 80, "omp framed call");
+  });
+
+  it("OMP result cards frame diffs like native write/edit", () => {
+    const theme = {
+      fg: (_t, text) => text,
+      bold: (text) => text,
+      dim: (text) => text,
+    };
+    const result = {
+      content: [{ type: "text", text: "ok" }],
+      details: {
+        ok: true,
+        wallMs: 12,
+        trace: [
+          {
+            name: "write",
+            diff: {
+              path: "a.ts",
+              op: "write",
+              added: 1,
+              removed: 0,
+              lines: [{ type: "add", lineNum: 1, text: "hi" }],
+            },
+          },
+        ],
+      },
+    };
+    // 4th arg with `code` marks OMP (args), not Pi context.
+    const lines = renderSupernovaResult(result, { expanded: false, isPartial: false }, theme, {
+      code: 'await write("a.ts", "hi");',
+    }).render(80);
+    const text = lines.join("\n");
+    assert.match(text, /╭/);
+    assert.match(text, /nova/);
+    assert.match(text, /a\.ts/);
+    assertLinesFit(lines, 80, "omp framed result");
   });
 
   it("still accepts Pi renderCall signature (args, theme, context)", () => {

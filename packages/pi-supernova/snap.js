@@ -94,7 +94,7 @@ function scoreContentDefinitions(content, tokens) {
   return { totalScore: score, bestLine, bestLineScore };
 }
 
-export async function executeSnap({ query, searchDir, vfs, runCommand }) {
+export async function executeSnap({ query, searchDir, vfs, runCommand, pendingPaths = [] }) {
   const { tokens, wantsTest, wantsType, wantsDoc } = tokenizeQuery(query);
   if (tokens.length === 0) {
     throw new Error("snap requires at least one searchable concept keyword");
@@ -103,10 +103,19 @@ export async function executeSnap({ query, searchDir, vfs, runCommand }) {
   const dir = searchDir || process.cwd();
   let fileList = [];
   try {
-    const res = await runCommand(["rg", "--files", dir], { timeoutMs: 15_000 });
+    const res = await runCommand(["rg", "--files", "--hidden", "-g", "!.git/**", dir], { timeoutMs: 15_000 });
     fileList = res.stdout.split("\n").map((f) => f.trim()).filter(Boolean);
   } catch {
     fileList = [];
+  }
+
+  const seenPaths = new Set(fileList.map((filePath) => path.resolve(filePath)));
+  for (const pendingPath of pendingPaths) {
+    const absolutePath = path.resolve(pendingPath);
+    const relativePath = path.relative(path.resolve(dir), absolutePath);
+    if (relativePath.startsWith("..") || path.isAbsolute(relativePath) || seenPaths.has(absolutePath)) continue;
+    seenPaths.add(absolutePath);
+    fileList.push(absolutePath);
   }
 
   if (fileList.length === 0) {

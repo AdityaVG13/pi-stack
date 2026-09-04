@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { tokenizeQuery, scorePathTopology } from "../snap.js";
 import { createHostBridge } from "../host-bridge.js";
 import { runGuestProgram } from "../runtime.js";
@@ -50,6 +53,61 @@ describe("snap-to-file and top-level guest globals", () => {
     assert.ok(data.line > 0);
     assert.ok(data.confidence >= 0.7);
     assert.ok(data.context.length > 0);
+  });
+
+  it("finds files inside an explicitly targeted hidden directory", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "snap-hidden-test-"));
+    try {
+      await fs.mkdir(path.join(tmpDir, ".fixtures"));
+      await fs.writeFile(path.join(tmpDir, ".fixtures", "hidden.js"), "export const hiddenNebulaAnchor = true;\n");
+      const bridge = createHostBridge({ pi: null, config, getCwd: () => tmpDir });
+      const res = await bridge.call("snap", { query: "hidden nebula anchor", path: ".fixtures" });
+      assert.match(JSON.parse(res.value).path, /hidden\.js$/);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("finds a pending VFS write before the outer transaction commits", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "snap-overlay-test-"));
+    try {
+      const bridge = createHostBridge({ pi: null, config, getCwd: () => tmpDir });
+      bridge.beginSpeculation();
+      await bridge.call("write", {
+        path: "generated/target.js",
+        content: "export function pendingNebulaAnchor() { return true; }\n",
+      });
+      const res = await bridge.call("snap", { query: "pending nebula anchor", path: "generated" });
+      assert.match(JSON.parse(res.value).path, /target\.js$/);
+      bridge.rollbackSpeculation();
+      await assert.rejects(() => fs.access(path.join(tmpDir, "generated", "target.js")));
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a structured object from the top-level snap helper", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "snap-helper-test-"));
+    try {
+      await fs.writeFile(path.join(tmpDir, "target.js"), "export const structuredNebulaAnchor = true;\n");
+      const bridge = createHostBridge({ pi: null, config, getCwd: () => tmpDir });
+      const nova = {
+        call: (name, args) => bridge.call(name, args),
+        snap: (query, targetPath) => bridge.call("snap", { query, path: targetPath }),
+        has: () => true,
+      };
+      const outcome = await runGuestProgram({
+        code: `const hit = await snap("structured nebula anchor"); const outline = await surface(hit.path); return { path: hit.path, line: hit.line, surfaceCount: outline.items.length };`,
+        nova,
+        config,
+      });
+      assert.equal(outcome.ok, true);
+      assert.match(outcome.result.path, /target\.js$/);
+      assert.ok(outcome.result.line > 0);
+      assert.ok(outcome.result.surfaceCount > 0);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it("executes guest code using top-level globals without nova.call boilerplate", async () => {

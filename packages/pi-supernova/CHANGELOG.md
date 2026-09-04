@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.0.5] - 2026-09-03
+
+### Fixed
+
+- Native adapters are now included in `nova.search` / `nova.describe` with schemas matching the callable adapter, even when the host catalog omits parameters or the adapter name.
+- `snap` discovers hidden paths outside `.git` and sees files written earlier in the same speculative invocation.
+- Top-level `snap()` and `surface()` helpers return structured objects, enabling an immediate `edit(hit.path, ...)` handoff.
+
+## [0.0.4] - 2026-09-03
+
+### Fixed
+
+- OMP no longer hangs on "Loading plugins…" — removed top-level import of `@oh-my-pi/pi-coding-agent/tui` from the extension (portable framed chrome only).
+
+## [0.0.3] - 2026-09-03
+
+### Changed
+
+- OMP TUI: nova cards now use the same rounded `framedBlock` + status-line chrome as native write/edit (Pi keeps the muted violet wash).
+
 ## [0.0.2] - 2026-09-03
 
 ### Fixed

@@ -1,6 +1,84 @@
 
 import { isString, isObject } from "./decode.js";
 
+export const NATIVE_TOOL_DEFINITIONS = [
+  {
+    name: "read",
+    description: "Read UTF-8 workspace files by path, or resolve a concept query to source. Supports path arrays, offset, and limit.",
+    parameters: { type: "object", properties: {
+      path: { type: "string", description: "Workspace-relative file path or concept query" },
+      target: { anyOf: [{ type: "string" }, { type: "array" }], description: "File path/query or array of paths" },
+      offset: { type: "number", description: "One-based starting line" },
+      limit: { type: "number", description: "Maximum lines to return" },
+    } },
+  },
+  {
+    name: "write", description: "Write UTF-8 content to a workspace file.",
+    parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
+  },
+  {
+    name: "edit", description: "Apply unique text replacements, or a unified diff, to a workspace file.",
+    parameters: { type: "object", properties: {
+      path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" }, edits: { type: "array" }, patch: { type: "string" },
+    }, required: ["path"] },
+  },
+  {
+    name: "apply_patch", description: "Apply a unified diff to one workspace file.",
+    parameters: { type: "object", properties: { path: { type: "string" }, patch: { type: "string" } }, required: ["patch"] },
+  },
+  {
+    name: "snap", description: "Resolve a concept query to the most relevant workspace source location.",
+    parameters: { type: "object", properties: { query: { type: "string" }, path: { type: "string" } }, required: ["query"] },
+  },
+  {
+    name: "surface", description: "Extract a structural outline from a workspace source file.",
+    parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+  },
+  {
+    name: "bash", description: "Run a shell command inside the workspace and capture bounded output.",
+    parameters: { type: "object", properties: { command: { type: "string" }, cwd: { type: "string" }, timeoutMs: { type: "number" } }, required: ["command"] },
+  },
+  {
+    name: "grep", description: "Search workspace file contents by pattern.",
+    parameters: { type: "object", properties: {
+      pattern: { type: "string" }, path: { type: "string" }, glob: { type: "string" }, caseSensitive: { type: "boolean" },
+    }, required: ["pattern"] },
+  },
+  {
+    name: "glob", description: "List workspace files matching a glob pattern.",
+    parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] },
+  },
+  {
+    name: "find", description: "List workspace files, optionally constrained by path and pattern.",
+    parameters: { type: "object", properties: { path: { type: "string" }, pattern: { type: "string" }, glob: { type: "string" } } },
+  },
+  {
+    name: "ls", description: "List direct entries in a workspace directory.",
+    parameters: { type: "object", properties: { path: { type: "string" } } },
+  },
+];
+
+export function mergeNativeToolDefinitions(tools, capturedNames = []) {
+  const nativeByName = new Map(NATIVE_TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
+  const captured = new Set(capturedNames);
+  const seen = new Set();
+  const merged = [];
+
+  for (const tool of tools || []) {
+    const fallback = nativeByName.get(tool?.name);
+    merged.push(fallback && !captured.has(tool.name)
+      ? { ...tool, ...fallback, sourceInfo: { path: "<native:" + tool.name + ">" } }
+      : tool);
+    if (tool?.name) seen.add(tool.name);
+  }
+  for (const fallback of NATIVE_TOOL_DEFINITIONS) {
+    if (!seen.has(fallback.name)) {
+      merged.push({ ...fallback, sourceInfo: { path: "<native:" + fallback.name + ">" } });
+    }
+  }
+  return merged;
+}
+
 function normalizeTool(tool) {
   if (!tool || !isObject(tool)) return null;
   const name = isString(tool.name) ? tool.name : "";
