@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2
+
+- Dual-host: declare `"omp".extensions` alongside `"pi"` so `omp install npm:pi-papercuts` loads the same extension.
+
 ## 0.3.1
 
 - Anti-slop refactoring and boundary type decoding: eliminate runtime typeof checks and conditional spreads across store and index.

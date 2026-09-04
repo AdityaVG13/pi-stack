@@ -1,41 +1,52 @@
 # pi-stack
 
-Pi packages for [pi.dev](https://pi.dev). Each folder under `packages/` is its own npm package -- install what you need, skip the rest.
+Pi / OMP packages for [pi.dev](https://pi.dev) and [omp.sh](https://omp.sh). Each folder under `packages/` is its own npm package — install what you need, skip the rest.
 
 | Package | Does | Install |
 |---------|------|---------|
-| [pi-papercuts](./packages/pi-papercuts) | Agent files friction notes into `.papercuts.jsonl` and keeps going | `pi install npm:pi-papercuts` |
-| [pi-deferred-context-engine](./packages/pi-deferred-context-engine) | Hides inactive tool/skill noise; promotes matches for one run via `search_tools` | `pi install npm:pi-deferred-context-engine` |
-| [pi-supernova](./packages/pi-supernova) | Dual-host CodeMode (`nova.search` / `describe` / `call`) for Pi **and** OMP | `pi install npm:pi-supernova` · `omp install npm:pi-supernova` |
+| [pi-papercuts](./packages/pi-papercuts) | Agent files friction notes into `.papercuts.jsonl` and keeps going | `pi install npm:pi-papercuts` · `omp install npm:pi-papercuts` |
+| [pi-deferred-context-engine](./packages/pi-deferred-context-engine) | Hides inactive tool/skill noise; promotes matches for one run via `search_tools` | `pi install npm:pi-deferred-context-engine` · `omp install npm:pi-deferred-context-engine` |
+| [pi-supernova](./packages/pi-supernova) | Dual-host CodeMode (`nova.search` / `describe` / `call`) | `pi install npm:pi-supernova` · `omp install npm:pi-supernova` |
 
 If you use deferred-context-engine, install it **last** so it sees tools other extensions registered. Load **pi-supernova early** so it can capture `registerTool` executors.
 
 ```bash
+# Pi
 pi install npm:pi-supernova
 pi install npm:pi-papercuts
 pi install npm:pi-deferred-context-engine
 
 # OMP
 omp install npm:pi-supernova
+omp install npm:pi-papercuts
+omp install npm:pi-deferred-context-engine
 ```
 
-Needs Pi (or OMP) and Node 22+. Package details live in each folder's README.
+Needs Pi or OMP and Node 22+. Package details live in each folder's README.
 
 ## Clone install
 
 ```bash
 git clone https://github.com/AdityaVG13/pi-stack.git
+
+# Pi
 pi install ./pi-stack/packages/pi-supernova
 pi install ./pi-stack/packages/pi-papercuts
 pi install ./pi-stack/packages/pi-deferred-context-engine
+
+# OMP
+omp install ./pi-stack/packages/pi-supernova
+omp install ./pi-stack/packages/pi-papercuts
+omp install ./pi-stack/packages/pi-deferred-context-engine
 ```
 
 Pi cannot target one monorepo subfolder over git alone ([#4530](https://github.com/earendil-works/pi/issues/4530)). Use npm or a path.
 
-Optional: load everything in this repo at once:
+Optional: load everything in this repo at once (root `package.json` declares both `"pi"` and `"omp"` extension lists):
 
 ```bash
 pi install git:github.com/AdityaVG13/pi-stack
+omp install git:github.com/AdityaVG13/pi-stack
 ```
 
 ## Other Pi stuff
@@ -72,7 +83,7 @@ cd packages/pi-supernova && npm test && npm publish --access public
 - Papercuts only logs when the agent calls it; it does not auto-detect failures. Outside a git repo the log goes to `~/.papercuts/log.jsonl` unless you set `PAPERCUTS_FILE`.
 - Longer caveats: [docs/RESIDUAL-RISKS.md](./docs/RESIDUAL-RISKS.md).
 
-Pi package shape follows [packages.md](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md) (`pi-package` keyword, `pi.extensions`, host peers as `"*"`).
+Pi package shape follows [packages.md](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md) (`pi-package` keyword, `pi.extensions` / `omp.extensions`, host peers as `"*"`).
 
 ## License
 

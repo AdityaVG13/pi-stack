@@ -2,18 +2,23 @@
 
 Agent files one-line friction notes into `.papercuts.jsonl` and keeps working. Review the backlog later.
 
-Port of [treygoff24/papercuts](https://github.com/treygoff24/papercuts) (MIT) for [Pi](https://pi.dev). Pure Node. Needs Pi + Node 22+.
+Port of [treygoff24/papercuts](https://github.com/treygoff24/papercuts) (MIT) for [Pi](https://pi.dev) and [OMP](https://omp.sh). Pure Node. Needs Pi or OMP + Node 22+.
 
 ## Install
 
 ```bash
+# Pi
 pi install npm:pi-papercuts
+
+# OMP
+omp install npm:pi-papercuts
 ```
 
 From a clone of this monorepo:
 
 ```bash
 pi install ./packages/pi-papercuts
+omp install ./packages/pi-papercuts
 ```
 
 ## Use
@@ -37,7 +42,7 @@ papercuts({ action: "schema" })
 
 Severity: `minor` (default), `major`, `blocker`. Ids are content-addressed; duplicate adds are no-ops.
 
-Interactive Pi uses a compact themed call/result view. Expand a tool row for the full text, tags, and log path. Structured result details remain available to the agent and session history.
+Interactive Pi/OMP uses a compact themed call/result view. Expand a tool row for the full text, tags, and log path. Structured result details remain available to the agent and session history.
 
 ## Where it stores
 

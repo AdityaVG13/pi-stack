@@ -1,21 +1,26 @@
 # pi-deferred-context-engine
 
-For fat Pi installs: keep a small active tool set, search for the rest, promote for one run, then reset.
+For fat Pi/OMP installs: keep a small active tool set, search for the rest, promote for one run, then reset.
 
-Needs [Pi](https://pi.dev) 0.82+ and Node 22+. Install **after** other tool-owning extensions.
+Needs [Pi](https://pi.dev) 0.82+ (or OMP) and Node 22+. Install **after** other tool-owning extensions.
 
 ## Install
 
 Install **last** among tool-owning packages so DCE sees the full registry:
 
 ```bash
+# Pi
 pi install npm:pi-deferred-context-engine
+
+# OMP
+omp install npm:pi-deferred-context-engine
 ```
 
 From a clone:
 
 ```bash
 pi install ./packages/pi-deferred-context-engine
+omp install ./packages/pi-deferred-context-engine
 ```
 
 **No config file required.** On first run:

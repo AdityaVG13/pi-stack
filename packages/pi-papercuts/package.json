@@ -1,13 +1,15 @@
 {
   "name": "pi-papercuts",
-  "version": "0.3.1",
-  "description": "Agent complaint box for Pi: file friction into an append-only .papercuts.jsonl, then keep working.",
+  "version": "0.3.2",
+  "description": "Agent complaint box for Pi/OMP: file friction into an append-only .papercuts.jsonl, then keep working.",
   "type": "module",
   "author": "AdityaVG13",
   "license": "MIT",
   "keywords": [
     "pi-package",
     "pi",
+    "omp",
+    "oh-my-pi",
     "pi-coding-agent",
     "pi-extension",
     "extension",
@@ -34,6 +36,11 @@
     "prepublishOnly": "npm test && node ../../scripts/preflight.mjs"
   },
   "pi": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "omp": {
     "extensions": [
       "./index.js"
     ]
