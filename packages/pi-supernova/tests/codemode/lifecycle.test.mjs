@@ -4,6 +4,37 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { runGuestProgram, warmGuestWorker } from "../../src/runtime/runtime.js";
 import { engineFixture, limits } from "../helpers/engine.mjs";
+import { runCommand } from "../../src/fs/workspace.js";
+
+it("termination checks group quiescence but still kills surviving descendants", {skip:process.platform === "win32"}, async t => {
+  const f = await engineFixture(t);
+  const originalKill = process.kill;
+  const signals = [];
+  process.kill = (pid, signal) => { signals.push(signal); return originalKill.call(process,pid,signal); };
+  try {
+    await assert.rejects(runCommand([process.execPath,"-e","setInterval(()=>{},1000)"],{timeoutMs:80}),/timed out/);
+    assert.ok(signals.includes(0),"check whether the owned process group actually disappeared");
+    assert.ok(!signals.includes("SIGKILL"),"do not wait to escalate an absent process group");
+    signals.length = 0;
+    const ready = path.join(f.root,"descendant-ready");
+    const late = path.join(f.root,"late-write");
+    const child = 'process.on("SIGTERM",()=>{});require("node:fs").writeFileSync('+JSON.stringify(ready)+',"ready");setTimeout(()=>require("node:fs").writeFileSync('+JSON.stringify(late)+',"unsafe"),700);';
+    const parent = 'require("node:child_process").spawn(process.execPath,["-e",'+JSON.stringify(child)+'],{stdio:"ignore"});setInterval(()=>{},1000);';
+    const controller = new AbortController();
+    const stopped = assert.rejects(runCommand([process.execPath,"-e",parent],{signal:controller.signal,timeoutMs:2000}),/aborted/);
+    try {
+      let started = false;
+      for(let i=0;i<100;i++) {
+        try { await fs.stat(ready); started=true; break; }
+        catch(error) { if(error.code!=="ENOENT")throw error; await new Promise(resolve=>setTimeout(resolve,10)); }
+      }
+      assert.ok(started,"descendant must install its signal handler before cancellation");
+    } finally { controller.abort(); await stopped; }
+    assert.ok(signals.includes("SIGKILL"),"a surviving descendant still requires escalation");
+    await new Promise(resolve=>setTimeout(resolve,750));
+    await assert.rejects(fs.stat(late),{code:"ENOENT"});
+  } finally { process.kill = originalKill; }
+});
 
 it("a prewarmed worker never inherits a previous program's global mutations", async t => {
   const f = await engineFixture(t);

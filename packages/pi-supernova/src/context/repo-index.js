@@ -7,8 +7,9 @@ import { relativeSlash } from "../fs/workspace.js";
 
 // In-process workspace index: the gitignore-aware file list comes from one
 // \`rg --files\` spawn and is then reused; file text, lowercase text, and the
-// structural surface are cached per path and validated by mtime. snap/grep/glob
-// read from here instead of spawning, so a warm call is sub-millisecond.
+// structural surface are cached per path and validated by mtime. Explicit evidence
+// and internal indexed searches use this cache; ordinary source reads and mutation
+// reference hints do not require it. Metadata validation is not content identity.
 
 // With a working fs.watch the list only refreshes on change; the TTL is the fallback when watching fails.
 const LIST_TTL_MS = 10_000;
@@ -210,9 +211,9 @@ export class WorkspaceIndex {
   static linesOf(entry) {
     if (entry.lines) return entry.lines;
     const raw = entry.text.split("\n");
-    const lower = new Array(raw.length);
-    const defNames = new Array(raw.length);
-    const idents = new Array(raw.length);
+    const lower = [];
+    const defNames = [];
+    const idents = [];
     for (let i = 0; i < raw.length; i++) {
       const trimmed = raw[i].trim();
       lower[i] = trimmed.toLowerCase();
@@ -265,11 +266,12 @@ export class WorkspaceIndex {
   }
 
   /** Structured grep rows {rel, line, text, def}; def marks lines whose declared name itself matches. */
-  grepRows(files, regex, root) {
+  grepRows(files, regex, root, overlayText = () => undefined) {
     const out = [];
     const nameRegex = new RegExp(regex.source, "i");
     for (const filePath of files) {
-      const e = this.entry(filePath);
+      const pending = overlayText(filePath);
+      const e = pending === undefined ? this.entry(filePath) : WorkspaceIndex.fromText(filePath, pending);
       if (!e || !regex.test(e.text)) continue;
       const { raw, defNames } = WorkspaceIndex.linesOf(e);
       const rel = relativeSlash(root, filePath);

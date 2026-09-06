@@ -1,15 +1,31 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-09-05
+
+### Source operations
+
+- Source questions now locate and open the selected file in one read, using bounded direct ripgrep search without a prerequisite index. Successful reads return raw source rather than a JSON location preview; `read({query,resolve:true})` supplies structured source/status for resolve-to-edit programs. Filename discovery remains a transient fallback; ambiguous and incomplete searches never select a file.
+- Reuse lexical stemming for natural-language source questions. Preserve whole-file text when it fits, and exact line ranges/continuations for oversized files, including escaped structured output.
+- Return separate post-edit windows for distant changes; correct shifted multi-edit coordinates, staged caller references, focused-read freshness, outline header numbers and clipped evidence provenance. Admit lexical evidence hits before filling the candidate cap with unrelated paths.
+- Preserve original read expectations across write-diff reads. Revalidate mutation paths at commit and invalidate path checks after shell execution. Preserve diagnostics when hosts return text-only failure envelopes.
+- Keep outlines and graph evidence available through explicit read options, not mandatory stages of question reads. No context deduplication or source compression is enabled.
+
+### Automatic command integration
+
+- Route patch edits through the same post-edit source/check/reference summary as replacements. Infer lexical enclosing declaration hints for body-only changes from the edited file, not a repository build.
+- Search changed names together in one bounded, cancellable ripgrep call, overlay staged callers, and disclose partial/unavailable hints. Cold lookup avoids per-file JavaScript indexing; already-warm indexed scans can still be faster.
+- Reuse fuzzy/frecency/directory ranking automatically for unmatched bare source names, without extra search processes or arbitrary selection. Cap fuzzy work and disclose incomplete hints.
+- Report structural warnings on ordinary writes without repeating their payload. Attach fresh workspace source to shell failures/timeouts, respect command cwd and absolute locations, and exclude external symlink targets.
 
 ### Performance
 
+- Render dense multiline string-array returns as unchanged, length-framed source when this avoids escaping overhead. Preserve values, sparse/mixed-array behavior and explicit truncation. No model-side join or source compression is required.
+- Negotiate direct executable argv for the owned POSIX shell adapter, avoiding shell startup and repeated argument payloads in failures/timeouts. Keep quoted-shell compatibility for older/delegated executors; string commands retain shell semantics.
+- On POSIX timeout/cancellation, skip the escalation delay only after the owned process group is proven absent. Surviving descendants still receive the existing escalation; Windows behavior is unchanged.
 - Bound and memoize terminal width measurements, with an oracle-checked single-column chrome fast path and full Unicode fallback. Avoid rebuilding already-clean terminal text.
 - Deliver completed results before preparing the next pristine worker; cancel scheduled preparation on shutdown. Worker isolation remains unchanged.
 - Overlap independent replacement/backup staging while settling both before cleanup. Avoid redundant cleanup probes without relaxing conflict detection, rollback or file-mode preservation.
 - Report configurable engine sample counts, raw latency samples, p99 and observed maxima. These are local measurements, not universal sub-millisecond or provider-latency guarantees.
-
-## [0.3.0] - 2026-09-05
 
 ### Changed
 

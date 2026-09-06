@@ -48,7 +48,8 @@ settings. The runtime does not silently rewrite your tool policy.
 | Function | Examples and behavior |
 | --- | --- |
 | `read` | `read(path, offset?, limit?)`, `read({path,offset,limit})`; one-based line windows |
-| `read` | `read(directory)`, `read("symbol or question")`, `read(path,{about:question})`; selection and focused context |
+| `read` | `read(directory)`, `read("symbol or question")`, `read(path,{about:question})`; questions locate and open source directly |
+| `read` | `read({query,resolve:true})`; structured source and status for a resolve-to-edit handoff |
 | `read` | `read({query,evidence:true})`; ranked evidence with provenance; optional `path` scopes discovery |
 | `read` | `read({path,outline:true})`; structural declarations |
 | `read` | `read([path1,path2])`; up to 64 paths, ordered values with labelled individual failures |
@@ -57,15 +58,56 @@ settings. The runtime does not silently rewrite your tool policy.
 | `edit` | `edit(async () => {...})`; filesystem-only checkpoint, described below |
 | `write` | `write(path,text)`, `write({path,content})`; atomic replacement |
 | `bash` | `bash(command,{cwd,timeoutMs})`, `bash({command,timeoutMs})`; bounded output, nonzero exits throw |
-| `bash` | `bash({command,args:[...]})`; literal argv, without shell expansion of argument strings |
+| `bash` | `bash({command,args:[...]})`; literal executable argv, without shell expansion of argument strings |
 
 `bash` also accepts `timeout` in seconds for familiar object arguments. `timeoutMs`
-is milliseconds and takes precedence. Session environment variables are taken
+is milliseconds and takes precedence. The owned POSIX adapter launches executable
+argv directly; use the string form for shell builtins, functions or startup hooks.
+Windows and delegated/older executors retain quoted-shell compatibility. Argument
+payloads are not repeated in owned direct-execution errors;
+stdout/stderr, exit status and source context remain. Session environment variables are taken
 from the current execution context, not inherited from a different parent session.
 
-Source selection distinguishes found, ambiguous, missing and incomplete results.
-Only a found result selects a path. Retrieval is lexical/structural, not an LLM
-semantic search. Focused evidence is selected context, not the entire repository.
+Source questions resolve and open the selected file in one command. An exact
+declaration match uses one bounded direct ripgrep search, without a prerequisite
+file listing, persistent index, embeddings or summarization. A transient filename
+listing is a fallback for unmatched content or unresolved bare filenames. Natural-language
+questions reuse lexical stemming. Ripgrep must be available on PATH.
+
+Successful question reads return raw source with a path/range header, not the old
+JSON location preview. Use the structured form when code needs the path:
+
+```javascript
+const source = await read({query: "validateRefreshToken", resolve: true});
+if (source.status !== "found") return source;
+return await edit(source.path, "token.length > 3", "token.length > 5");
+```
+
+The structured result contains `status`, `path`, the matching `line`, delivered
+`lines`, unchanged `text`, `complete`, and `nextOffset` when more source follows.
+Files that fit the output budget are returned in full. Oversized files open near
+the matching line and give a continuation; they are not summarized. Uncertain
+results report `ambiguous`, `not_found` or `incomplete` with no selected path.
+Use `{path: directory, about: question, resolve: true}` to narrow the scope.
+
+Ordinary reads stay self-contained. Outlines and graph evidence remain explicit
+options, not mandatory stages of source resolution. Ordinary calls also get:
+
+- Bounded fuzzy filename hints when a bare source name has no literal match. Existing
+  frecency/directory ranking orders hints; fuzzy matches never select a path. This
+  reuses filename discovery, examines at most 1024 paths and reports incomplete hints.
+- Post-edit source windows and structural warnings for both replacement and patch
+  edits. Body-only edits reuse local declaration spans for lexical reference hints.
+  Up to three names share one bounded, cancellable search; staged callers override disk.
+  These hints do not build an index, are not semantic caller resolution, and report
+  unavailable/truncated searches rather than silently claiming completeness.
+- Structural warnings on writes without echoing successful file contents.
+- Fresh workspace source around up to four failure locations, including shell
+  timeouts and paths relative to the command cwd. Implicit snippets exclude external
+  symlink targets and files over 1 MiB.
+
+Distant edit regions have separate windows and continuation pointers for omitted
+lines. Structural warnings and source windows are not substitutes for tests.
 
 ## Execution and automatic batching
 
@@ -103,6 +145,11 @@ outside the active callback are rejected. Await the checkpoint before proceeding
 - Returned images remain image content blocks, including in arrays/objects. Images
   not returned by the program stay out of model output. Returned images are limited
   to 16 attachments / 20 MiB; resize or return fewer when necessary.
+- Dense multiline string arrays can render as verbatim source blocks instead of
+  escaped string literals. Each block gives its array index and exact UTF-16 length;
+  strings and result types are unchanged. This is output framing, not source
+  compression. It is chosen only when shorter in characters than escaped output;
+  it does not guarantee lower billed tokens for every tokenizer or input.
 - Intermediate values stay inside CodeMode unless returned or logged. Final text,
   errors and logs are bounded with explicit truncation. Details support rendering;
   they are not a second model-facing transcript.
@@ -175,7 +222,7 @@ an additional model call are not silently invoked by the tools.
 | **Agent Zero Memory: Provenance-Aware Long-Term Memory for LLM Agents**, Zhu, Wu (arXiv:2608.29606) | Every returned unit carries provenance (path, line range, verbatim text); the L0→L1→L2 read discipline (`read(query)` → `read(path, {about})` → `read(path, offset, limit)`); the citation-lock idea that a model should only cite what it actually opened. | `src/context/evidence.js`, `src/context/outline.js`, tool guidance |
 | **Harness-of-Harness: Multi-Day Autonomous Software Development with Continual Improvement**, Yan, Su, et al. (arXiv:2609.01481) | Progressive disclosure (index first, detail on demand) and carrying evidence forward instead of reconstructing it from code. | outline / result shaping |
 | **Act More, Decide Less: Skill-Guided Adaptive Action Chunking for Long-Horizon LLM Agents**, Yang, Jin, Zhao, et al. (arXiv:2609.02042) | Framing: one supernova program is an action chunk (one model decision, many primitive actions, stop at the first failing one). | runtime design |
-| **fff**, Dmitriy Kovalenko, MIT, <https://github.com/dmtrKovalenko/fff> | File search. We reimplemented fff's ranking in plain JavaScript after reading its Rust sources (`crates/fff-core/src/score.rs`, `dbs/frecency.rs`, `path_utils.rs`); the formulas and constants are fff's, the code is ours, and nothing runs out of process. Ported: typo-tolerant fuzzy path matching with boundary/consecutive/case bonuses; smart-case; exact-filename +40% and filename +20% bonuses; frecency boost `base·f/100` with fff's AI-mode decay (3-day half-life, 7-day window) and modification-recency steps (30s/5m/15m/1h/4h); git-modified +15%; directory-distance penalty from the current file (−1 per hop, floor −20); definition-first result hinting; fuzzy fallback on zero literal matches; weak-match cutoff; watcher-driven index refresh. Not ported: fff's SIMD/frizbee matcher (ours is an fzf-style greedy match with backward tightening), LMDB persistence (frecency is per session), and the MCP/Neovim surfaces. | `src/context/fuzzy.js`, `src/context/repo-index.js`, `src/bridge/host-bridge.js` |
+| **fff**, Dmitriy Kovalenko, MIT, <https://github.com/dmtrKovalenko/fff> | File search. We reimplemented fff's ranking in plain JavaScript after reading its Rust sources (`crates/fff-core/src/score.rs`, `dbs/frecency.rs`, `path_utils.rs`); the formulas and constants are fff's, the code is ours, and nothing runs out of process. Bounded fuzzy filename hints now run automatically for unmatched bare source names, using in-memory frecency and directory distance without extra filesystem probes. The full internal search implementation also retains typo-tolerant fuzzy path matching with boundary/consecutive/case bonuses; smart-case; exact-filename +40% and filename +20% bonuses; frecency boost `base·f/100` with fff's AI-mode decay (3-day half-life, 7-day window) and modification-recency steps (30s/5m/15m/1h/4h); git-modified +15%; directory-distance penalty from the current file (−1 per hop, floor −20); definition-first result hinting; fuzzy fallback on zero literal matches; weak-match cutoff; watcher-driven index refresh. Git/mtime boosts and full indexed grep are not mandatory stages of ordinary reads. Not ported: fff's SIMD/frizbee matcher (ours is an fzf-style greedy match with backward tightening), LMDB persistence (frecency is per session), and the MCP/Neovim surfaces. | `src/context/fuzzy.js`, `src/context/repo-index.js`, `src/bridge/host-bridge.js` |
 
 ## License
 

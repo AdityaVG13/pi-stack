@@ -86,7 +86,8 @@ const TOOL_DESCRIPTION = `Run one JavaScript program with four familiar commands
 
 Native commands (async):
 read(path|paths, offset?, limit?) → file text or text[]; read(directory) → directory entries
-read("symbol or question") → JSON text with source location and context; no separate search tool needed
+read("symbol or question") → locate and open source in one call, without an index; selected file text stays raw
+read({query, resolve:true}) → {status,path,line,lines,text,complete,nextOffset?} for a direct resolve→edit handoff
 read(path, {about: question}) → relevant file bodies, or source selection inside a directory
 read({query, evidence:true}) → ranked evidence; read({path, outline:true}) → structural declarations
 write(path, text) → write a file
@@ -95,8 +96,8 @@ edit(async () => {...}) → filesystem checkpoint: commit on success, rollback o
 bash(command, {cwd?, timeoutMs?}) → bounded output; throws on non-zero exit
 bash({command, args:[...]}) → literal argv without shell expansion of arguments
 
-Source selection reports found, ambiguous, not_found, or incomplete. Only found selects a path. Narrow the directory for uncertain results.
-Object arguments also work: read({path, offset?, limit?, about?, outline?, evidence?}), edit({path, edits:[{oldText,newText}]}), edit({path,patch}), write({path,content}), bash({command,timeoutMs?}).
+Only found selects and opens a file. Uncertain reads return ambiguous, not_found, or incomplete with no selected path. Use resolve:true for structured status checks; narrow the directory with path+about when uncertain.
+Object arguments also work: read({path, offset?, limit?, about?, outline?, evidence?, resolve?}), edit({path, edits:[{oldText,newText}]}), edit({path,patch}), write({path,content}), bash({command,timeoutMs?}).
 Independent read starts batch automatically. Mutations preserve submission order. Plain reads remain self-contained; oversized reads provide continuation offsets. Return only what the model needs. console.log is captured.`;
 
 export default function piSupernova(pi) {
@@ -137,6 +138,7 @@ export function registerCodeMode(pi) {
       speculateRollback: () => runBridge.barrier(() => runBridge.rollbackSpeculation()),
       names: () => ["read", "edit", "write", "bash"],
       batchRead: runBridge.supportsBatchRead(),
+      nativeArgv: runBridge.supportsNativeArgv?.() === true,
       cancel,
     };
   }
@@ -147,7 +149,7 @@ export function registerCodeMode(pi) {
     description: TOOL_DESCRIPTION,
     promptSnippet: "Use read, write, edit, and bash in one program",
     promptGuidelines: [
-      "Use read, write, edit, and bash inside supernova. Start with read(question), or read(directory, {about: question}) for scoped source selection. Read file bodies with read(file, {about: question}). Check source selection status before using its path. Return a compact value.",
+      "Use read, write, edit, and bash inside supernova. Start with read(question), or read(directory, {about: question}) for scoped source selection. A source question already opens the selected file; do not issue a redundant read. Use read({query,resolve:true}) and check status before editing its path. Explicit about/outline/evidence reads remain available when needed. Return a compact value.",
     ],
     parameters: Type.Object({
       code: Type.String({ description: "JavaScript program: async body or arrow function." }),

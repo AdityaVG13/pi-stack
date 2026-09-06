@@ -70,7 +70,7 @@ export function outlineFile(entry, relPath, about, options = {}) {
   const parts = [];
   const headerEnd = Math.min(spans[0].start - 1, opts.headerLines);
   if (headerEnd > 0) {
-    const header = raw.slice(0, headerEnd).filter((l) => l.trim());
+    const header = raw.slice(0, headerEnd);
     if (header.length) parts.push(header.map((l, i) => String(i + 1).padStart(5) + " " + l).join("\n"));
     if (spans[0].start - 1 > opts.headerLines) parts.push("      … " + (spans[0].start - 1 - opts.headerLines) + " more header lines");
   }

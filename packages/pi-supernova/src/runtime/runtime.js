@@ -268,6 +268,7 @@ export async function runGuestProgram({ code, nova = {}, config = {}, signal, on
         if (wall() >= timeoutMs) return abort();
         handle.worker.postMessage({ op: "run", runId, prepared, available,
           batchRead: nova.batchRead !== false,
+          nativeArgv: nova.nativeArgv === true,
           limits: { maxLogLines: config.maxLogLines ?? 100, maxLogLineChars: config.maxLogLineChars ?? 4096 } });
       } catch (err) {
         cancelHost();

@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { isString } from "../shared/decode.js";
 import { WorkspaceIndex, globToRegExp } from "./repo-index.js";
 import { rankPaths, smartCase, fuzzyMatch } from "./fuzzy.js";
 import { runCommand, relativeSlash } from "../fs/workspace.js";
@@ -9,6 +10,38 @@ import { runCommand, relativeSlash } from "../fs/workspace.js";
 
 function textResult(text, details) {
   return { content: [{ type: "text", text: String(text ?? "") }], details: details || {} };
+}
+
+/** One bounded direct search for all changed names; no repository index or per-name spawn. */
+export async function referencesForNames({ root, names, excludePath, overlayText, pendingPaths, signal, run = runCommand }) {
+  const references = new Map(names.map(name => [name, []]));
+  const patterns = names.map(name => new RegExp("(?<![\\w$])" + name.replaceAll("$", "\\$") + "(?![\\w$])"));
+  const add = (file, line, text) => {
+    if (file === excludePath) return;
+    for (let i = 0; i < names.length; i++) {
+      const hits = references.get(names[i]);
+      if (hits.length < 7 && patterns[i].test(text)) hits.push(relativeSlash(root, file) + ":" + line);
+    }
+  };
+  const result = await run(["rg", "--json", "--fixed-strings", ...names.flatMap(name => ["-e", name]), "--", root],
+    { cwd: root, signal, timeoutMs: 5000, maxOutputChars: 65536 });
+  if (result.exitCode !== 0 && result.exitCode !== 1) throw new Error(result.stderr.trim() || "reference search failed");
+  const records = result.stdout.split("\n");
+  for (let i = 0; i < records.length; i++) {
+    signal?.throwIfAborted();
+    if (!records[i]) continue;
+    let record;
+    try { record = JSON.parse(records[i]); }
+    catch (error) { if (result.outputTruncated && i === records.length - 1) break; throw error; }
+    if (record.type !== "match" || !isString(record.data?.path?.text) || !isString(record.data.lines?.text)) continue;
+    const file = path.resolve(root, record.data.path.text);
+    if (overlayText(file) === undefined) add(file, record.data.line_number, record.data.lines.text);
+  }
+  for (const file of pendingPaths) {
+    const text = overlayText(file);
+    if (text !== undefined) text.split("\n").forEach((line, i) => add(file, i + 1, line));
+  }
+  return { references, incomplete: result.outputTruncated === true };
 }
 
 export function rgGrepArgs(pattern, params, searchPath) {

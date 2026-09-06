@@ -67,7 +67,7 @@ function leanEnvelope(res) {
   return res;
 }
 
-function buildGuestApi(available, batchRead, runId) {
+function buildGuestApi(available, batchRead, runId, nativeArgv) {
   const rpc = (method, args) => callRpc(runId, method, args);
   const availableSet = new Set(available);
   const checkpointScope = new AsyncLocalStorage();
@@ -154,20 +154,20 @@ function buildGuestApi(available, batchRead, runId) {
         try { return await read({ ...args, path: item }); }
         catch (error) { return `[read error: ${item}] ${error.message}`; }
       }));
-      if (!batchRead) return readEach();
+      if (!batchRead || args.resolve) return readEach();
       const res = await invoke("read", args);
       unwrapValue(res);
       if (Array.isArray(res?.items)) return res.items;
       // Captured host executor without batch support: fan out.
       return readEach();
     }
-    if (!batchRead) return unwrapValue(await invoke("read", args));
+    if (!batchRead) return args.resolve ? unwrapJsonValue(await invoke("read", args)) : unwrapValue(await invoke("read", args));
     const key = JSON.stringify({ ...args, path: undefined });
     if (queuedReads.length && queuedReads[0].key !== key) flushReads();
     return new Promise((resolve, reject) => {
       queuedReads.push({ args, key, resolve, reject });
       if (queuedReads.length === 1) queueMicrotask(flushReads);
-    });
+    }).then(value => args.resolve ? JSON.parse(value) : value);
   };
   const write = async (p, content) => unwrapValue(await invoke("write", isObject(p) ? p : { path: p, content }));
   const edit = async (p, oldText, newText) => {
@@ -180,7 +180,11 @@ function buildGuestApi(available, batchRead, runId) {
     const args = isObject(command) ? { ...command } : { command, ...opts };
     if (args.args !== undefined) {
       if (!isString(args.command) || !Array.isArray(args.args) || args.args.some(arg => !isString(arg))) throw new Error("bash argv requires a command string and an array of string args");
-      args.command = [args.command, ...args.args].map(quoteShellArg).join(" ");
+      if (nativeArgv) args._directArgv = true;
+      else {
+        delete args._directArgv;
+        args.command = [args.command, ...args.args].map(quoteShellArg).join(" ");
+      }
     }
     command = args.command;
     if (args.timeout !== undefined && args.timeoutMs === undefined) args.timeoutMs = args.timeout * 1000;
@@ -254,7 +258,7 @@ async function handleRun(msg) {
     postFailure(runId, err);
     return;
   }
-  const api = buildGuestApi(available, batchRead, runId);
+  const api = buildGuestApi(available, batchRead, runId, msg.nativeArgv === true);
   const scopedConsole = makeConsole(runId, limits);
   try {
     const value = await compiled.fn(

@@ -8,7 +8,8 @@ const VFS_CACHE_MAX = 1024;
 let commitTail = Promise.resolve();
 
 export class CausalVfs {
-  constructor(onNewFile) {
+  constructor(onNewFile, validateWrite) {
+    this.validateWrite = validateWrite;
     this.cache = new Map();
     this.overlays = [];
     this.expected = new Map();
@@ -37,13 +38,13 @@ export class CausalVfs {
     return [...new Set(this.overlays.flatMap(overlay => [...overlay.keys()]))];
   }
 
-  async read(target) {
+  async read(target, { preserveRead = false } = {}) {
     const overlay = this.getOverlay(target);
     if (overlay !== undefined) return overlay;
     // External editors and captured tools can change a file between any two reads.
     try {
       const text = await fs.readFile(target, "utf8");
-      this.setCache(target, text);
+      if (!preserveRead || !this.cache.has(target)) this.setCache(target, text);
       return text;
     } catch (err) {
       this.cache.delete(target);
@@ -111,6 +112,7 @@ export class CausalVfs {
         } catch (err) {
           if (err.code !== "ENOENT") throw err;
         }
+        await this.validateWrite?.(logicalPath);
         if (targets.has(target)) throw new Error("conflicting write aliases: " + logicalPath);
         targets.add(target);
         if (this.expected.has(logicalPath)) {

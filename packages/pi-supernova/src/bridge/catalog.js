@@ -4,13 +4,15 @@ import { isString, isObject } from "../shared/decode.js";
 const NATIVE_TOOL_DEFINITIONS = [
   {
     name: "read",
-    description: "Read files, directories, or source questions. Directory questions use about. Source selection reports uncertainty instead of guessing.",
+    description: "Read files or directories. Source questions locate and open source directly; resolve returns structured source/status without guessing.",
     parameters: { type: "object", properties: {
       path: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }], description: "Workspace-relative file or directory, source question, or array of paths" },
       target: { anyOf: [{ type: "string" }, { type: "array" }], description: "File path/query or array of paths" },
       offset: { type: "number", description: "One-based starting line" },
       limit: { type: "number", description: "Maximum lines to return" },
-      about: { type: "string", description: "Question or symbol: expand relevant file bodies, or select source inside a directory" },
+      about: { type: "string", description: "Question or symbol: expand file bodies, or locate and open source inside a directory" },
+      query: { type: "string", description: "Source question; optional path scopes the search directory" },
+      resolve: { type: "boolean", description: "Return structured source/status for a direct resolve-to-edit handoff" },
     } },
   },
   {
@@ -161,7 +163,7 @@ export function searchCatalog(catalog, query, limit = 12) {
 
 /** Optimal string alignment distance: insert/delete/substitute/adjacent-transpose cost 1. */
 function editDistance(a, b) {
-  const rows = Array.from({ length: a.length + 1 }, (_, i) => [i, ...new Array(b.length).fill(0)]);
+  const rows = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array.from({ length: b.length }, () => 0)]);
   for (let j = 1; j <= b.length; j++) rows[0][j] = j;
   for (let i = 1; i <= a.length; i++) {
     for (let j = 1; j <= b.length; j++) {
@@ -198,7 +200,7 @@ function suggestNames(name, candidates, limit = 3) {
 export function unknownToolMessage(name, candidates) {
   const close = suggestNames(name, candidates);
   const hint = close.length ? ` Did you mean ${close.map((c) => JSON.stringify(c)).join(", ")}?` : "";
-  return `unknown tool "${name}".${hint} Use nova.search("") to list every callable tool.`;
+  return `unknown tool "${name}".${hint} Check the command name and configured tool exclusions.`;
 }
 
 export function describeTool(catalog, name) {

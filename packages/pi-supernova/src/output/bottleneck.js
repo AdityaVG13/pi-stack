@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isString, isObject } from "../shared/decode.js";
-import { truncateChars, formatValue } from "./format.js";
+import { truncateChars, formatReturn } from "./format.js";
 
 function json(value) {
   try { return JSON.stringify(value) ?? "null"; } catch { return JSON.stringify(String(value)); }
@@ -128,7 +128,7 @@ export function packageFinalReturn(value, logs, config) {
     return input;
   };
   value = collect(value);
-  const serialized = truncateChars(isString(value) ? value : formatValue(value), config.maxReturnChars ?? 32000, "return");
+  const serialized = truncateChars(formatReturn(value), config.maxReturnChars ?? 32000, "return");
   const maxLines = config.maxLogLines ?? 100;
   let logTruncated = logs.length > maxLines;
   const clipped = logs.slice(0, maxLines).map(line => {

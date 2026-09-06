@@ -40,12 +40,14 @@ export function buildMultiEditDiff(filePath, originalText, replacements) {
     buildEditDiff(filePath, originalText, oldText, newText),
   );
   const lines = [];
-  for (const part of parts) {
+  let shift = 0;
+  for (const [index, part] of parts.entries()) {
     for (const line of part.lines) {
-      const previous = lines.at(-1);
-      if (previous?.type === "context" && line.type === "context" && previous.lineNum === line.lineNum) continue;
-      lines.push(line);
+      if (line.type === "context") continue;
+      lines.push(line.type === "add" ? { ...line, lineNum: line.lineNum + shift }
+        : { ...line, newLineNum: Math.max(1, line.lineNum + shift) });
     }
+    shift += replacements[index].newText.split("\n").length - replacements[index].oldText.split("\n").length;
   }
   return {
     path: filePath,

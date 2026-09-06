@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { WorkspaceIndex } from "./repo-index.js";
-import { tokenizeQuery, scorePathTopology } from "./snap.js";
+import { tokenizeQuery, scorePathTopology, stem } from "./snap.js";
 import { isTestPath } from "../fs/workspace.js";
 
 // Zero-token evidence selection over source code, after Zero-Mem (arXiv:2607.29377).
@@ -38,11 +38,7 @@ const RELATION_WORDS = new Set(["calls", "caller", "callers", "uses", "usages", 
 const HUB_FRACTION = 0.25;
 const HUB_MIN = 8;
 
-/** Light suffix stripping so "terminated" ⊇ "terminat" matches "terminate"; deterministic, no dictionary. */
-export function stem(token) {
-  if (token.length < 5) return token;
-  return token.replace(/(ations?|ings?|ed|es|e|s|ly|ers?)$/, (m) => (token.length - m.length >= 4 ? "" : m));
-}
+export { stem } from "./snap.js";
 
 function splitIdentifier(name) {
   return name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
@@ -73,9 +69,9 @@ function spansOf(entry, filePath, maxSpanLines) {
   const base = { path: filePath, entry, lower: lines.lower, lines };
   const declared = WorkspaceIndex.spansOf(entry);
   if (declared.length === 0) {
-    return [{ ...base, id: filePath + ":1", start: 1, end: Math.min(lines.raw.length, maxSpanLines), name: path.basename(filePath), kind: "file" }];
+    return [{ ...base, id: filePath + ":1", start: 1, end: Math.min(lines.raw.length, maxSpanLines), name: path.basename(filePath), kind: "file", sourceEnd: lines.raw.length }];
   }
-  return declared.map((s, i) => ({ ...base, ...s, id: filePath + ":" + s.start, end: Math.min(s.end, s.start + maxSpanLines - 1), index: i }));
+  return declared.map((s, i) => ({ ...base, ...s, sourceEnd: s.end, id: filePath + ":" + s.start, end: Math.min(s.end, s.start + maxSpanLines - 1), index: i }));
 }
 
 function spanLines(span) {
@@ -316,7 +312,7 @@ function candidateFiles(files, profile, index, limit, overlayText) {
     if (s > 0) scored.push({ f, s });
   }
   scored.sort((a, b) => b.s - a.s);
-  const chosen = new Set(scored.slice(0, limit).map(({ f }) => f));
+  const chosen = new Set();
   const anchors = (profile.subjects.length ? profile.subjects : profile.keywords).map((a) => a.toLowerCase()).filter((a) => a.length > 2);
   const pendingHits = files.filter(file => {
     const pending = overlayText(file);
@@ -326,6 +322,10 @@ function candidateFiles(files, profile, index, limit, overlayText) {
   for (const f of hits) {
     if (chosen.size >= limit) break;
     if (profile.flags.wantsTest || scorePathTopology(f, profile.keywords, profile.flags) > -50) chosen.add(f);
+  }
+  for (const { f } of scored) {
+    if (chosen.size >= limit) break;
+    chosen.add(f);
   }
   return { files: [...chosen], fileScores: new Map(scored.map(({ f, s }) => [f, s])) };
 }
@@ -370,11 +370,22 @@ function render(spans, picks, fused, opts, root) {
     const span = spans[i];
     const lines = span.lines.raw.slice(span.start - 1, span.end);
     let text = lines.join("\n");
-    if (text.length > budget) text = text.slice(0, Math.max(0, budget - 1)) + "…";
+    if (text.length > budget) {
+      const end = text.lastIndexOf("\n", budget);
+      if (end < 0) {
+        if (out.length) break;
+        throw new Error("evidence source line exceeds maxChars; increase the budget or read the file directly");
+      }
+      text = text.slice(0, end);
+    }
+    const lastLine = span.start + text.split("\n").length - 1;
+    const truncated = lastLine < span.sourceEnd;
     budget -= text.length;
     out.push({
       path: path.relative(root, span.path) || span.path,
-      lines: [span.start, span.start + lines.length - 1],
+      lines: [span.start, lastLine],
+      truncated: truncated || undefined,
+      nextOffset: truncated ? lastLine + 1 : undefined,
       name: span.name,
       kind: span.kind,
       why,

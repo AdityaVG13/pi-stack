@@ -56,7 +56,7 @@ export function isTestPath(filePath) {
   return segments.some((s) => TEST_SEGMENTS.has(s)) || /\.(test|spec)\./.test(base);
 }
 
-export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = false) {
+export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = false, fresh = false) {
   if (inputPath == null || !isString(inputPath) || !inputPath.trim()) {
     throw new Error(`${opName} requires path`);
   }
@@ -71,7 +71,7 @@ export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = f
     realRoot = await fs.realpath(resolvedCwd);
     realRoots.set(resolvedCwd, realRoot);
   }
-  let probe = realNearest.get(target);
+  let probe = fresh ? undefined : realNearest.get(target);
   if (!probe) {
     probe = await realpathNearest(target);
     if (realNearest.size >= PATH_CACHE_MAX) realNearest.clear();
@@ -131,7 +131,7 @@ export async function runCommand(argv, options = {}) {
       escalation = setTimeout(() => { signalTree("SIGKILL"); fail(error); }, 150);
     };
     const onAbort = () => terminate(new Error("aborted"));
-    const timer = setTimeout(() => terminate(new Error("command timed out after " + timeoutMs + "ms: " + argv.join(" "))), timeoutMs);
+    const timer = setTimeout(() => terminate(new Error("command timed out after " + timeoutMs + "ms: " + (options.commandLabel ?? argv.join(" ")))), timeoutMs);
     const append = (current, chunk) => {
       const remaining = Math.max(0, maxOutputChars - stdout.length - stderr.length);
       if (chunk.length > remaining) outputTruncated = true;
@@ -143,7 +143,16 @@ export async function runCommand(argv, options = {}) {
     child.stderr.on("data", chunk => { stderr = append(stderr, chunk); });
     child.on("error", fail);
     child.on("close", (code, signal) => {
-      if (settled || terminationError) return;
+      if (settled) return;
+      if (terminationError) {
+        // A closed pipe alone says nothing about descendants. Only ESRCH proves
+        // the owned POSIX group is gone; otherwise retain the escalation timer.
+        if (process.platform !== "win32" && child.pid) {
+          try { process.kill(-child.pid, 0); }
+          catch (error) { if (error.code === "ESRCH") fail(terminationError); }
+        }
+        return;
+      }
       settled = true;
       cleanup();
       resolve({ stdout, stderr, exitCode: code ?? (128 + (constants.signals[signal] ?? 1)), signal, outputTruncated });

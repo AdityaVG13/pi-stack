@@ -43,6 +43,25 @@ function tailStartIndex(text, tail) {
   return code >= 0xdc00 && code <= 0xdfff ? start + 1 : start;
 }
 
+// Unicode mode matches lone surrogate code points, not valid UTF-16 pairs.
+const UNPAIRED_SURROGATE = /[\uD800-\uDFFF]/u;
+
+function hasWellFormedStrings(values) {
+  for (const value of values) if (!isString(value) || UNPAIRED_SURROGATE.test(value)) return false;
+  return true;
+}
+
+/** Lossless framing for source arrays, not string escaping or source compression. */
+export function formatReturn(value) {
+  if (isString(value)) return value;
+  if (Array.isArray(value) && value.length && hasWellFormedStrings(value) && value.some(text => text.includes("\n"))) {
+    const raw = "strings[" + value.length + "]\n" + value.map((text, i) => "[" + i + "] " + text.length + " UTF-16 units\n" + text + "\n").join("");
+    const escapedSize = value.reduce((sum, text) => sum + JSON.stringify(text).length, value.length + 1);
+    if (raw.length < escapedSize) return raw;
+  }
+  return formatValue(value);
+}
+
 const IDENT_KEY = /^[A-Za-z_$][\w$]*$/;
 const FORMAT_WIDTH = 120;
 

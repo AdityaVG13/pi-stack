@@ -15,6 +15,8 @@ const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "supernova-hosts-"));
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
 await fs.writeFile(path.join(root, "pixel.png"), Buffer.from(png, "base64"));
+const sourceBody = "export function hostToken() {\n  return 1;\n}\n";
+await fs.writeFile(path.join(root, "auth.js"), sourceBody);
 const code = `
   await write("state.txt", "before");
   const checkpoint = await edit(async () => { await write("state.txt", "candidate"); throw Error("reject"); });
@@ -22,15 +24,29 @@ const code = `
   const a = read("state.txt"), b = read("state.txt");
   const text = await Promise.all([a,b]);
   const shell = await bash("printf smoke");
-  return {text,shell,rejected:!checkpoint.ok,alias:typeof nova,image:await read("pixel.png")};
+  const argv = await bash({command:"printf",args:["%s","literal $HOME"]});
+  const source = await read({query:"hostToken",resolve:true});
+  if (source.status !== "found") throw Error("source handoff failed");
+  await write("caller.js","hostToken();");
+  const edited = await edit(source.path,"return 1","return 2");
+  const warning = await write("invalid.json","{");
+  const diagnostic = await bash("printf auth.js:2; exit 1").catch(error => error.message);
+  return {text,shell,argv,source,edited,warning,diagnostic,rawSource:await read("hostToken"),rejected:!checkpoint.ok,alias:typeof nova,image:await read("pixel.png")};
 `;
 await fs.writeFile(path.join(root, "program.js"), code);
 function verify(result) {
   assert.equal(result.details.ok, true, result.details.error);
   assert.deepEqual(result.details.result.text, ["after", "after"]);
   assert.equal(result.details.result.shell, "smoke");
+  assert.equal(result.details.result.argv, "literal $HOME");
   assert.equal(result.details.result.rejected, true);
   assert.equal(result.details.result.alias, "undefined");
+  assert.equal(result.details.result.source.path, "auth.js");
+  assert.equal(result.details.result.source.text, sourceBody);
+  assert.match(result.details.result.edited, /hostToken also referenced in .*caller\.js:1/);
+  assert.match(result.details.result.warning, /check:/);
+  assert.match(result.details.result.diagnostic, /return 2/);
+  assert.ok(result.details.result.rawSource.includes(sourceBody.replace("return 1", "return 2")));
   assert.equal(result.content.find(block => block.type === "image")?.data, png);
   assert.ok(result.details.trace.some(call => Array.isArray(call.args.path)), "Actual host must retain automatic read coalescing");
 }
@@ -66,6 +82,7 @@ for (const expanded of [false, true]) {
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `Pi row exceeds ${width} columns`);
   }
 }
+await fs.writeFile(path.join(root, "auth.js"), sourceBody);
 const child = spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)(deny network*)", omp,
   "--cwd", root, "--mode", "rpc", "--tools", "read,edit,write,bash", "--no-lsp", "--no-pty", "--no-extensions", "--no-skills", "--no-rules", "--no-title", "--no-session",
   "-e", path.join(packageRoot, "index.js"), "-e", path.join(packageRoot, "tests/hosts/omp-smoke.ts")], {

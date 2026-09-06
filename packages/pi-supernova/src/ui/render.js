@@ -426,7 +426,7 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 		contextArg,
 	);
 
-	const payload = result?.details;
+	const payload = result?.details ?? (result?.isError ? { ok: false, error: result.content?.filter(block => block.type === "text").map(block => block.text).join("\n") } : undefined);
 	syncState(context, payload);
 
 	const isError = result?.isError || payload?.ok === false;
