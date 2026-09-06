@@ -110,6 +110,11 @@ export function registerCodeMode(pi) {
   let cwd = process.cwd();
   let programSeq = 0;
   let stopped = false;
+  let warmTimer;
+  function cancelWarmTimer() {
+    if (warmTimer !== undefined) clearImmediate(warmTimer);
+    warmTimer = undefined;
+  }
 
   const bridge = createHostBridge({
     pi,
@@ -155,6 +160,7 @@ export function registerCodeMode(pi) {
     renderCall: renderSupernovaCall,
     renderResult: renderSupernovaResult,
     async execute(_id, params, signal, onUpdate, ctx) {
+      cancelWarmTimer();
       const runCwd = ctx?.cwd || cwd;
       const runController = new AbortController();
       const abortRun = () => runController.abort(signal?.reason);
@@ -198,7 +204,15 @@ export function registerCodeMode(pi) {
         signal?.removeEventListener("abort", abortRun);
         // Prepare one pristine worker during the model's next decision. Never
         // recycle a worker that has executed arbitrary guest JavaScript.
-        if (!stopped && !runController.signal.aborted) warmGuestWorker(config).catch(() => {});
+        cancelWarmTimer();
+        if (!stopped && !runController.signal.aborted) {
+          // Deliver the result before paying for another Worker constructor.
+          warmTimer = setImmediate(() => {
+            warmTimer = undefined;
+            if (!stopped && !runController.signal.aborted) warmGuestWorker(config).catch(() => {});
+          });
+          warmTimer.unref?.();
+        }
       }
       const trace = runBridge.getTrace();
       const text = outcome.ok ? successText(outcome, call) : errorText(outcome, call);
@@ -215,7 +229,7 @@ export function registerCodeMode(pi) {
     },
   });
 
-  pi.on("session_shutdown", () => { stopped = true; return stopWarmGuestWorker(); });
+  pi.on("session_shutdown", () => { stopped = true; cancelWarmTimer(); return stopWarmGuestWorker(); });
   pi.on("session_start", (_event, ctx) => {
     stopped = false;
     if (ctx && isString(ctx.cwd) && ctx.cwd) cwd = ctx.cwd;
