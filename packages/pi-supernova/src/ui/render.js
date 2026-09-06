@@ -42,14 +42,9 @@ function formatDiffRows(diff, theme, maxShown = 6) {
 }
 
 function stripUnsafeControls(value) {
-	let clean = "";
-	for (const character of value) {
-		const codePoint = character.codePointAt(0);
-		const isC0 = codePoint <= 0x08 || codePoint === 0x0b || codePoint === 0x0c || (codePoint >= 0x0e && codePoint <= 0x1f);
-		const isDeleteOrC1 = codePoint >= 0x7f && codePoint <= 0x9f;
-		if (!isC0 && !isDeleteOrC1) clean += character;
-	}
-	return clean;
+	// Exactly the C0/DEL/C1 ranges previously filtered code point by code point.
+	// Native replacement avoids rebuilding every already-clean Unicode string.
+	return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "");
 }
 
 function cleanBlockText(value) {
