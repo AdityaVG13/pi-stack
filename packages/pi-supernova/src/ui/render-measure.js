@@ -14,7 +14,7 @@ export function measureWidth(text) {
   if (cached !== undefined) return cached;
   const normalized = raw.replace(/\t/g, "   ");
   // eslint-disable-next-line no-control-regex -- intentional ANSI SGR recognition
-  const plain = normalized.replace(/\x1b\[[0-9;]*m/g, "");
+  const plain = normalized.replace(/\x1b\[(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?m/g, "");
   // ASCII and these single-column chrome glyphs need no Unicode segmentation.
   // Any other character/control/escape sequence uses the full oracle.
   const width = /^[\x20-\x7e\u2500-\u257f\u00b7\u00d7\u2026\u2713\u2717]*$/.test(plain)
