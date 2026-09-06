@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Performance
+
+- Bound and memoize terminal width measurements, with an oracle-checked single-column chrome fast path and full Unicode fallback. Avoid rebuilding already-clean terminal text.
+- Deliver completed results before preparing the next pristine worker; cancel scheduled preparation on shutdown. Worker isolation remains unchanged.
+- Overlap independent replacement/backup staging while settling both before cleanup. Avoid redundant cleanup probes without relaxing conflict detection, rollback or file-mode preservation.
+- Report configurable engine sample counts, raw latency samples, p99 and observed maxima. These are local measurements, not universal sub-millisecond or provider-latency guarantees.
+
 ## [0.3.0] - 2026-09-05
 
 ### Changed
