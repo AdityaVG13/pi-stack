@@ -134,11 +134,17 @@ export class CausalVfs {
         const token = ".supernova-" + randomUUID();
         const entry = { logicalPath, target, content, temporary: path.join(parent, token + ".new"), backup: path.join(parent, token + ".bak"), existed: !!stat, replaced: false };
         staged.push(entry);
-        await fs.writeFile(entry.temporary, content, { encoding: "utf8", flag: "wx", mode: stat ? stat.mode & 0o7777 : 0o666 });
-        if (stat) {
-          await fs.chmod(entry.temporary, stat.mode & 0o7777);
-          await fs.copyFile(target, entry.backup, fs.constants.COPYFILE_EXCL);
-        }
+        const replacement = (async () => {
+          await fs.writeFile(entry.temporary, content, { encoding: "utf8", flag: "wx", mode: stat ? stat.mode & 0o7777 : 0o666 });
+          if (stat) await fs.chmod(entry.temporary, stat.mode & 0o7777);
+        })();
+        // These touch separate staging files. Settle both before cleanup, even
+        // on failure: Promise.all could leave a late backup after rollback.
+        const staging = [replacement];
+        if (stat) staging.push(fs.copyFile(target, entry.backup, fs.constants.COPYFILE_EXCL));
+        const outcomes = await Promise.allSettled(staging);
+        const failure = outcomes.find(outcome => outcome.status === "rejected");
+        if (failure) throw failure.reason;
       }
       for (const entry of staged) {
         this.signal?.throwIfAborted();
