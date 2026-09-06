@@ -175,8 +175,10 @@ export class CausalVfs {
       throw error;
     } finally {
       for (const entry of staged) {
-        await fs.rm(entry.temporary, { force: true }).catch(() => {});
-        if (!entry.keepBackup) await fs.rm(entry.backup, { force: true }).catch(() => {});
+        // A successful rename consumed the temporary path. These are known
+        // files, so unlink avoids rm's extra type probe; missing files stay benign.
+        if (!entry.replaced) await fs.unlink(entry.temporary).catch(() => {});
+        if (entry.existed && !entry.keepBackup) await fs.unlink(entry.backup).catch(() => {});
       }
       if (failed) for (const dir of createdDirs.toReversed()) await fs.rmdir(dir).catch(() => {});
     }
