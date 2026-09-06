@@ -6,6 +6,7 @@ node_modules/
 .env.*
 .npm/
 coverage/
+.supernova-perf/
 .tokenzero/
 **/.tokenzero/
 .fszero/

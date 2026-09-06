@@ -4,8 +4,27 @@ import stringWidth from "string-width";
 const ELLIPSIS = "…";
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
+const widthCache = new Map();
+let cachedWidthChars = 0;
+const MAX_WIDTH_CACHE_CHARS = 512_000;
+
 export function measureWidth(text) {
-  return stringWidth(String(text ?? "").replace(/\t/g, "   "));
+  const raw = String(text ?? "");
+  const cached = widthCache.get(raw);
+  if (cached !== undefined) return cached;
+  const width = stringWidth(raw.replace(/\t/g, "   "));
+  // Cache immutable text only, never host/theme/result objects. Bound both
+  // bookkeeping and retained text; unusually long lines bypass retention.
+  if (raw.length <= 4096) {
+    while (widthCache.size >= 4096 || cachedWidthChars + raw.length > MAX_WIDTH_CACHE_CHARS) {
+      const oldest = widthCache.keys().next().value;
+      widthCache.delete(oldest);
+      cachedWidthChars -= oldest.length;
+    }
+    widthCache.set(raw, width);
+    cachedWidthChars += raw.length;
+  }
+  return width;
 }
 
 function takePrefix(text, width) {

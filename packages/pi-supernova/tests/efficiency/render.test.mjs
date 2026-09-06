@@ -3,6 +3,24 @@ import assert from "node:assert/strict";
 import { renderSupernovaResult, measureWidth } from "../../src/ui/render.js";
 import { progressEmitter } from "../../index.js";
 
+import stringWidth from "string-width";
+
+test("width memoization preserves the oracle through eviction and mutable inputs", () => {
+  const fragments = ["ascii", "\t", "😀", "👩‍💻", "e\u0301", "가", "中", "\x1b[31mred\x1b[0m", "\x1b]8;;https://example.test\x07link\x1b]8;;\x07", "\u200d", "\ud800", "\r\n"];
+  for (let i = 0; i < 10_000; i++) {
+    const text = i + fragments[i % fragments.length] + fragments[(i * 7) % fragments.length];
+    assert.equal(measureWidth(text), stringWidth(text.replace(/\t/g, "   ")));
+  }
+  let value = "a";
+  const changing = { toString: () => value };
+  assert.equal(measureWidth(changing), 1);
+  value = "😀\t";
+  assert.equal(measureWidth(changing), 5);
+  assert.equal(measureWidth(null), 0);
+  const huge = "😀".repeat(5000);
+  assert.equal(measureWidth(huge), stringWidth(huge));
+});
+
 const theme = { fg: (_, text) => text, bg: (_, text) => text, bold: text => text };
 const render = (trace, options = {}, context = { state: {} }) => renderSupernovaResult(
   { details: { ok: true, trace } }, options, theme, context,
