@@ -44,6 +44,7 @@ function formatDiffRows(diff, theme, maxShown = 6) {
 function stripUnsafeControls(value) {
 	// Exactly the C0/DEL/C1 ranges previously filtered code point by code point.
 	// Native replacement avoids rebuilding every already-clean Unicode string.
+	// eslint-disable-next-line no-control-regex -- intentional terminal-control filtering
 	return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "");
 }
 

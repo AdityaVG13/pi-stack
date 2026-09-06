@@ -11,6 +11,13 @@ test("width memoization preserves the oracle through eviction and mutable inputs
     const text = i + fragments[i % fragments.length] + fragments[(i * 7) % fragments.length];
     assert.equal(measureWidth(text), stringWidth(text.replace(/\t/g, "   ")));
   }
+  const chrome = [...Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)), ...Array.from({ length: 128 }, (_, i) => String.fromCharCode(0x2500 + i)), "·×…✓✗"];
+  for (const glyph of chrome) {
+    for (const sgr of ["", "\x1b[m", "\x1b[31m", "\x1b[38;2;10;20;30m", "\x1b[999m", "\x1b[38:2::1:2:3m"]) {
+      const text = sgr + glyph + " ascii " + glyph + "\x1b[0m";
+      assert.equal(measureWidth(text), stringWidth(text));
+    }
+  }
   let value = "a";
   const changing = { toString: () => value };
   assert.equal(measureWidth(changing), 1);
