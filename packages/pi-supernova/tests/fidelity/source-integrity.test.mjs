@@ -3,8 +3,24 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { engineFixture } from "../helpers/engine.mjs";
-import { buildMultiEditDiff } from "../../src/fs/diff.js";
+import { buildMultiEditDiff, buildPatchDiff } from "../../src/fs/diff.js";
 import { renderSupernovaResult } from "../../index.js";
+
+it("patch deletions retain post-edit coordinates after earlier hunks shift source", async t => {
+  const f = await engineFixture(t);
+  const lines=Array.from({length:60},(_,i)=>"line "+(i+1));
+  lines[0]="first"; lines[49]="remove-me"; lines[50]="sentinel-after-delete";
+  const expansion=Array.from({length:50},(_,i)=>"expanded "+i);
+  await f.write("patch.txt",lines.join("\n")+"\n");
+  const patch="--- a/patch.txt\n+++ b/patch.txt\n@@ -1,1 +1,50 @@\n-first\n"+expansion.map(line=>"+"+line+"\n").join("")+"@@ -50,1 +98,0 @@\n-remove-me\n";
+  const result=await f.execute('return await edit({path:"patch.txt",patch:'+JSON.stringify(patch)+'});');
+  assert.equal(await fs.readFile(path.join(f.root,"patch.txt"),"utf8"),[...expansion,...lines.slice(1,49),...lines.slice(50)].join("\n")+"\n");
+  assert.match(result.details.result,/99 sentinel-after-delete/);
+  const removed=buildPatchDiff("patch.txt",patch).lines.filter(row=>row.type==="remove");
+  assert.deepEqual(removed.map(row=>[row.lineNum,row.newLineNum]),[[1,1],[50,99]]);
+  const atStart=buildPatchDiff("first.txt","@@ -1,1 +0,0 @@\n-first\n");
+  assert.equal(atStart.lines[0].newLineNum,1);
+});
 
 it("commit rejects a previously checked symlink retargeted outside the workspace", async t => {
   const f = await engineFixture(t);

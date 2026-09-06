@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.1] - 2026-09-06
+
+### Fixed
+
+- Preserve post-edit coordinates for patch deletions, including zero-length new ranges. After an earlier hunk inserts lines, the edit result now opens the actual deletion region rather than an unrelated earlier source window. File mutation semantics are unchanged.
+
+### Tests
+
+- Add a focused shifted-deletion regression and an opt-in stress runner that can target an isolated npm installation. Cover concurrent programs, 129-read batches, contended writes, cancellation after confirmed staging, immutable progress frames, source fidelity and cold lookup across 5,000 files.
+
 ## [0.3.0] - 2026-09-05
 
 ### Source operations

@@ -8,6 +8,7 @@
     "test:papercuts": "npm test --prefix packages/pi-papercuts",
     "test:deferred": "npm test --prefix packages/pi-deferred-context-engine",
     "test:supernova": "npm test --prefix packages/pi-supernova",
+    "stress:supernova": "node packages/pi-supernova/tests/efficiency/stress.mjs",
     "release-check": "node scripts/release-check.mjs",
     "pack:all": "npm pack --prefix packages/pi-papercuts && npm pack --prefix packages/pi-deferred-context-engine && npm pack --prefix packages/pi-supernova",
     "lint:supernova": "oxlint packages/pi-supernova"

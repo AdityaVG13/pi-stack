@@ -69,6 +69,18 @@ cd packages/pi-supernova && npm test
 npm test
 ```
 
+Opt-in Supernova stress checks (no provider calls; temporary fixtures are retained):
+
+```bash
+npm run stress:supernova
+# Test an isolated npm installation instead of the checkout:
+SUPERNOVA_PACKAGE_ROOT=/path/to/install/node_modules/pi-supernova \
+SUPERNOVA_STRESS_RUNS=2048 npm run stress:supernova
+```
+
+This exercises concurrent programs, contended commits, cancellation after staged
+writes, read batching, source fidelity and lookup across 5,000 files.
+
 Publish (each package on its own):
 
 ```bash

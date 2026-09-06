@@ -74,10 +74,11 @@ export function buildPatchDiff(filePath, patchText) {
   let inHunk = false;
 
   for (const patchLine of patchLines) {
-    const headerMatch = (/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)/).exec(patchLine);
+    const headerMatch = (/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?/).exec(patchLine);
     if (headerMatch) {
-      oldLineNum = Number(headerMatch[1]);
-      newLineNum = Number(headerMatch[2]);
+      // A zero-length range names the line before the insertion/deletion point.
+      oldLineNum = Number(headerMatch[1]) + Number(headerMatch[2] === "0");
+      newLineNum = Number(headerMatch[3]) + Number(headerMatch[4] === "0");
       inHunk = true;
       continue;
     }
@@ -86,7 +87,7 @@ export function buildPatchDiff(filePath, patchText) {
     if (!kind) continue;
     if (kind === "remove") {
       removed += 1;
-      lines.push({ type: "remove", lineNum: oldLineNum, text: patchLine.slice(1) });
+      lines.push({ type: "remove", lineNum: oldLineNum, newLineNum, text: patchLine.slice(1) });
       oldLineNum += 1;
     } else if (kind === "add") {
       added += 1;
