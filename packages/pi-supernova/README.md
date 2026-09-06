@@ -153,11 +153,14 @@ runs in a disposable process through its actual session registry, with networkin
 denied. The Pi runner supplies a minimal tool registry, not a full provider session.
 
 The local measurement compares identical eight-file programs with coalescing off,
-coalescing on, and a pristine-ready worker. It reports p50/p95 and bridge calls.
+coalescing on, and a pristine-ready worker. It reports latency percentiles,
+observed maxima, raw samples and bridge calls. Set `SUPERNOVA_MEASURE_SAMPLES`
+(20 to 10000; default 200) for longer runs. Maxima describe the measured sample,
+not hard real-time guarantees.
 It excludes model latency, provider tokens and prewarm time; it is not a universal
 comparison against every CodeMode implementation.
 
-See [the original RED contract and implementation plan](docs/tdd-plan.md).
+See [the changelog](docs/CHANGELOG.md) for changes and compatibility notes.
 
 ## Research and prior art
 
