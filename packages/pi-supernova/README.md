@@ -1,206 +1,179 @@
 # pi-supernova
 
-[![npm](https://img.shields.io/npm/v/pi-supernova.svg)](https://www.npmjs.com/package/pi-supernova)
-[![license](https://img.shields.io/npm/l/pi-supernova.svg)](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/LICENSE)
-[![node](https://img.shields.io/node/v/pi-supernova.svg)](https://nodejs.org)
-[![pi-package](https://img.shields.io/badge/pi--package-extension-7aa2f7)](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md)
+**One nova / `supernova({code})` invocation. Four commands inside CodeMode.**
 
-**CodeMode for [Pi](https://pi.dev) and [OMP](https://omp.sh).** One tool, one guest program: progressive discovery, a hard result bottleneck, and Amdahl-aware parallel waves.
+```javascript
+const source = await read("validateRefreshToken");
+return source;
+```
+
+The model submits JavaScript, not four separately advertised native tools.
+Ordinary JavaScript control flow remains available; the guest command bindings
+are only `read`, `edit`, `write`, and `bash`. Supernova supplies retrieval,
+transactional file operations, batching, bounded results and the grouped nova UI.
+
+## Install and update
+
+Install the published package in your host:
 
 ```bash
 pi install npm:pi-supernova
 omp install npm:pi-supernova
 ```
 
-Restart the host after install. OMP uses the current session’s enabled tool registry, independent of extension load order.
-
-Pi 0.85.0 supplies tool schemas but has no cross-extension execution API. Supernova uses native adapters and executors registered through its API instance.
-
-An unrelated Pi extension’s tools are not callable through Supernova. OMP 18.1.10 supports those calls through its session registry.
-
-The runtime, transaction, patch, output-limit, and renderer fixes share the same code on both hosts. Disabled configured tools are not callable.
-
----
-
-## Why
-
-| | Stock multi-tool prompt | **pi-supernova** |
-|--|-------------------------|------------------|
-| Schema tax | Every tool in context | Thin catalog + on-demand `describe` |
-| Multi-step | Model stitches turns | One in-process program |
-| Parallel reads | Ad hoc | `callMany` Auto / `parallel()` |
-| Hosts | Separate packages | Same tarball for Pi **and** OMP |
-
-Guest code runs as an `AsyncFunction` in a new worker for each program. It has the same trust level as host `bash`.
-
-The host parses the bounded source with Acorn before execution. Tool calls use RPC. Deadlines and cancellation cover worker startup, tool discovery, and execution.
-
-A completed worker cannot supply callbacks or globals to another program. Concurrent programs have separate transactions, traces, cancellation signals, and call budgets.
-
----
-
-## Quick example
-
-```js
-async () => {
-  const hits = await nova.search("read file contents");
-  await nova.describe("read");
-
-  const a = await nova.call("read", { path: "src/index.ts" });
-  const wave = await nova.callMany([
-    { name: "read", args: { path: "a.ts" } },
-    { name: "read", args: { path: "b.ts" } },
-  ]);
-
-  return { preview: a.value.slice(0, 200), mode: wave.mode, n: wave.length };
-}
-```
-
-Globals: `nova`, `parallel`, `pipeline`, `console`, plus shorthand `read` (path or path array), `write`, `edit`, `patch`, `evidence`, `surface`, `snap`, `bash`, and `exec`.
-
-Read discipline that keeps context small: `evidence(question)` across the repo, or `read(path, {about: question})` for one file (full structure, only relevant bodies expanded, ~65% fewer tokens than the file) → `read(path, offset, limit)` only for the lines you will edit.
-
-Results never repeat what the model already saw: a run of lines from an earlier result collapses to `⋯ 23 lines same as #12 · host-bridge.js:40–62 ⋯`; changed lines always show; `read(path, a, n)` shows a cited range again. `edit` returns the post-edit lines, a structural check, and who else references a changed declaration; a failing `bash` attaches the source behind the `path:line` it printed. A read→edit→verify loop costs ~15% of the naive token count.
-
-File search is an in-process port of [fff](https://github.com/dmtrKovalenko/fff): `glob("hostbrdge")` finds `host-bridge.js` (typo-tolerant, frecency- and git-status-ranked), `grep` is smart-case with declaration lines first and a fuzzy fallback. None of it spawns a process.
-
-The returned value is rendered as a compact JS literal (unquoted keys, one item per line only when a container exceeds 120 columns) and capped at `maxReturnChars`. Strings are returned raw. This costs ~43% fewer tokens than pretty JSON. Return small shaped values, not raw file dumps.
-
-Unified Pi/OMP card: one aligned row per call (status · tool · duration · target) with bounded mutation diffs.
-
-```text
-╭─── nova: 4 calls · 6.9s ─────────────────────────────────────╮
-│ ✓ bash      6.2s  python3 - <<'EOF' …+3 lines                 │
-│ × bash     120ms  exit 3  pytest -q                           │
-│ ✓ read       3ms  packages/pi-supernova/host-bridge.js        │
-│ ✓ edit       4ms  +1/-1 src/a.ts                              │
-│    -143 │ - const oldValue = before;                          │
-│    +143 │ + const newValue = after;                           │
-╰───────────────────────────────────────────────────────────────╯
-```
-
-Multi-line commands show their first line and a hidden-line count. Expand the card to show the complete bounded return value and logs.
-
-Expanded text wraps at the terminal width without a preview-line limit. Operation lists and mutation diffs keep their separate 24-row budgets.
-
----
-
-## API
-
-| API | Role |
-|-----|------|
-| `nova.search(query, limit?)` | Thin catalog hits |
-| `nova.describe(name)` | Complete JSON input schema on demand; explicit failure when no usable schema is available |
-| `nova.call(name, args)` | Host tool or native adapter |
-| `nova.callMany([{name,args}])` | Auto parallel wave; iterable array with `.mode` / `.results` |
-| `nova.evidence(query, {k?, path?, maxChars?})` | Top-K source spans (path, lines, verbatim text) that answer a question. Zero-token evidence selection after Zero-Mem; ~68% fewer tokens than reading the files |
-| `read(path, {about})` | Whole-file outline with only the relevant bodies expanded; folded bodies show `line … N lines` |
-| `nova.surface(path)` | Structural outline for a source file |
-| `nova.snap(query, searchRoot?)` | Defining file (workspace-relative), line, signature, confidence, and context for a concept; served from the in-process index in well under 1ms |
-| `nova.has(name)` | Whether a catalog or native tool is callable (sync) |
-| `parallel(thunks)` / `pipeline(items, …stages)` | Array-based helpers; pipeline stages must be functions |
-| `nova.speculate(fn)` | Counterfactual branch (rollback / commit) |
-
-`nova.call` returns an explicit `{ok, value}` envelope. Convenience helpers throw when a host tool reports failure.
-
-`callMany` runs known read-only tools concurrently. Unknown tools and mutating actions run in order, including LSP rename operations.
-
-`nova.describe` preserves required fields, unions, enums, nested objects, and numeric constraints. OMP ArkType and Zod schemas convert to JSON Schema.
-
-Root Snap searches ignore hidden files. Passing a hidden search root includes hidden files beneath that root; Git metadata is always excluded.
-
----
-
-## Configuration
-
-Optional `~/.pi/agent/supernova.json` or `~/.omp/agent/supernova.json`  
-(or `PI_SUPERNOVA_CONFIG` / `PI_CONFIG_DIR` / `OMP_CONFIG_DIR`):
-
-```json
-{
-  "timeoutMs": 60000,
-  "maxCodeChars": 48000,
-  "maxBridgeCalls": 256,
-  "maxCallResultChars": 65536,
-  "maxReturnChars": 32000,
-  "maxHeapMb": 512,
-  "seenWindow": 40,
-  "maxSearchResults": 12,
-  "spillDir": null
-}
-```
-
-`maxCallResultChars` bounds text per call. A batch shares one text budget across all items; it does not repeat a joined copy.
-
-Envelope fields and JSON encoding add overhead. Details have a separate 2,000-character JSON budget. Truncation flags cover returns, raw objects, and logs.
-
-An optional `spillDir` retains complete truncated text. Inline spill footers and truncation markers fit within the configured text limit.
-
-`seenWindow` is how many programs back the seen-ledger remembers (set 0 to disable collapsing). `maxHeapMb` caps the guest worker heap (V8 `resourceLimits` on Node) and arms a process-RSS watchdog that terminates a runaway program on both Node and Bun.
-
-Defaults also set `excludeTools` (includes `supernova` and DCE helpers). An empty `"excludeTools": []` **replaces** those defaults, so omit the key unless you mean that.
-
-Slash command `/supernova`: callable catalog size, external tools, native adapters, and session token stats.
-
----
-
-## Install variants
+Local checkout installs are for development, not distribution:
 
 ```bash
-# Path / dogfood
 pi install /path/to/pi-stack/packages/pi-supernova
-omp install /path/to/pi-stack/packages/pi-supernova
-
-# Monorepo clone
-git clone https://github.com/AdityaVG13/pi-stack.git
-pi install ./pi-stack/packages/pi-supernova
-omp install ./pi-stack/packages/pi-supernova
 ```
 
-Pair with DCE last if you use it: `omp install npm:pi-deferred-context-engine`.
+Git pushes do not update npm installations. Publish the new npm version first;
+then reinstall it in the host. Reinstall explicitly when an existing version
+range excludes the new minor version (for example, `^0.2.0` excludes `0.3.0`).
 
----
+Both package manifests use `index.js`. The old `src/bridge/pi-extension.ts` path
+remains a compatibility entrypoint but no longer imports Pi tool factories.
+After updating JavaScript sources, fully exit Pi and resume in a new process.
+Pi 0.85.1 can retain native ESM modules across `/reload`, even after its extension
+factory cache is cleared; `/reload` alone is not sufficient in that case.
+OMP uses the same shared engine; restart it after updating the link as well.
 
-## Troubleshooting
+For deferred-context-engine, pin `supernova` in `alwaysActive` and `neverDefer`.
+Remove the four native names from those pins and restore their previous blocks
+if you want the wrapper to be the only file/shell surface. Preserve unrelated
+settings. The runtime does not silently rewrite your tool policy.
 
-| Symptom | Fix |
-|---------|-----|
-| `unknown tool "…"` | Use `nova.search("")` and `/supernova`. Enable the tool in the current session. Restart after package changes. |
-| `Rendered line exceeds terminal width` | Install the current package and restart so the Unicode width code reloads. |
-| `callMany` / not iterable | ≥0.0.1; the return is an array with `.mode` / `.results` |
-| Extension missing on OMP | `omp install npm:pi-supernova` (needs `"omp".extensions`) |
+## Four guest commands
 
----
+| Function | Examples and behavior |
+| --- | --- |
+| `read` | `read(path, offset?, limit?)`, `read({path,offset,limit})`; one-based line windows |
+| `read` | `read(directory)`, `read("symbol or question")`, `read(path,{about:question})`; selection and focused context |
+| `read` | `read({query,evidence:true})`; ranked evidence with provenance; optional `path` scopes discovery |
+| `read` | `read({path,outline:true})`; structural declarations |
+| `read` | `read([path1,path2])`; up to 64 paths, ordered values with labelled individual failures |
+| `edit` | `edit(path,oldText,newText)`, `edit({path,edits:[{oldText,newText}]})`; related edits validated against one original file |
+| `edit` | `edit({path,patch})`; unified patch application |
+| `edit` | `edit(async () => {...})`; filesystem-only checkpoint, described below |
+| `write` | `write(path,text)`, `write({path,content})`; atomic replacement |
+| `bash` | `bash(command,{cwd,timeoutMs})`, `bash({command,timeoutMs})`; bounded output, nonzero exits throw |
+| `bash` | `bash({command,args:[...]})`; literal argv, without shell expansion of argument strings |
 
-## Limitations
+`bash` also accepts `timeout` in seconds for familiar object arguments. `timeoutMs`
+is milliseconds and takes precedence. Session environment variables are taken
+from the current execution context, not inherited from a different parent session.
 
-- Guest JS is **unsandboxed**. Adapter path jails are not a boundary against `import("node:fs")`. The worker only contains hangs, exits, and memory, not intent.
-- Guest error messages carry `(line:col)` on Node; Bun's engine does not expose guest-relative positions.
+Source selection distinguishes found, ambiguous, missing and incomplete results.
+Only a found result selects a path. Retrieval is lexical/structural, not an LLM
+semantic search. Focused evidence is selected context, not the entire repository.
 
-## Transactions and file freshness
+## Execution and automatic batching
 
-- `bash` and mutating host tools commit pending writes before execution. Later rollback cannot undo those changes or external effects.
-- Native commits stage replacements and backups before installation. A commit failure restores earlier replacements; a recovery failure reports retained backup paths.
-- A nested `nova.speculate` branch cannot call external mutators. Await each branch before returning.
-- Native reads use current disk content unless a staged write replaces it. Evidence search includes new staged files.
-- Workspace file-list updates use filesystem watchers. Without a working watcher, external new files can take 10 seconds to appear in indexed searches.
+Compatible independently started reads coalesce at the worker/host boundary.
+No additional batching command is required. Individual promises preserve their
+values, errors and per-read budgets. File reads have bounded parallelism; writes,
+edits, shell calls and checkpoint transitions form ordering barriers.
 
-This is a pre-1.0 package. APIs and the terminal display can change between minor releases.
+This does **not** reorder sequential `await`s or predict future model decisions.
+An explicit path-array read uses an aggregate text budget; automatic coalescing
+retains each independent read's budget instead of silently shrinking its result.
+
+Every program runs in a fresh worker. One pristine worker is prepared for the next
+invocation, then disposed on session shutdown. Executed workers are never reused,
+so guest globals cannot leak into a later program. Worker preparation still costs
+CPU and memory; it is moved off the next invocation's critical path, not eliminated.
+
+File changes are staged until program success. A throw before an external-mutation
+barrier rolls them back. Shell execution flushes preceding changes; external shell
+side effects cannot be rolled back. Stale commits fail explicitly rather than
+silently overwriting successful concurrent changes. This is not a cross-process
+filesystem lock.
+
+`edit(async () => {...})` creates a nested filesystem checkpoint. It returns
+`{ok:true,committed:true,value}` on success or `{ok:false,committed:false,error}` on
+failure. Shell commands, overlapping/nested checkpoints, and concurrent commands
+outside the active callback are rejected. Await the checkpoint before proceeding.
+
+## Context, caching and failure fidelity
+
+- Plain reads are not replaced with earlier-context references. A local cache hit
+  is not proof the model still retains an earlier result after compaction.
+- Oversized text reads provide an exact next-line offset. A single line too large
+  for the budget fails explicitly instead of pretending it was read completely.
+- Returned images remain image content blocks, including in arrays/objects. Images
+  not returned by the program stay out of model output. Returned images are limited
+  to 16 attachments / 20 MiB; resize or return fewer when necessary.
+- Intermediate values stay inside CodeMode unless returned or logged. Final text,
+  errors and logs are bounded with explicit truncation. Details support rendering;
+  they are not a second model-facing transcript.
+- Source indexing/caching remains internal. Reads after mutations invalidate stale
+  state. There is no claim of provider-cache or total-task token savings.
+
+Default limits are in `src/config/config.default.json`. Configuration loads from
+`~/.pi/agent/supernova.json`, the configured host directory, or `PI_SUPERNOVA_CONFIG`.
+Text limits are character budgets, not tokenizer counts. `/supernova` reports
+programs and output characters without labelling characters as tokens.
+
+## Security and host boundary
+
+CodeMode executes trusted JavaScript in a terminable worker, **not a security
+sandbox**. The four adapters constrain writes/edits to the workspace and allow
+explicit external reads. JavaScript imports and shell commands still have process
+privileges. Do not run untrusted programs as though these adapters isolate them.
+
+Pi preflights the outer `supernova` call. Internal primitives do not emit ordinary
+native `tool_call` events, so third-party guards that only recognize top-level
+`edit` or `bash` need CodeMode-aware handling. Configured exclusions and supported
+host-session execution safeguards remain enforced. Actual-host smoke checks are
+not a claim that every third-party permission extension has been validated.
+
+## Development and evidence
+
+Implementation is grouped under `src/`; all replacement tests are under `tests/`.
+The original 12 red acceptance tests were left unchanged. Additional strict tests
+cover batching fidelity, image/context retention, checkpoints, mutation ordering,
+external symlinks, deadlines, worker isolation and execution-context environment.
+The former deleted suite has not been silently reinstated.
+
+```bash
+npm test --prefix packages/pi-supernova
+npm run lint:supernova
+npm run measure --prefix packages/pi-supernova
+
+PI_SUPERNOVA_PI_ROOT=/path/to/pi-coding-agent \
+PI_SUPERNOVA_OMP=/path/to/omp \
+npm run test:hosts --prefix packages/pi-supernova
+```
+
+The explicit host runner requires macOS network sandboxing and fails, rather than
+skips, when prerequisites are absent. Verified locally against Pi 0.85.1 and OMP
+18.1.11: CodeMode execution, four primitives, automatic read coalescing, checkpoints,
+images and failed execution. Pi's actual loader/runner and TUI are exercised; OMP
+runs in a disposable process through its actual session registry, with networking
+denied. The Pi runner supplies a minimal tool registry, not a full provider session.
+
+The local measurement compares identical eight-file programs with coalescing off,
+coalescing on, and a pristine-ready worker. It reports p50/p95 and bridge calls.
+It excludes model latency, provider tokens and prewarm time; it is not a universal
+comparison against every CodeMode implementation.
+
+See [the original RED contract and implementation plan](docs/tdd-plan.md).
 
 ## Research and prior art
 
-Supernova's retrieval and result shaping implement published methods. Where a paper's mechanism needs a model call it stays out of the tool; only the deterministic parts are implemented, and each is cited at the code that implements it.
+These references describe internal algorithms, not additional guest commands.
+
+The existing implementation references are retained below. Mechanisms requiring
+an additional model call are not silently invoked by the tools.
 
 | Work | What we use it for | Where |
 |------|--------------------|-------|
-| **Zero-Mem: Zero-Token Memory Operations for LLM Agents**, Xiao, Zhu, Zhang, Chen, Hong, Zhuang, Zhang, Chen, Ouyang, Ren, Huang (arXiv:2607.29377) | `evidence(query)`: entity–context graph with co-occurrence weights (eq. 3–4), turn/window/episode hierarchy as line/span/file (eq. 5, 11), query profile and relational/local routing (eq. 6–7), lexical entity alignment and one propagation step (eq. 8–9), personalized PageRank over spans (eq. 10), per-view normalisation and ρ-weighted fusion (eq. 12–13), closure with bridges and neighbours (eq. 14), deterministic calibration (eq. 15). Top-K = 5 follows the paper's Top-5 ≈ Top-10 finding. | `evidence.js` |
-| **Agent Zero Memory: Provenance-Aware Long-Term Memory for LLM Agents**, Zhu, Wu (arXiv:2608.29606) | Every returned unit carries provenance (path, line range, verbatim text); the L0→L1→L2 read discipline (`surface` → `evidence`/`read(path, {about})` → `read(path, offset, limit)`); the citation-lock idea that a model should only cite what it actually opened. | `evidence.js`, `outline.js`, tool guidance |
+| **Zero-Mem: Zero-Token Memory Operations for LLM Agents**, Xiao, Zhu, Zhang, Chen, Hong, Zhuang, Zhang, Chen, Ouyang, Ren, Huang (arXiv:2607.29377) | Evidence selection: entity–context graph with co-occurrence weights (eq. 3–4), turn/window/episode hierarchy as line/span/file (eq. 5, 11), query profile and relational/local routing (eq. 6–7), lexical entity alignment and one propagation step (eq. 8–9), personalized PageRank over spans (eq. 10), per-view normalisation and ρ-weighted fusion (eq. 12–13), closure with bridges and neighbours (eq. 14), deterministic calibration (eq. 15). Top-K = 5 follows the paper's Top-5 ≈ Top-10 finding. | `src/context/evidence.js` |
+| **Agent Zero Memory: Provenance-Aware Long-Term Memory for LLM Agents**, Zhu, Wu (arXiv:2608.29606) | Every returned unit carries provenance (path, line range, verbatim text); the L0→L1→L2 read discipline (`read(query)` → `read(path, {about})` → `read(path, offset, limit)`); the citation-lock idea that a model should only cite what it actually opened. | `src/context/evidence.js`, `src/context/outline.js`, tool guidance |
 | **Harness-of-Harness: Multi-Day Autonomous Software Development with Continual Improvement**, Yan, Su, et al. (arXiv:2609.01481) | Progressive disclosure (index first, detail on demand) and carrying evidence forward instead of reconstructing it from code. | outline / result shaping |
 | **Act More, Decide Less: Skill-Guided Adaptive Action Chunking for Long-Horizon LLM Agents**, Yang, Jin, Zhao, et al. (arXiv:2609.02042) | Framing: one supernova program is an action chunk (one model decision, many primitive actions, stop at the first failing one). | runtime design |
-| **fff**, Dmitriy Kovalenko, MIT, <https://github.com/dmtrKovalenko/fff> | File search. We reimplemented fff's ranking in plain JavaScript after reading its Rust sources (`crates/fff-core/src/score.rs`, `dbs/frecency.rs`, `path_utils.rs`); the formulas and constants are fff's, the code is ours, and nothing runs out of process. Ported: typo-tolerant fuzzy path matching with boundary/consecutive/case bonuses and smart-case; exact-filename +40% and filename +20% bonuses; frecency boost `base·f/100` with fff's AI-mode decay (3-day half-life, 7-day window) and modification-recency steps (30s/5m/15m/1h/4h); git-modified +15%; directory-distance penalty from the current file (−1 per hop, floor −20); definition-first result hinting; fuzzy fallback on zero literal matches; weak-match cutoff; watcher-driven index refresh. Not ported: fff's SIMD/frizbee matcher (ours is an fzf-style greedy match with backward tightening), LMDB persistence (frecency is per session), and the MCP/Neovim surfaces. | `fuzzy.js`, `repo-index.js`, `host-bridge.js` |
-
-fff is © Dmitriy Kovalenko and contributors, released under the MIT License; this package is also MIT. If you install fff's own Pi extension (`@ff-labs/pi-fff`) alongside supernova, its `ffgrep`/`fffind` tools are captured and callable through `nova.call` like any other host tool.
+| **fff**, Dmitriy Kovalenko, MIT, <https://github.com/dmtrKovalenko/fff> | File search. We reimplemented fff's ranking in plain JavaScript after reading its Rust sources (`crates/fff-core/src/score.rs`, `dbs/frecency.rs`, `path_utils.rs`); the formulas and constants are fff's, the code is ours, and nothing runs out of process. Ported: typo-tolerant fuzzy path matching with boundary/consecutive/case bonuses; smart-case; exact-filename +40% and filename +20% bonuses; frecency boost `base·f/100` with fff's AI-mode decay (3-day half-life, 7-day window) and modification-recency steps (30s/5m/15m/1h/4h); git-modified +15%; directory-distance penalty from the current file (−1 per hop, floor −20); definition-first result hinting; fuzzy fallback on zero literal matches; weak-match cutoff; watcher-driven index refresh. Not ported: fff's SIMD/frizbee matcher (ours is an fzf-style greedy match with backward tightening), LMDB persistence (frecency is per session), and the MCP/Neovim surfaces. | `src/context/fuzzy.js`, `src/context/repo-index.js`, `src/bridge/host-bridge.js` |
 
 ## License
 
-MIT · [AdityaVG13/pi-stack](https://github.com/AdityaVG13/pi-stack/tree/main/packages/pi-supernova)
+MIT. fff is © Dmitriy Kovalenko and contributors, also MIT.

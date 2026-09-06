@@ -1,7 +1,7 @@
 {
   "name": "pi-supernova",
-  "version": "0.1.0",
-  "description": "Dual-host CodeMode for Pi/OMP: progressive tool discovery, result bottleneck, and Amdahl Auto parallel.",
+  "version": "0.3.0",
+  "description": "One CodeMode invocation for Pi and OMP, with four guest commands, automatic read batching and source context.",
   "type": "module",
   "author": "AdityaVG13",
   "license": "MIT",
@@ -24,38 +24,15 @@
   "exports": "./index.js",
   "files": [
     "index.js",
-    "catalog.js",
-    "host-bridge.js",
-    "bottleneck.js",
-    "parallel.js",
-    "runtime.js",
-    "guest-worker.js",
-    "repo-index.js",
-    "evidence.js",
-    "fuzzy.js",
-    "outline.js",
-    "ledger.js",
-    "check.js",
-    "search.js",
-    "format.js",
-    "patch.js",
-    "vfs.js",
-    "workspace.js",
-    "config.js",
-    "config.default.json",
+    "src/",
+    "docs/",
     "README.md",
-    "LICENSE",
-    "CHANGELOG.md",
-    "snap.js",
-    "diff.js",
-    "render.js",
-    "render-measure.js",
-    "omp-frame.js",
-    "surface.js",
-    "decode.js"
+    "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test tests/*/*.test.mjs",
+    "test:hosts": "node tests/hosts/verify.mjs",
+    "measure": "node tests/efficiency/measure.mjs",
     "prepublishOnly": "npm test && node ../../scripts/preflight.mjs"
   },
   "pi": {
@@ -69,9 +46,13 @@
     ]
   },
   "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
   "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
     "typebox": {
       "optional": true
     }

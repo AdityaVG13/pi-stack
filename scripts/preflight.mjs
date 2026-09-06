@@ -11,16 +11,27 @@
  * Exit 0 = safe to publish; exit 1 = refuse with reasons.
  */
 import { execSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 
 const dir = resolve(process.argv[2] ?? ".");
 const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
-const shipped = new Set([...(pkg.files ?? []), "package.json"]);
+const shipped = new Set(["package.json"]);
 const problems = [];
+const pending = [...(pkg.files ?? [])];
+while (pending.length) {
+  const file = pending.pop();
+  try {
+    if (statSync(join(dir, file)).isDirectory()) {
+      pending.push(...readdirSync(join(dir, file)).map(entry => join(file, entry)));
+    } else shipped.add(file);
+  } catch {
+    problems.push(`files lists ${file} but it does not exist on disk`);
+  }
+}
 
-for (const file of [...shipped].filter((f) => f.endsWith(".js"))) {
+for (const file of [...shipped].filter((f) => /\.(js|ts)$/.test(f))) {
   let source;
   try {
     source = readFileSync(join(dir, file), "utf8");
@@ -28,11 +39,13 @@ for (const file of [...shipped].filter((f) => f.endsWith(".js"))) {
     problems.push(`files lists ${file} but it does not exist on disk`);
     continue;
   }
-  for (const match of source.matchAll(/from\s+["']\.\/([^"']+)["']/g)) {
-    if (!shipped.has(match[1])) problems.push(`${file} imports ./${match[1]} which is not in files`);
+  for (const match of source.matchAll(/from\s+["'](\.\.?\/[^"']+)["']/g)) {
+    const target = join(dirname(file), match[1]);
+    if (!shipped.has(target)) problems.push(`${file} imports ${match[1]} which is not in files`);
   }
-  for (const match of source.matchAll(/["'`]\.\/([\w.-]+\.json)["'`]/g)) {
-    if (!shipped.has(match[1])) problems.push(`${file} reads ./${match[1]} which is not in files`);
+  for (const match of source.matchAll(/["'`](\.\.?\/[\w./-]+\.json)["'`]/g)) {
+    const target = join(dirname(file), match[1]);
+    if (!shipped.has(target)) problems.push(`${file} reads ${match[1]} which is not in files`);
   }
 }
 

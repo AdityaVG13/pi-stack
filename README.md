@@ -6,9 +6,9 @@ Pi / OMP packages for [pi.dev](https://pi.dev) and [omp.sh](https://omp.sh). Eac
 |---------|------|---------|
 | [pi-papercuts](./packages/pi-papercuts) | Agent files friction notes into `.papercuts.jsonl` and keeps going | `pi install npm:pi-papercuts` · `omp install npm:pi-papercuts` |
 | [pi-deferred-context-engine](./packages/pi-deferred-context-engine) | Hides inactive tool/skill noise; promotes matches for one run via `search_tools` | `pi install npm:pi-deferred-context-engine` · `omp install npm:pi-deferred-context-engine` |
-| [pi-supernova](./packages/pi-supernova) | Dual-host CodeMode (`nova.search` / `describe` / `call`) | `pi install npm:pi-supernova` · `omp install npm:pi-supernova` |
+| [pi-supernova](./packages/pi-supernova) | One CodeMode invocation with `read`, `edit`, `write`, and `bash` inside; automatic read batching and ordered mutations | `pi install npm:pi-supernova` · `omp install npm:pi-supernova` |
 
-If you use deferred-context-engine, install it **last** so it sees tools other extensions registered. Load **pi-supernova early** so it can capture `registerTool` executors.
+If you use deferred-context-engine, install it **last** so it sees tools other extensions registered. **pi-supernova** exposes one `supernova({code})` tool on Pi and OMP. The four commands live inside CodeMode, not as native-tool replacements. See its README for context, security, and host-verification boundaries.
 
 the UI in the TUI for pi-supernova does NOT look good, i'll try and fix it with Astra
 
