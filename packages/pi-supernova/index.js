@@ -90,14 +90,15 @@ read("symbol or question") → locate and open source in one call, without an in
 read({query, resolve:true}) → {status,path,line,lines,text,complete,nextOffset?} for a direct resolve→edit handoff
 read(path, {about: question}) → relevant file bodies, or source selection inside a directory
 read({query, evidence:true}) → ranked evidence; read({path, outline:true}) → structural declarations
-write(path, text) → write a file
+write(path, text) → write a file; write({path,content,append:true}) appends a chunk without a bounded read
 edit(path, oldText, newText) → post-edit lines, checks, and references
 edit(async () => {...}) → filesystem checkpoint: commit on success, rollback on throw; no shell commands, nesting, or concurrent outside commands
 bash(command, {cwd?, timeoutMs?}) → bounded output; throws on non-zero exit
 bash({command, args:[...]}) → literal argv without shell expansion of arguments
 
 Only found selects and opens a file. Uncertain reads return ambiguous, not_found, or incomplete with no selected path. Use resolve:true for structured status checks; narrow the directory with path+about when uncertain.
-Object arguments also work: read({path, offset?, limit?, about?, outline?, evidence?, resolve?}), edit({path, edits:[{oldText,newText}]}), edit({path,patch}), write({path,content}), bash({command,timeoutMs?}).
+For read-modify-write, use read({path,complete:true}); it rejects partial output. Prefer edit for large files. Array reads reject failures; use Promise.allSettled for per-path outcomes.
+Object arguments also work: read({path, offset?, limit?, about?, outline?, evidence?, resolve?, complete?}), edit({path, edits:[{oldText,newText}]}), edit({path,patch}), write({path,content}), bash({command,timeoutMs?}).
 Independent read starts batch automatically. Mutations preserve submission order. Plain reads remain self-contained; oversized reads provide continuation offsets. Return only what the model needs. console.log is captured.`;
 
 export default function piSupernova(pi) {
@@ -152,7 +153,7 @@ export function registerCodeMode(pi) {
       "Use read, write, edit, and bash inside supernova. Start with read(question), or read(directory, {about: question}) for scoped source selection. A source question already opens the selected file; do not issue a redundant read. Use read({query,resolve:true}) and check status before editing its path. Explicit about/outline/evidence reads remain available when needed. Return a compact value.",
     ],
     parameters: Type.Object({
-      code: Type.String({ description: "JavaScript program: async body or arrow function." }),
+      code: Type.String({ maxLength: config.maxCodeChars ?? 48000, description: `JavaScript program: async body or arrow function. Maximum ${config.maxCodeChars ?? 48000} UTF-16 code units; split large writes into write({path,content,append:true}) chunks.` }),
       timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, description: "Hard timeout in ms." })),
     }, { required: ["code"] }),
     // One self-owned result frame is shared by Pi and OMP; renderCall stays empty

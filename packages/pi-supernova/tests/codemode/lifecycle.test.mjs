@@ -6,6 +6,16 @@ import { runGuestProgram, warmGuestWorker } from "../../src/runtime/runtime.js";
 import { engineFixture, limits } from "../helpers/engine.mjs";
 import { runCommand } from "../../src/fs/workspace.js";
 
+it("recursive source watchers do not keep an otherwise idle host alive", async t => {
+  const f = await engineFixture(t);
+  await fs.mkdir(path.join(f.root, "nested"));
+  await f.write("nested/source.js", "export const value = 1;");
+  const moduleUrl = new URL("../../src/context/repo-index.js", import.meta.url).href;
+  const code = `import {WorkspaceIndex} from ${JSON.stringify(moduleUrl)}; new WorkspaceIndex(() => {}).watch(${JSON.stringify(f.root)});`;
+  const result = await runCommand([process.execPath, "--input-type=module", "-e", code], {timeoutMs:1500});
+  assert.equal(result.exitCode, 0);
+});
+
 it("termination checks group quiescence but still kills surviving descendants", {skip:process.platform === "win32"}, async t => {
   const f = await engineFixture(t);
   const originalKill = process.kill;

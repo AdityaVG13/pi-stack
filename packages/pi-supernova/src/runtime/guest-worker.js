@@ -49,6 +49,12 @@ function unwrapValue(res) {
   return res;
 }
 
+function unwrapRead(res, args) {
+  const value = unwrapValue(res);
+  if (args.complete === true && res?.truncated) throw new Error("incomplete read: complete:true refuses truncated host output");
+  return value;
+}
+
 function unwrapJsonValue(res) {
   const value = unwrapValue(res);
   try {
@@ -124,8 +130,8 @@ function buildGuestApi(available, batchRead, runId, nativeArgv) {
       const wave = pending.slice(start, start + 64);
       const args = { ...wave[0].args, path: wave.map(job => job.args.path), _independent: true };
       const run = wave.length === 1
-        ? nova.call("read", wave[0].args).then(res => ({ values: [unwrapValue(res)], errors: [] }))
-        : nova.call("read", args).then(res => { unwrapValue(res); return { values: res.items, errors: res.itemErrors ?? [] }; });
+        ? nova.call("read", wave[0].args).then(res => ({ values: [unwrapRead(res, wave[0].args)], errors: [] }))
+        : nova.call("read", args).then(res => { unwrapRead(res, args); return { values: res.items, errors: res.itemErrors ?? [] }; });
       void run.then(({ values, errors }) => {
         if (!Array.isArray(values) || values.length !== wave.length) throw new Error("invalid batch read response");
         for (let i = 0; i < wave.length; i++) {
@@ -143,6 +149,7 @@ function buildGuestApi(available, batchRead, runId, nativeArgv) {
   const read = async (p, a, b) => {
     assertScope();
     const args = readArgs(p, a, b);
+    if (args.complete === true && (args.outline || args.evidence || args.about)) throw new Error("complete:true requires a raw file read, not an outline or evidence view");
     const evidencePath = isObject(p) && !Array.isArray(p) ? p.path : args.about ? p : undefined;
     p = args.path;
     if (args.evidence) return unwrapJsonValue(await invoke("evidence", { ...args, path: evidencePath, query: args.about ?? args.query ?? p }));
@@ -150,18 +157,21 @@ function buildGuestApi(available, batchRead, runId, nativeArgv) {
     if (Array.isArray(p)) {
       if (p.length > 64) throw new Error("read accepts at most 64 paths per batch");
       if (p.some(item => !isString(item) || !item.trim())) throw new Error("read paths must be non-empty strings");
-      const readEach = () => Promise.all(p.map(async item => {
-        try { return await read({ ...args, path: item }); }
-        catch (error) { return `[read error: ${item}] ${error.message}`; }
-      }));
+      const readEach = () => Promise.all(p.map(item => read({ ...args, path: item })));
       if (!batchRead || args.resolve) return readEach();
       const res = await invoke("read", args);
-      unwrapValue(res);
+      const failed = res?.itemErrors?.findIndex(error => error != null) ?? -1;
+      if (failed >= 0) throw new Error(`read failed for ${p[failed]}: ${res.itemErrors[failed]}; use Promise.allSettled(paths.map(path => read(path))) for per-path outcomes`);
+      unwrapRead(res, args);
       if (Array.isArray(res?.items)) return res.items;
       // Captured host executor without batch support: fan out.
       return readEach();
     }
-    if (!batchRead) return args.resolve ? unwrapJsonValue(await invoke("read", args)) : unwrapValue(await invoke("read", args));
+    if (!batchRead) {
+      const res = await invoke("read", args);
+      unwrapRead(res, args);
+      return args.resolve ? unwrapJsonValue(res) : unwrapRead(res, args);
+    }
     const key = JSON.stringify({ ...args, path: undefined });
     if (queuedReads.length && queuedReads[0].key !== key) flushReads();
     return new Promise((resolve, reject) => {

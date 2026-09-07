@@ -139,7 +139,7 @@ export async function runGuestProgram({ code, nova = {}, config = {}, signal, on
   const fail = (error) => ({ ok: false, error: truncateChars(String(error), config.maxReturnChars ?? 32000, "error").text, logs, logTruncated, wallMs: wall() });
   let logTruncated = false;
   if (!isString(code) || !code.trim()) return fail("code must be a non-empty string");
-  if (code.length > (config.maxCodeChars ?? 48000)) return fail("code exceeds " + (config.maxCodeChars ?? 48000) + " characters");
+  if (code.length > (config.maxCodeChars ?? 48000)) return fail("code exceeds " + (config.maxCodeChars ?? 48000) + " characters; split large writes into write({path,content,append:true}) chunks");
   if (signal?.aborted) return fail(ABORT_MESSAGE);
   const runId = ++runSeq;
   const timeoutMs = config.timeoutMs ?? 60000;

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.2] - 2026-09-07
+
+- Focus `read(path,{about})` on matching line windows in unstructured logs/text instead of returning a truncated unrelated prefix; report no matches explicitly.
+- Create recursive source watchers as non-persistent so Linux/Node 24 hosts can exit naturally; add a child-process regression verified on Spark.
+- Expose the configured program-length cap in the schema and add transactional `write({path,content,append:true})` for large-document chunks without bounded read-back. Document typed partial reads, embedded-source quoting and bounded report projections.
+- Emit optional, producer-independent `workspace:changed` v1 notifications at disk commit boundaries, with conservative unknown-path invalidation for external mutations. Staging and restored rollbacks emit nothing; observer failures cannot break writes.
+
+- Refuse writes containing truncated-read payload markers; add `read({path,complete:true})` for fail-closed full-file reads. Preserve ordinary bounded views and exact source continuation.
+- Explicit read arrays now reject failed paths; use `Promise.allSettled` over independent reads for typed partial results.
+- Resolve bare `agent://` and `artifact://` IDs from the calling host session’s artifact directory, with read-only scope, ambiguity checks and bounded pagination. This does not implement the full host URI language.
+- Document embedded-source escaping and add regressions for the reported read/write corruption, batch errors and session-resource isolation, including actual OMP execution.
+
 ## [0.3.1] - 2026-09-06
 
 ### Fixed

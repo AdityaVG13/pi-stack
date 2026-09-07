@@ -37,7 +37,7 @@ export async function engineFixture(t) {
   const tool = tools.get("supernova");
   if (!tool) throw new Error("CodeMode test seam disappeared; do not replace it with a fake executor");
   const execute = code => tool.execute("red-contract", { code, timeoutMs: 2000 }, undefined, undefined, { cwd: root });
-  return { root, tool, execute, write: (file, text) => fs.writeFile(path.join(root, file), text) };
+  return { root, pi, tool, execute, write: (file, text) => fs.writeFile(path.join(root, file), text) };
 }
 
 export function modelText(result) {

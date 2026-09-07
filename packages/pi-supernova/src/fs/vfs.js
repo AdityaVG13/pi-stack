@@ -157,7 +157,7 @@ export class CausalVfs {
         this.setCache(entry.logicalPath, entry.content);
         this.expected.delete(entry.logicalPath);
       }
-      if (staged.length) this.onNewFile?.();
+      if (staged.length) this.onNewFile?.(staged.map(entry => entry.target));
     } catch (error) {
       failed = true;
       const recoveryErrors = [];
@@ -173,6 +173,7 @@ export class CausalVfs {
         }
       }
       this.invalidateCache();
+      if (recoveryErrors.length) this.onNewFile?.(null);
       if (recoveryErrors.length) throw new AggregateError([error, ...recoveryErrors.map(message => new Error(message))], "commit failed: " + error.message + "; recovery failed: " + recoveryErrors.join("; "));
       throw error;
     } finally {

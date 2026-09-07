@@ -54,6 +54,26 @@ function expandedBlock(span, raw, opts) {
   return out.join("\n");
 }
 
+function focusedText(raw, lower, stems, relPath, opts) {
+  const hits = lower.map((line, i) => ({i, score: stems.filter(s => line.includes(s)).length}))
+    .filter(hit => hit.score > 0).sort((a, b) => b.score - a.score || a.i - b.i);
+  const parts = [];
+  const covered = new Set();
+  let budget = opts.maxChars;
+  for (const {i} of hits) {
+    if (parts.length >= opts.maxExpanded) break;
+    if (covered.has(i)) continue;
+    const start = Math.max(0, i - 3), end = Math.min(raw.length, i + 4);
+    const block = raw.slice(start, end).map((line, j) => String(start + j + 1).padStart(5) + " " + line).join("\n");
+    if (block.length > budget) continue;
+    parts.push(block); budget -= block.length;
+    for (let j = start; j < end; j++) covered.add(j);
+  }
+  const status = parts.length ? "focused text windows (not a complete file)"
+    : hits.length ? "matching text exceeds view budget; first match at line " + (hits[0].i + 1) : "no matching text";
+  return {text: "// " + relPath + " · " + status + "; read(path, line, count) for raw source\n" + parts.join("\n---\n"), expanded: parts.length, declarations: 0};
+}
+
 /**
  * @param entry index entry (text + cached lines/surface)
  * @param about question or symbol; empty ⇒ pure skeleton (every body folded)
@@ -63,8 +83,8 @@ export function outlineFile(entry, relPath, about, options = {}) {
   const { raw, lower } = WorkspaceIndex.linesOf(entry);
   const lineCount = raw.length;
   const spans = WorkspaceIndex.spansOf(entry).map((s) => ({ ...s, signature: raw[s.start - 1].trim() }));
-  if (spans.length === 0) return null; // no structure: caller falls back to plain text
   const stems = [...new Set(tokenizeQuery(about || "").tokens.map(stem))];
+  if (spans.length === 0) return about ? focusedText(raw, lower, stems, relPath, opts) : null;
   const expanded = chooseExpanded(spans, lower, stems, raw, opts);
 
   const parts = [];

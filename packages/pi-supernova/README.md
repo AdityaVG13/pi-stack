@@ -109,6 +109,68 @@ options, not mandatory stages of source resolution. Ordinary calls also get:
 Distant edit regions have separate windows and continuation pointers for omitted
 lines. Structural warnings and source windows are not substitutes for tests.
 
+### Safe read-modify-write
+
+Plain reads are bounded views, not guaranteed full-file buffers. Use
+`read({path:"file.txt",complete:true})` when code needs the complete file; it
+throws rather than handing back partial text. Prefer `edit` for large-file
+replacements, or reconstruct exact `resolve:true` windows before writing.
+Writes reject Supernova truncation markers, including legacy host-result markers.
+For intentionally writing literal marker documentation only, opt in with
+`write({path,content,allowReadArtifacts:true})`. This is a data-loss guard, not
+full dataflow tracking or a security sandbox.
+
+Explicit read arrays reject missing/failed paths. For typed partial outcomes use
+`Promise.allSettled(paths.map(path => read(path)))`. Successful arrays remain arrays.
+For embedded source with backslash escapes, use `String.raw` template literals
+(and escape delimiter backticks), or JSON-quoted strings. Validate generated code.
+
+On hosts exposing `sessionManager.getArtifactsDir()`, bare `agent://<id>` and
+`artifact://<number>` read files from the calling session's artifact directory.
+They preserve ID casing and support offset/limit and structured continuation.
+These resources are read-only; ambiguous artifact IDs and escaping symlinks fail.
+This is not the full OMP URI language: cross-session search, nested path/query
+selectors and other schemes are not implemented. Hosts without an artifact
+directory report that limitation rather than treating the URI as a local path.
+
+For unstructured logs/text, `read(path,{about:"STT database"})` returns bounded,
+line-numbered matching windows, or explicitly reports no matching text. It is not
+a complete-file read. Write temporary investigation files under the workspace
+(e.g. `.work/probe.py`): ordinary `write`/`edit` paths cannot escape it, including
+absolute `/tmp` paths. Shell execution is a separate trusted boundary, not a sandbox.
+
+### Large inputs and report outputs
+
+The default program limit is 48,000 UTF-16 code units (configurable via
+`maxCodeChars` and exposed in the tool schema). Split larger documents into
+separate invocations: first `write(path, firstChunk)`, then
+`write({path,content:nextChunk,append:true})`. Append uses the complete internal
+file buffer, never a bounded model-facing read; it retains conflict checks and
+per-program rollback. Missing files are created. Multiple invocations are not
+one atomic transaction: for an all-or-nothing publication, assemble a new staging
+file and publish it only when complete. External write overrides reject append.
+
+Supernova is a bounded foreground executor, not a durable background-job manager.
+For long archive scans, use resumable chunks or a host background-job tool and write
+progress records under `.work`. Set the inner `bash` timeout shorter than the
+outer program timeout (for example 10 seconds inside a 20-second program) to retain
+bounded shell diagnostics. A hard guest deadline cannot guarantee pending shell
+output delivery; progress files survive shell execution but staged VFS writes may
+roll back.
+
+Large returned objects are bounded previews, not retained artifacts. Select fields
+and array windows before returning, rather than parsing a truncated preview:
+
+```js
+const report = JSON.parse(await read({path:"report.json",complete:true}));
+return {verdict:report.verdict, values:report.values.slice(5000,5003)};
+```
+
+If the raw JSON exceeds the read budget, reconstruct exact source windows or run
+a bounded parser through `bash`. There is no implicit continuation handle for
+arbitrary guest objects. For embedded code, JSON-encode the source string once;
+do not nest shell, JavaScript, and Python quoting unless it is necessary.
+
 ## Execution and automatic batching
 
 Compatible independently started reads coalesce at the worker/host boundary.
@@ -160,6 +222,32 @@ Default limits are in `src/config/config.default.json`. Configuration loads from
 `~/.pi/agent/supernova.json`, the configured host directory, or `PI_SUPERNOVA_CONFIG`.
 Text limits are character budgets, not tokenizer counts. `/supernova` reports
 programs and output characters without labelling characters as tokens.
+
+## Optional workspace change notifications
+
+Supernova works without another search package. On hosts exposing `pi.events`, it
+provides an advisory `workspace:changed` event for independent cache/index consumers:
+
+```js
+{ version: 1, cwd: "/absolute/workspace", paths: ["/absolute/workspace/file.js"] }
+```
+
+`cwd` identifies the calling workspace. `paths` contains absolute file paths after
+a successful disk flush; paths may contain filesystem aliases. The frozen event
+and path array contain no source text. Checkpoint merges, restored rollbacks, and
+read-only programs emit nothing. A shell boundary can flush paths before a later
+program failure, so notifications are not conditional on overall tool success.
+
+`paths: null` means the changed paths are unknown: shell or delegated mutation
+attempts emit this even on failure, as does an incomplete commit recovery. Consumers
+should invalidate conservatively, not interpret it as an empty change list or a
+guarantee that shell effects stayed inside `cwd`.
+
+Subscribe with `pi.events.on("workspace:changed", handler)`. Mark cached state dirty
+synchronously, then refresh when queried; asynchronous listeners are not awaited.
+Observer failures cannot roll back writes. This is an optional extension convention,
+not a built-in host standard, durable event log, or cross-process filesystem watcher.
+There is no dependency on or automatic routing to any consumer package.
 
 ## Security and host boundary
 

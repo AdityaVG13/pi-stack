@@ -102,7 +102,7 @@ export class WorkspaceIndex {
     let ok = false;
     try {
       let timer = null;
-      const watcher = fs.watch(root, { recursive: true }, () => {
+      const watcher = fs.watch(root, { recursive: true, persistent: false }, () => {
         if (timer) return;
         timer = setTimeout(() => {
           timer = null;

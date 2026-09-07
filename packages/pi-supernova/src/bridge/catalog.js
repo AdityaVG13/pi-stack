@@ -13,11 +13,12 @@ const NATIVE_TOOL_DEFINITIONS = [
       about: { type: "string", description: "Question or symbol: expand file bodies, or locate and open source inside a directory" },
       query: { type: "string", description: "Source question; optional path scopes the search directory" },
       resolve: { type: "boolean", description: "Return structured source/status for a direct resolve-to-edit handoff" },
+      complete: { type: "boolean", description: "Fail unless the entire requested file fits without clipping" },
     } },
   },
   {
     name: "write", description: "Write UTF-8 content to a workspace file.",
-    parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
+    parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" }, allowReadArtifacts: { type: "boolean", description: "Explicit opt-in for intentionally writing literal truncation-marker text" } }, required: ["path", "content"] },
   },
   {
     name: "edit", description: "Apply unique text replacements to a workspace file; returns the post-edit lines, a structural check, and references to changed declarations.",

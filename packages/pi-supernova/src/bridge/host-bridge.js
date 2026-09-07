@@ -134,11 +134,11 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
     return openSource(result, params, signal);
   }
 
-  async function openSource(result, params, signal) {
+  async function openSource(result, params, signal, resolvedPath) {
     const cwd = getCwd();
     if (result.status !== "found") return textResult(JSON.stringify(result), { isSnap: true });
     signal?.throwIfAborted();
-    const opened = await readFile(path.resolve(cwd, result.path), { ...params, about: undefined }, result.line);
+    const opened = await readFile(resolvedPath ?? path.resolve(cwd, result.path), { ...params, about: undefined }, result.line, result.path);
     const block = opened.content[0];
     if (block.type !== "text") throw new Error("source resolution requires a text file; read the image path directly");
     const { firstLine, lastLine, sourceChars, nextOffset, complete } = opened.details;
@@ -185,12 +185,49 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
         }
       }));
       signal?.throwIfAborted();
-      return textResult("", { count: results.length, batch: true, independent: params._independent === true, items: results.map(r => r.text), itemErrors: results.map(r => r.error?.message ?? null), errors: results.filter(r => r.error).map(r => r.error) });
+      const response = textResult("", { count: results.length, batch: true, independent: params._independent === true, items: results.map(r => r.text), itemErrors: results.map(r => r.error?.message ?? null), errors: results.filter(r => r.error).map(r => r.error) });
+      response.isError = params._independent !== true && results.some(r => r.error);
+      return response;
     }
     return reads.schedule("read", () => readSingle(params, cwd, targetParam, signal), signal);
   }
 
+  async function resolveSessionResource(uri, signal) {
+    const match = /^(agent|artifact):\/\/([^/?#]+)$/i.exec(uri);
+    if (!match) throw new Error("session resource reads support bare agent://<id> and artifact://<number>; use offset/limit for pagination");
+    const kind = match[1].toLowerCase();
+    const id = decodeURIComponent(match[2]);
+    if (!id || id === "." || id === ".." || (/[/\\]/u.test(id) || Array.from(id).some(char => char.charCodeAt(0) < 32)) || (kind === "artifact" && !/^\d+$/.test(id))) throw new Error("invalid session resource ID");
+    const dir = hooks.artifactsDir?.();
+    if (!isString(dir) || !dir) throw new Error("this host session does not expose an artifacts directory for " + uri);
+    signal?.throwIfAborted();
+    const root = await fs.realpath(dir);
+    let file = id + ".md";
+    if (kind === "artifact") {
+      const matches = [];
+      let count = 0;
+      for await (const entry of await fs.opendir(root)) {
+        signal?.throwIfAborted();
+        if (++count > 4096) throw new Error("session artifact lookup exceeded its directory budget");
+        if (entry.name.startsWith(id + ".") && !entry.isDirectory()) matches.push(entry.name);
+      }
+      if (matches.length !== 1) throw new Error(matches.length ? "ambiguous session artifact: " + uri : "session artifact not found: " + uri);
+      file = matches[0];
+    }
+    const target = await fs.realpath(path.join(root, file));
+    if (!target.startsWith(root + path.sep)) throw new Error("session resource escapes its artifacts directory");
+    if (!(await fs.stat(target)).isFile()) throw new Error("session resource is not a file: " + uri);
+    signal?.throwIfAborted();
+    return target;
+  }
+
   async function readSingle(params, cwd, targetParam, signal) {
+    if (isString(targetParam) && /^(?:agent|artifact):\/\//i.test(targetParam)) {
+      const target = await resolveSessionResource(targetParam, signal);
+      return params.resolve
+        ? openSource({status:"found",path:targetParam,line:params.offset ?? 1}, params, signal, target)
+        : readFile(target, params, undefined, targetParam);
+    }
     if (isString(params?.query)) {
       const scope = targetParam && targetParam !== params.query ? resolveReadPath(cwd, targetParam) : cwd;
       return sourceRead(params.query, scope, signal, params);
@@ -208,9 +245,9 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
   }
 
   /** Plain text, a line window, or (with `about`) a relevance-folded outline of the whole file. */
-  async function readFile(targetPath, params, sourceLine) {
+  async function readFile(targetPath, params, sourceLine, displayPath) {
     const cwd = getCwd();
-    const rel = relativeSlash(cwd, targetPath);
+    const rel = displayPath ?? relativeSlash(cwd, targetPath);
     const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp" }[path.extname(targetPath).toLowerCase()];
     if (mime) {
       if ((await fs.stat(targetPath)).size > 20 * 1024 * 1024) throw new Error("image exceeds 20 MiB; resize it before reading");
@@ -233,6 +270,9 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
     const offset = params?.offset ?? (sourceLine && text.length > budget ? Math.max(1, sourceLine - 2) : 1);
     const firstLine = isNumber(offset) ? Math.max(1, Math.floor(offset)) : 1;
     const sliced = sliceLines(text, offset, params?.limit);
+    if (params.complete === true && (sliced !== text || sliced.length > budget || (params.resolve && JSON.stringify(sliced).length > budget))) {
+      throw new Error(`incomplete read of ${rel}: complete:true requires the entire file within the read budget; use edit() for replacements or reconstruct resolve:true source windows`);
+    }
     if (sliced.length > budget || (params.resolve && JSON.stringify(sliced).length > budget)) {
       let cap = budget - 160;
       if (params.resolve) {
@@ -397,11 +437,16 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
       const target = await resolveWorkspacePath(cwd, params?.path, "write", false);
       if (signal?.aborted) throw new Error("aborted");
       if (!isString(params?.content)) throw new Error("write requires string content");
-      const content = params.content;
+      if (params.append !== undefined && params.append !== true && params.append !== false) throw new Error("write append must be a boolean");
+      let content = params.content;
+      if (params.allowReadArtifacts !== true && /\[read truncated;|…\[(?:host-result|output|value) truncated \d+ chars\]…/u.test(content)) {
+        throw new Error("refusing to write truncated read output; use edit() or reconstruct complete source windows. Set allowReadArtifacts:true only to intentionally write literal truncation-marker text");
+      }
       let prevText = "";
       try {
         prevText = await vfs.read(target, { preserveRead: true });
       } catch (error) { if (error.code !== "ENOENT") throw error; }
+      if (params.append === true) content = prevText + content;
       const { speculative } = await vfs.write(target, content);
       index.touch(relativeSlash(cwd, target));
       const diff = buildWriteDiff(target, prevText, content);
@@ -527,6 +572,7 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
         vfs.invalidateCache();
         index.invalidate();
         clearPathCache();
+        hooks.workspaceChanged();
       }
       const { stdout, stderr } = res;
       let text = stdout && stderr ? stdout + (stdout.endsWith("\n") ? "" : "\n") + stderr : stdout || stderr;
@@ -596,7 +642,10 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
 export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedger }) {
   const index = registry?.index ?? new WorkspaceIndex((argv, opts) => runCommand(argv, opts));
   const ledger = runLedger ?? new SeenLedger({ window: config.seenWindow ?? 40 });
-  const vfs = new CausalVfs(() => index.invalidate(), target => resolveWorkspacePath(getCwd(), target, "commit", false, true));
+  const vfs = new CausalVfs(paths => {
+    index.invalidate();
+    notifyWorkspaceChanged(paths);
+  }, target => resolveWorkspacePath(getCwd(), target, "commit", false, true));
   const executors = registry?.executors ?? new Map();
   const definitions = registry?.definitions ?? new Map();
   const sharedRegistry = registry ?? { executors, definitions, index, callSeq: 0 };
@@ -611,6 +660,18 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
   let trace = [];
   let callListener = null;
   const scheduler = createNativeScheduler();
+  // Advisory host event, not a tool or a transaction participant. Consumers
+  // invalidate synchronously; failures must never affect committed bytes.
+  function notifyWorkspaceChanged(paths = null) {
+    if (!isFunction(pi?.events?.emit)) return;
+    const event = Object.freeze({
+      version: 1, cwd: path.resolve(getCwd()),
+      paths: paths === null ? null : Object.freeze([...new Set(paths)]),
+    });
+    try { pi.events.emit("workspace:changed", event)?.catch?.(() => {}); } catch {}
+  }
+  hooks.workspaceChanged = notifyWorkspaceChanged;
+  hooks.artifactsDir = () => activeCtx?.sessionManager?.getArtifactsDir?.();
   hooks.commandEnv = () => {
     const env = { ...process.env };
     const current = {
@@ -800,6 +861,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
       const delegated = hostTool(name);
       const exec = delegated ? delegated.execute.bind(delegated) : hostSession ? undefined : executors.get(name);
       if (exec) {
+        if (name === "write" && args?.append === true) throw new Error("append requires the Supernova-owned write adapter, not an external override");
         const fallbackDiff = await writeFallbackDiff(name, args);
         const mutating = isMutatingTool(name, config, args, definitions.get(name));
         if (mutating) await vfs.prepareExternalMutation(name);
@@ -812,7 +874,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
           completeRecord(record, res, fallbackDiff);
           return res;
         } finally {
-          if (mutating) { vfs.invalidateCache(); index.invalidate(); clearPathCache(); }
+          if (mutating) { vfs.invalidateCache(); index.invalidate(); clearPathCache(); notifyWorkspaceChanged(); }
         }
       }
 

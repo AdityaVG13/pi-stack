@@ -60,6 +60,7 @@ export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = f
   if (inputPath == null || !isString(inputPath) || !inputPath.trim()) {
     throw new Error(`${opName} requires path`);
   }
+  if (/^(?:agent|artifact):\/\//i.test(inputPath.trim())) throw new Error(`${opName} requires a filesystem path; session resource URIs are read-only`);
   const resolvedCwd = getResolvedCwd(cwd);
   const target = path.resolve(resolvedCwd, inputPath.trim());
   assertInside(path.relative(resolvedCwd, target), `${opName} path escapes workspace: paths resolve relative to ${resolvedCwd}`);

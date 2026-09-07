@@ -1,6 +1,6 @@
 {
   "name": "pi-supernova",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "One CodeMode invocation for Pi and OMP, with four guest commands, automatic read batching and source context.",
   "type": "module",
   "author": "AdityaVG13",
