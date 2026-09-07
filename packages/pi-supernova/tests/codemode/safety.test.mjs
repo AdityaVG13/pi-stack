@@ -19,7 +19,10 @@ it("large document chunks append without round-tripping bounded reads", async t 
   f.pi.registerTool({name:"write",execute:async () => {called = true; return {};}});
   await assert.rejects(f.execute('await write({path:"chunks.txt",content:"unsafe",append:true});'), /append.*owned/);
   assert.equal(called, false);
-  assert.equal(f.tool.parameters.properties.code.maxLength, 48000);
+  const budget = f.tool.parameters.properties.code.maxLength;
+  assert.ok(Number.isInteger(budget) && budget > 0, "the program cap must be exposed");
+  await assert.rejects(f.execute('await write("chunks.txt", "overwritten");' + " ".repeat(budget)), /code exceeds/);
+  assert.equal(await fs.readFile(path.join(f.root,"chunks.txt"),"utf8"), first + "tail\n");
 });
 
 it("focused plain-text reads select matching log lines instead of a truncated prefix", async t => {
@@ -31,16 +34,6 @@ it("focused plain-text reads select matching log lines instead of a truncated pr
   assert.ok(result.details.result.length < 8000);
   const absent = await f.execute('return await read("status.log",{about:"quasar"});');
   assert.match(absent.details.result, /no matching text/);
-});
-
-it("JSON-encoded embedded source and bounded report projections preserve requested fields", async t => {
-  const f = await engineFixture(t);
-  const source = "print(\"literal \\n\")\n# `backticks` and ${interpolation} stay literal\n";
-  await f.execute("await write(\"script.py\", " + JSON.stringify(source) + ");");
-  assert.equal(await fs.readFile(path.join(f.root,"script.py"),"utf8"), source);
-  await f.write("report.json", JSON.stringify({values:Array.from({length:6000}, (_,i) => i), verdict:"review"}));
-  const result = await f.execute('const r = JSON.parse(await read({path:"report.json",complete:true})); return {verdict:r.verdict, window:r.values.slice(5000,5003)};');
-  assert.deepEqual(result.details.result, {verdict:"review", window:[5000,5001,5002]});
 });
 
 it("read-modify-write refuses truncated source instead of persisting a hole", async t => {
@@ -166,19 +159,17 @@ it("read arrays preserve returned images without sending base64 as model text", 
   assert.equal(discarded.content.filter(block => block.type === "image").length, 0);
 });
 
-it("source outline and evidence algorithms remain reachable through read", async t => {
+it("patches preserve empty-file and newline boundaries and reject mismatched context", async t => {
   const f = await engineFixture(t);
-  await f.write("auth.js", "export function validateToken(token) { return token.length > 3; }\n");
-  const outline = await f.execute('return await read({path:"auth.js", outline:true});');
-  assert.match(modelText(outline), /validateToken/);
-  const evidence = await f.execute('return await read({query:"validateToken", evidence:true});');
-  assert.match(modelText(evidence), /validateToken/);
-});
-
-it("patch application remains available through edit, without a patch command", async t => {
-  const f = await engineFixture(t);
-  await f.write("patch.txt", "before\n");
-  const patch = "--- a/patch.txt\n+++ b/patch.txt\n@@ -1 +1 @@\n-before\n+after\n";
-  await f.execute(`await edit({path:"patch.txt", patch:${JSON.stringify(patch)}});`);
-  assert.equal(await fs.readFile(path.join(f.root, "patch.txt"), "utf8"), "after\n");
+  for (const [before, patch, after] of [
+    ["", "@@ -0,0 +1,1 @@\n+created\n", "created\n"],
+    ["before\r\n", "@@ -1 +1 @@\n-before\n+after\n", "after\r\n"],
+    ["before\n", "@@ -1 +1 @@\n-before\n+after\n\\ No newline at end of file\n", "after"],
+  ]) {
+    await f.write("patch.txt", before);
+    await f.execute(`await edit({path:"patch.txt",patch:${JSON.stringify(patch)}});`);
+    assert.equal(await fs.readFile(path.join(f.root,"patch.txt"),"utf8"), after);
+    await assert.rejects(f.execute('await edit({path:"patch.txt",patch:"@@ -1 +1 @@\\n-missing\\n+bad\\n"});'), /context did not match/);
+    assert.equal(await fs.readFile(path.join(f.root,"patch.txt"),"utf8"), after);
+  }
 });

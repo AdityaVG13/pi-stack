@@ -2,7 +2,7 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { runGuestProgram, warmGuestWorker } from "../../src/runtime/runtime.js";
+import { warmGuestWorker } from "../../src/runtime/runtime.js";
 import { engineFixture, limits } from "../helpers/engine.mjs";
 import { runCommand } from "../../src/fs/workspace.js";
 
@@ -10,40 +10,31 @@ it("recursive source watchers do not keep an otherwise idle host alive", async t
   const f = await engineFixture(t);
   await fs.mkdir(path.join(f.root, "nested"));
   await f.write("nested/source.js", "export const value = 1;");
-  const moduleUrl = new URL("../../src/context/repo-index.js", import.meta.url).href;
-  const code = `import {WorkspaceIndex} from ${JSON.stringify(moduleUrl)}; new WorkspaceIndex(() => {}).watch(${JSON.stringify(f.root)});`;
+  const moduleUrl = new URL("../../index.js", import.meta.url).href;
+  const code = `import {registerCodeMode} from ${JSON.stringify(moduleUrl)};
+    let tool; registerCodeMode({registerTool(t){tool=t;},registerCommand(){},on(){}});
+    await tool.execute("idle",{code:'return await read({query:"value",evidence:true});'},undefined,undefined,{cwd:${JSON.stringify(f.root)}});`;
   const result = await runCommand([process.execPath, "--input-type=module", "-e", code], {timeoutMs:1500});
   assert.equal(result.exitCode, 0);
 });
 
-it("termination checks group quiescence but still kills surviving descendants", {skip:process.platform === "win32"}, async t => {
+it("cancelling a program prevents surviving shell descendants from writing later", {skip:process.platform === "win32"}, async t => {
   const f = await engineFixture(t);
-  const originalKill = process.kill;
-  const signals = [];
-  process.kill = (pid, signal) => { signals.push(signal); return originalKill.call(process,pid,signal); };
+  const ready = path.join(f.root,"descendant-ready"), late = path.join(f.root,"late-write");
+  const child = 'process.on("SIGTERM",()=>{});require("node:fs").writeFileSync('+JSON.stringify(ready)+',"ready");setTimeout(()=>require("node:fs").writeFileSync('+JSON.stringify(late)+',"unsafe"),700);';
+  const parent = 'require("node:child_process").spawn(process.execPath,["-e",'+JSON.stringify(child)+'],{stdio:"ignore"});setInterval(()=>{},1000);';
+  const controller = new AbortController();
+  const stopped = assert.rejects(f.tool.execute("cancel", {code:`await bash({command:process.execPath,args:["-e",${JSON.stringify(parent)}]});`,timeoutMs:5000}, controller.signal, undefined, {cwd:f.root}), /aborted/);
   try {
-    await assert.rejects(runCommand([process.execPath,"-e","setInterval(()=>{},1000)"],{timeoutMs:80}),/timed out/);
-    assert.ok(signals.includes(0),"check whether the owned process group actually disappeared");
-    assert.ok(!signals.includes("SIGKILL"),"do not wait to escalate an absent process group");
-    signals.length = 0;
-    const ready = path.join(f.root,"descendant-ready");
-    const late = path.join(f.root,"late-write");
-    const child = 'process.on("SIGTERM",()=>{});require("node:fs").writeFileSync('+JSON.stringify(ready)+',"ready");setTimeout(()=>require("node:fs").writeFileSync('+JSON.stringify(late)+',"unsafe"),700);';
-    const parent = 'require("node:child_process").spawn(process.execPath,["-e",'+JSON.stringify(child)+'],{stdio:"ignore"});setInterval(()=>{},1000);';
-    const controller = new AbortController();
-    const stopped = assert.rejects(runCommand([process.execPath,"-e",parent],{signal:controller.signal,timeoutMs:2000}),/aborted/);
-    try {
-      let started = false;
-      for(let i=0;i<100;i++) {
-        try { await fs.stat(ready); started=true; break; }
-        catch(error) { if(error.code!=="ENOENT")throw error; await new Promise(resolve=>setTimeout(resolve,10)); }
-      }
-      assert.ok(started,"descendant must install its signal handler before cancellation");
-    } finally { controller.abort(); await stopped; }
-    assert.ok(signals.includes("SIGKILL"),"a surviving descendant still requires escalation");
-    await new Promise(resolve=>setTimeout(resolve,750));
-    await assert.rejects(fs.stat(late),{code:"ENOENT"});
-  } finally { process.kill = originalKill; }
+    let started = false;
+    for(let i=0;i<100;i++) {
+      try { await fs.stat(ready); started=true; break; }
+      catch(error) { if(error.code!=="ENOENT")throw error; await new Promise(resolve=>setTimeout(resolve,10)); }
+    }
+    assert.ok(started,"the descendant must be running before testing cancellation");
+  } finally { controller.abort(); await stopped; }
+  await new Promise(resolve=>setTimeout(resolve,750));
+  await assert.rejects(fs.stat(late),{code:"ENOENT"});
 });
 
 it("a prewarmed worker never inherits a previous program's global mutations", async t => {
@@ -54,10 +45,11 @@ it("a prewarmed worker never inherits a previous program's global mutations", as
   assert.equal(result.details.result, "undefined");
 });
 
-it("a non-yielding program is terminated at its deadline", async () => {
-  const result = await runGuestProgram({ code: "while (true) {}", nova: {}, config: { ...limits, timeoutMs: 100 } });
-  assert.equal(result.ok, false);
-  assert.match(result.error, /timed out|aborted/);
+it("a non-yielding program fails at its deadline without poisoning the next program", {timeout:4000}, async t => {
+  const f = await engineFixture(t), controller = new AbortController();
+  t.after(() => controller.abort());
+  await assert.rejects(f.tool.execute("deadline", {code:"while (true) {}",timeoutMs:1000}, controller.signal, undefined, {cwd:f.root}), /timed out|aborted/);
+  assert.equal((await f.execute("return 42;")).details.result, 42);
 });
 
 it("explicit external reads do not grant writes through an external symlink", async t => {

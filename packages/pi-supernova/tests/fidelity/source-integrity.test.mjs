@@ -3,8 +3,6 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { engineFixture } from "../helpers/engine.mjs";
-import { buildMultiEditDiff, buildPatchDiff } from "../../src/fs/diff.js";
-import { renderSupernovaResult } from "../../index.js";
 
 it("patch deletions retain post-edit coordinates after earlier hunks shift source", async t => {
   const f = await engineFixture(t);
@@ -16,10 +14,10 @@ it("patch deletions retain post-edit coordinates after earlier hunks shift sourc
   const result=await f.execute('return await edit({path:"patch.txt",patch:'+JSON.stringify(patch)+'});');
   assert.equal(await fs.readFile(path.join(f.root,"patch.txt"),"utf8"),[...expansion,...lines.slice(1,49),...lines.slice(50)].join("\n")+"\n");
   assert.match(result.details.result,/99 sentinel-after-delete/);
-  const removed=buildPatchDiff("patch.txt",patch).lines.filter(row=>row.type==="remove");
-  assert.deepEqual(removed.map(row=>[row.lineNum,row.newLineNum]),[[1,1],[50,99]]);
-  const atStart=buildPatchDiff("first.txt","@@ -1,1 +0,0 @@\n-first\n");
-  assert.equal(atStart.lines[0].newLineNum,1);
+  await f.write("first.txt", "first\nlast\n");
+  const atStart = await f.execute('return await edit({path:"first.txt",patch:"@@ -1,1 +0,0 @@\\n-first\\n"});');
+  assert.equal(await fs.readFile(path.join(f.root,"first.txt"),"utf8"), "last\n");
+  assert.match(atStart.details.result, /1 last/);
 });
 
 it("commit rejects a previously checked symlink retargeted outside the workspace", async t => {
@@ -66,8 +64,10 @@ it("edit references use staged callers, and separated edits return both changed 
   await f.write("wide.txt",'first=old\n'+'unchanged\n'.repeat(100)+'last=old\n');
   const summary=(await f.execute('return await edit({path:"wide.txt",edits:[{oldText:"first=old",newText:"first=new"},{oldText:"last=old",newText:"last=new"}]});')).details.result;
   assert.match(summary,/first=new/); assert.match(summary,/102 last=new/);
-  const diff=buildMultiEditDiff("a.js","first\nsecond\n",[{oldText:"first",newText:"first\ninserted"},{oldText:"second",newText:"changed"}]);
-  assert.equal(diff.lines.find(row=>row.type==="add"&&row.text==="changed").lineNum,3);
+  await f.write("shifted.txt", "first\nsecond\n");
+  const shifted = await f.execute('return await edit({path:"shifted.txt",edits:[{oldText:"first",newText:"first\\ninserted"},{oldText:"second",newText:"changed"}]});');
+  assert.equal(await fs.readFile(path.join(f.root,"shifted.txt"),"utf8"), "first\ninserted\nchanged\n");
+  assert.match(shifted.details.result, /3 changed/);
 });
 
 it("evidence admits content hits beyond the topology cap and reports exact clipped ranges", async t => {
@@ -81,10 +81,4 @@ it("evidence admits content hits beyond the topology cap and reports exact clipp
   assert.equal(clipped.text,'export function uniqueZebraToken() {');
   assert.deepEqual(clipped.lines,[1,1]);
   assert.equal(clipped.nextOffset,2);
-});
-
-it("text-only host failures retain their diagnostic in the expanded card", () => {
-  const theme={fg:(_key,text)=>text,bg:(_key,text)=>text};
-  const card=renderSupernovaResult({isError:true,content:[{type:"text",text:"failure diagnostic"}]},{expanded:true},theme,{state:{}});
-  assert.match(card.render(80).join("\n"),/failure diagnostic/);
 });

@@ -270,6 +270,16 @@ cover batching fidelity, image/context retention, checkpoints, mutation ordering
 external symlinks, deadlines, worker isolation and execution-context environment.
 The former deleted suite has not been silently reinstated.
 
+Test user-visible contracts through registered programs: exact source, on-disk
+results, failure/rollback, isolation, bounded output, and usable host rendering.
+Inject filesystem faults only to exercise real failure paths; do not prescribe
+private helper layouts, staging filenames, or syscall counts. New regressions must
+fail before the fix; for existing behavior, verify that a named deliberate defect
+makes the intended test fail before accepting it. Keep the original 12 acceptance
+tests unchanged. Cost gates cover avoidable search processes, per-read budgets and
+progress flooding; latency claims belong in the explicit measurement lane, not
+arbitrary wall-clock assertions.
+
 ```bash
 npm test --prefix packages/pi-supernova
 npm run lint:supernova

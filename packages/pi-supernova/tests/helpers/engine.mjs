@@ -18,8 +18,8 @@ export function registrationHost() {
     registerCommand() {},
     on() {},
   };
-  // Metadata-only stand-ins expose the current wrong registration behavior.
-  // They do not simulate Pi/OMP execution or establish cross-host parity.
+  // Minimal registration metadata, not simulated Pi/OMP execution.
+  // Actual-host parity is verified separately by tests/hosts.
   const host = Object.fromEntries(["read", "edit", "write", "bash"].map(name => [
     `create${name[0].toUpperCase()}${name.slice(1)}ToolDefinition`,
     () => ({ name, description: name, parameters: { type: "object", properties: {} } }),
@@ -29,10 +29,9 @@ export function registrationHost() {
 
 export async function engineFixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "supernova-red-"));
-  t.diagnostic(`Failure fixture retained at ${root}`);
+  t.diagnostic(`Fixture retained at ${root}`);
   const { pi, tools } = registrationHost();
-  // Deliberately exercise the surviving CodeMode implementation. Otherwise the
-  // broken public registration would mask every independent engine failure.
+  // Exercise the registered tool, real worker, and filesystem, not a fake executor.
   registerCodeMode(pi);
   const tool = tools.get("supernova");
   if (!tool) throw new Error("CodeMode test seam disappeared; do not replace it with a fake executor");

@@ -3,21 +3,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { engineFixture } from "../helpers/engine.mjs";
-import { WorkspaceIndex } from "../../src/context/repo-index.js";
-import { referencesForNames } from "../../src/context/search.js";
 
-it("patch edits automatically return post-edit source, checks and staged references without indexing", async t => {
+it("patch edits return committed source and references to staged callers", async t => {
   const f = await engineFixture(t);
   await f.write("api.js", "export function oldToken() { return 1; }\n");
-  const files = WorkspaceIndex.prototype.files, entry = WorkspaceIndex.prototype.entry;
-  WorkspaceIndex.prototype.files = () => assert.fail("mutation hints must not list/index the repository");
-  WorkspaceIndex.prototype.entry = () => assert.fail("mutation hints must not index source files");
-  try {
-    const patch = "--- a/api.js\n+++ b/api.js\n@@ -1 +1 @@\n-export function oldToken() { return 1; }\n+export function newToken() { return 2; }\n";
-    const result = await f.execute('await write("caller.js","newToken();"); return await edit({path:"api.js",patch:'+JSON.stringify(patch)+'});');
-    assert.match(result.details.result, /1 export function newToken/);
-    assert.match(result.details.result, /newToken also referenced in caller.js:1/);
-  } finally { WorkspaceIndex.prototype.files = files; WorkspaceIndex.prototype.entry = entry; }
+  const patch = "--- a/api.js\n+++ b/api.js\n@@ -1 +1 @@\n-export function oldToken() { return 1; }\n+export function newToken() { return 2; }\n";
+  const result = await f.execute('await write("caller.js","newToken();"); return await edit({path:"api.js",patch:'+JSON.stringify(patch)+'});');
+  assert.match(result.details.result, /1 export function newToken/);
+  assert.match(result.details.result, /newToken also referenced in caller.js:1/);
+  assert.equal(await fs.readFile(path.join(f.root,"api.js"),"utf8"), "export function newToken() { return 2; }\n");
+  assert.deepEqual((await fs.readdir(f.root)).sort(), ["api.js","caller.js"], "ordinary edits need no persistent index artifacts");
 });
 
 it("body-only replacements automatically return enclosing declaration references", async t => {
@@ -39,25 +34,19 @@ it("ordinary source questions automatically offer bounded fuzzy paths without se
   assert.equal(selection.text,undefined);
 });
 
-it("reference hints batch symbols, honor identifier boundaries and expose partial searches", async t => {
+it("edit results identify real callers and disclose incomplete reference searches", async t => {
   const f = await engineFixture(t);
-  let calls = 0;
-  const row = JSON.stringify({type:"match",data:{path:{text:path.join(f.root,"caller.js")},line_number:2,lines:{text:"$token(); tokenExtra(); other();"}}});
-  const result = await referencesForNames({root:f.root,names:["$token","token","other"],pendingPaths:[],overlayText:()=>undefined,
-    run:async args => {
-      calls++;
-      assert.equal(args.filter(arg=>arg==="-e").length,3);
-      assert.ok(!args.includes("--files"));
-      return {exitCode:0,stdout:row+'\n{"type":',outputTruncated:true};
-    }});
-  assert.equal(calls,1);
-  assert.deepEqual(result.references.get("$token"),["caller.js:2"]);
-  assert.deepEqual(result.references.get("token"),[]);
-  assert.deepEqual(result.references.get("other"),["caller.js:2"]);
-  assert.equal(result.incomplete,true);
-  const controller = new AbortController();
-  controller.abort();
-  await assert.rejects(referencesForNames({root:f.root,names:["token"],pendingPaths:[],overlayText:()=>undefined,signal:controller.signal}),{name:"AbortError"});
+  const before = ["$token", "token", "other"].map(name => "export function " + name + "() { return 1; }").join("\n");
+  const after = before.replaceAll("return 1", "return 2");
+  await f.write("api.js", before);
+  await f.write("caller.js", "// calls\n$token(); tokenExtra(); other();\n");
+  const result = await f.execute(`return await edit("api.js", ${JSON.stringify(before)}, ${JSON.stringify(after)});`);
+  assert.match(result.details.result, /\$token also referenced in caller\.js:2/);
+  assert.match(result.details.result, /other also referenced in caller\.js:2/);
+  assert.doesNotMatch(result.details.result, /(?:^|\n)token also referenced/);
+  await f.write("huge.js", "other(); // " + "x".repeat(3 * 1024 * 1024) + "\n");
+  const partial = await f.execute(`return await edit("api.js", ${JSON.stringify(after)}, ${JSON.stringify(before)});`);
+  assert.match(partial.details.result, /references incomplete/);
 });
 
 it("ordinary writes report structural problems without echoing successful source", async t => {

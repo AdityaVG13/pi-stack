@@ -3,25 +3,23 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { engineFixture } from "../helpers/engine.mjs";
-import { executeSnap } from "../../src/context/snap.js";
-import { runCommand } from "../../src/fs/workspace.js";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 
 it("a cold source read returns the complete selected file without an index or follow-up read", async t => {
   const f = await engineFixture(t);
   const body = 'export function validateRefreshToken(token) {\n' + '  // keep exact source and whitespace\n'.repeat(15) + '  return token.length > 3;\n}\n';
   await f.write("auth.js", body);
   await f.write("caller.js", 'validateRefreshToken("hello");\n');
-  const calls = [];
-  const hit = await executeSnap({query:"validateRefreshToken",root:f.root,searchDir:f.root,
-    run: async (argv, options) => { calls.push(argv); return runCommand(argv, options); },
-    index: new Proxy({}, {get(){ assert.fail("source lookup must not consult the repository index"); }}),
-  });
-  assert.equal(hit.status,"found");
-  assert.equal(hit.path,"auth.js");
-  assert.equal(calls.length,1,"exact declaration lookup needs one direct search, not a prerequisite file listing");
-  assert.ok(!calls[0].includes("--files"));
-  const result = await f.execute('return await read("validateRefreshToken");');
-  assert.ok(result.details.result.includes(body),"return the actual file, not a seven-line preview or escaped JSON");
+  const calls = [], spawn = childProcess.spawn;
+  childProcess.spawn = (...args) => { calls.push(args); return spawn(...args); };
+  syncBuiltinESMExports();
+  let result;
+  try { result = await f.execute('return await read("validateRefreshToken");'); }
+  finally { childProcess.spawn = spawn; syncBuiltinESMExports(); }
+  assert.ok(calls.length <= 1,"cold locate-and-read must not add a retrieval ladder");
+  for (const [,args] of calls) assert.ok(!args.includes("--files"));
+  assert.ok(result.details.result.includes(body),"return the actual file, not a location preview");
   assert.equal(result.details.trace.length,1);
 });
 
@@ -81,11 +79,11 @@ it("unindexed resolution preserves filename fallback, hidden scopes and incomple
   await fs.writeFile(path.join(f.root,".hidden","auth.js"),'export function hiddenToken() { return 1; }');
   assert.equal((await f.execute('return await read({query:"hiddenToken",resolve:true});')).details.result.status,"not_found");
   assert.equal((await f.execute('return await read({path:".hidden",about:"hiddenToken",resolve:true});')).details.result.status,"found");
-  let calls=0;
-  const hit=await executeSnap({query:"hiddenToken",root:f.root,searchDir:f.root,run:async()=>{
-    calls++; return {stdout:'{"type":"match"',stderr:"",exitCode:0,outputTruncated:true};
-  }});
-  assert.equal(hit.status,"incomplete"); assert.equal(hit.path,null); assert.equal(calls,1);
+  await f.write("overflow.js", "export function floodToken() {}\n" + ("floodToken(); // " + "x".repeat(1024) + "\n").repeat(2200));
+  const hit = (await f.execute('return await read({query:"floodToken",resolve:true});')).details.result;
+  assert.equal(hit.status,"incomplete");
+  assert.equal(hit.path,null);
+  assert.equal(hit.text,undefined,"a clipped search must not authorize a file selection");
 });
 
 it("oversized resolved files carry exact source ranges and actionable continuation", async t => {
