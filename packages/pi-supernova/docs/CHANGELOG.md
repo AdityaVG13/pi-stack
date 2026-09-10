@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.4.0] - 2026-09-10
 
 - Disable citation elision by default (`seenWindow: 0`), including direct bridge/ledger defaults. A failure-first integration regression preserves complete results across hidden, reordered and removed context. Positive windows remain an explicit research opt-in, not a validated retention guarantee. The historical ledger measurements below describe that experimental mode only.
 
