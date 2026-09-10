@@ -9,9 +9,11 @@ import { engineFixture } from "../helpers/engine.mjs";
 
 it("unsupported edit overloads fail before dispatch with usable signatures", async t => {
   const f = await engineFixture(t);
+
   for (const call of ['edit("missing.txt", {oldText:"a",newText:"b"})', 'edit({path:"missing.txt",edits:[]})', 'edit({path:"missing.txt",patch:"",oldText:"a",newText:"b"})']) {
     await assert.rejects(f.execute('await ' + call), /edit.*(?:signature|use|requires)/i);
   }
+
   await f.write("edit.txt", "retained");
   await assert.rejects(f.execute('await edit("edit.txt", "");'), /edit.*(?:signature|use|requires)/i);
   assert.equal(await fs.readFile(path.join(f.root,"edit.txt"),"utf8"), "retained");
@@ -31,9 +33,11 @@ it("JSON projection parses the full report before selecting fields and array sli
   assert.deepEqual(array.details.result,[null,null]);
   await assert.rejects(f.execute('return await read({path:"report.json",json:".padding"});'), /JSON selection exceeds.*budget/);
   await assert.rejects(f.execute('return await read({path:"report.json",json:true});'), /JSON selection exceeds.*budget/);
+
   for (const json of [".missing", ".toString", ".values[99]", ".verdict.length", ".values | length", "", "..verdict", ".values[-1]", ".values[1:9007199254740992]"]) {
     await assert.rejects(f.execute('return await read({path:"report.json",json:' + JSON.stringify(json) + '});'), /JSON (?:selector|field|index)/);
   }
+
   await assert.rejects(f.execute('return await read({path:"report.json",json:".verdict",limit:1});'), /JSON.*cannot combine/);
   await f.write("invalid.json", '{"verdict":"OK"} trailing junk');
   await assert.rejects(f.execute('return await read({path:"invalid.json",json:".verdict"});'), /invalid JSON/);
@@ -48,9 +52,11 @@ it("projected reads see staged JSON and session URI queries without losing isola
   const execute = code => f.tool.execute("resource",{code},undefined,undefined,{cwd:f.root,sessionManager:{getArtifactsDir:()=>path.join(f.root,"artifacts")}});
   assert.equal((await execute('return await read("agent://SanskritModelSurvey?q=.answer");')).details.result,"answer λ");
   assert.equal((await execute('return await read("agent://SanskritModelSurvey?q=%2Eanswer");')).details.result,"answer λ");
+
   for (const uri of ["agent://SanskritModelSurvey?q=.answer&x=y","agent://SanskritModelSurvey?q=.answer&q=.ignored","agent://SanskritModelSurvey?q=", "agent://SanskritModelSurvey?q=.answer#extra"]) {
     await assert.rejects(execute('return await read(' + JSON.stringify(uri) + ');'), /session resource|JSON selector/);
   }
+
   const staged = await f.execute('await write("staged.json",JSON.stringify({value:42})); return await read({path:"staged.json",json:".value"});');
   assert.equal(staged.details.result,42);
 });
@@ -59,14 +65,18 @@ it("projected reads see staged JSON and session URI queries without losing isola
 it("projection fails closed for incompatible views, batches and delegated readers", async t => {
   const f = await engineFixture(t);
   await f.write("report.json", JSON.stringify({value:"x".repeat(20000)}));
+
   for (const options of [{complete:true}, {resolve:true}, {about:"value"}, {outline:true}, {evidence:true}, {offset:1}]) {
     await assert.rejects(f.execute('return await read(' + JSON.stringify({path:"report.json",json:".value",...options}) + ');'), /JSON reads cannot combine/);
   }
+
   await assert.rejects(f.execute('return await read(["report.json","report.json","report.json","report.json"],{json:".value"});'), /incomplete read/);
   const outcomes = await f.execute('return (await Promise.allSettled([read({path:"report.json",json:".value"}),read({path:"missing.json",json:".value"})])).map(r=>r.status);');
   assert.deepEqual(outcomes.details.result,["fulfilled","rejected"]);
   let calls = 0;
-  f.pi.registerTool({name:"read",execute:async()=>{calls++; return {content:[{type:"text",text:'{"wrong":true}'}]};}});
+  f.pi.registerTool({name:"read",execute:async()=>{calls++;
+
+ return {content:[{type:"text",text:'{"wrong":true}'}]};}});
   await assert.rejects(f.execute('return await read({path:"report.json",json:".value"});'), /Supernova-owned read adapter/);
   assert.equal(calls,0);
 });
@@ -83,6 +93,7 @@ it("large Markdown path audits use matching windows rather than complete-file re
 it("sparse argument lists cannot silently become successful null results", async t => {
   const f = await engineFixture(t);
   await f.write("small.json", '{"value":1}');
+
   for (const code of [
     'return await read({path:"small.json",json:Array(2)});',
     'return await read(Array(2));',
@@ -94,13 +105,16 @@ it("JSON reads reject a FIFO without waiting for a writer or occupying an I/O wo
   const f = await engineFixture(t);
   const fifo = path.join(f.root,"report.json");
   await promisify(execFile)("mkfifo",[fifo]);
+
   // Release a pre-fix blocked open after its deadline; never leave a hung test worker.
   const release = new Promise(resolve => setTimeout(resolve,200)).then(async () => {
     const file = await fs.open(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK).catch(error => {
       if (error.code !== "ENXIO") throw error;
     });
+
     await file?.close();
   });
+
   try {
     await assert.rejects(f.tool.execute("fifo",{code:'return await read({path:"report.json",json:true});',timeoutMs:100},undefined,undefined,{cwd:f.root}), /regular file/);
   } finally { await release; }
@@ -110,6 +124,7 @@ it("64 oversized JSON slice selections fail within a bounded host heap and leave
   const f = await engineFixture(t);
   await f.write("large.json",JSON.stringify({items:Array(400000).fill(0)}));
   const entry = fileURLToPath(new URL("../../index.js",import.meta.url));
+
   const program = [
     'import assert from "node:assert/strict";',
     'import {registerCodeMode} from ' + JSON.stringify(entry) + ';',
@@ -119,6 +134,7 @@ it("64 oversized JSON slice selections fail within a bounded host heap and leave
     'const result=await tool.execute("healthy",{code:\'return await read({path:"large.json",json:".items[0:2]"});\'},undefined,undefined,ctx);',
     'assert.deepEqual(result.details.result,[0,0]);console.log("budget rejected; host healthy");',
   ].join("\n");
+
   const result = await promisify(execFile)("bash",["-c",'ulimit -c 0; exec "$@"',"json-budget",process.execPath,"--max-old-space-size=128","--input-type=module","-e",program],{timeout:10000,maxBuffer:1024*1024});
   assert.match(result.stdout,/budget rejected; host healthy/);
 });
@@ -132,10 +148,12 @@ it("JSON selectors preserve quoted keys, scalar roots and all 64 mixed slice res
   const selectors = Array.from({length:64},(_,i)=>".["+JSON.stringify(keys[i%keys.length])+"].values[0:4]["+(i%4)+"]");
   const result = await f.execute('return await read({path:"keys.json",json:'+JSON.stringify(selectors)+'});');
   assert.deepEqual(result.details.result,selectors.map((_,i)=>document[keys[i%keys.length]].values[i%4]));
+
   for (const value of [null,false,0,"",[],{}]) {
     await f.write("scalar.json",JSON.stringify(value));
     assert.deepEqual((await f.execute('return await read({path:"scalar.json",json:true});')).details.result,value);
   }
+
   await assert.rejects(f.execute('return await read({path:"keys.json",json:Array(65).fill(".")});'),/1 to 64 selectors/);
 });
 
@@ -154,6 +172,7 @@ it("the JSON input limit counts UTF-8 bytes and accepts the exact boundary", asy
 it("literal data respects encoded size, accepts falsy inputs and does not leak between workers", async t => {
   const f = await engineFixture(t);
   const execute = data => f.tool.execute("data-boundary",{code:'return data;',data},undefined,undefined,{cwd:f.root});
+
   for (const value of [null,false,0,""]) assert.equal((await execute(value)).details.result,value);
   const code='return data.length;', data="x".repeat(47998);
   assert.equal((await f.tool.execute("exact-data",{code,data},undefined,undefined,{cwd:f.root})).details.result,47998);
@@ -166,11 +185,14 @@ it("literal data respects encoded size, accepts falsy inputs and does not leak b
 
 it("concurrent queried resources remain session-scoped and cannot escape through symlinks", async t => {
   const f = await engineFixture(t);
+
   const dirs = await Promise.all(["one","two"].map(async name=>{
     const dir=path.join(f.root,name); await fs.mkdir(dir);
     await fs.writeFile(path.join(dir,"CaseSensitive.md"),JSON.stringify({"q?%&+#":name}));
+
     return dir;
   }));
+
   const uri='agent://CaseSensitive?q='+encodeURIComponent('.["q?%&+#"]');
   const execute=(index,path=uri)=>f.tool.execute("uri-scope",{code:'return await read(data);',data:path},undefined,undefined,{cwd:f.root,sessionManager:{getArtifactsDir:()=>dirs[index]}});
   const results=await Promise.all(Array.from({length:16},(_,i)=>execute(i%2)));

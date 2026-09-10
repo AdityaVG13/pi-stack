@@ -11,9 +11,11 @@ const run = (f, args, signal, cwd = f.root) => f.tool.execute("program-file", ar
 it("file admission rejects ambiguity, non-files, invalid UTF-8 and invalid syntax before commands", async t => {
   const f = await engineFixture(t);
   await f.write("audit.js", 'await write("never.txt","bad"); return 1;');
+
   for (const args of [{}, {file:"audit.js",code:"return 2;"}, {file:""}, {file:42}, {file:null}, {file:"missing.js"}, {file:"."}, {file:"agent://code"}, {file:"../outside.js"}]) {
     await assert.rejects(run(f,args), /exactly one|requires path|no such file|ENOENT|root directory|filesystem path|escapes workspace/);
   }
+
   await fs.mkdir(path.join(f.root,"directory"));
   await assert.rejects(run(f,{file:"directory"}), /regular file/);
   await fs.writeFile(path.join(f.root,"broken.js"), Buffer.concat([Buffer.from('await write("never.txt","bad");'), Buffer.from([255])]));
@@ -24,7 +26,9 @@ it("file admission rejects ambiguity, non-files, invalid UTF-8 and invalid synta
   await assert.rejects(run(f,{file:"empty.js"}), /non-empty/);
   await assert.rejects(run(f,{code:'await write("never.txt","bad"); )'}),error=>{
     assert.match(error.message,/syntax error.*no commands ran/s);
-    assert.match(error.message,/data/); return true;
+    assert.match(error.message,/data/);
+
+ return true;
   });
   await f.write("empty.js","async () => 42");
   assert.equal((await run(f,{file:"empty.js"})).details.result,42);
@@ -43,10 +47,12 @@ it("file programs enforce complete-source UTF-16 caps including multibyte input"
   assert.ok(Buffer.byteLength(exact) > 65536);
   await f.write("audit.js", exact);
   assert.equal((await run(f,{file:"audit.js"})).details.result, 42);
+
   for (const code of [exact + " ", 'await write("never.txt","bad");' + " ".repeat(limit * 3)]) {
     await f.write("audit.js", code);
     await assert.rejects(run(f,{file:"audit.js"}), /code exceeds/);
   }
+
   await assert.rejects(fs.stat(path.join(f.root,"never.txt")), {code:"ENOENT"});
 });
 
@@ -62,10 +68,12 @@ it("file program admission rechecks symlinks and rejects FIFOs without a writer"
   await assert.rejects(run(f,{file:"escape/" + path.basename(f.root) + "/../outside.js"}), /escapes workspace/);
   const fifo = path.join(f.root,"pipe.js");
   await promisify(execFile)("mkfifo",[fifo]);
+
   const release = new Promise(resolve => setTimeout(resolve,200)).then(async () => {
     const handle = await fs.open(fifo,fs.constants.O_WRONLY | fs.constants.O_NONBLOCK).catch(error => { if (error.code !== "ENXIO") throw error; });
     await handle?.close();
   });
+
   try { await assert.rejects(run(f,{file:"pipe.js",timeoutMs:1000}), /regular file/); }
   finally { await release; }
 });

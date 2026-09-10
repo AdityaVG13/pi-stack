@@ -10,6 +10,7 @@ export function buildEditDiff(filePath, originalText, oldText, newText) {
   const newLines = contentLines(newText);
 
   const lines = [];
+
   if (startLine > 1 && fileLines.length >= startLine - 1) {
     lines.push({ type: "context", lineNum: startLine - 1, text: fileLines[startLine - 2] });
   }
@@ -17,11 +18,13 @@ export function buildEditDiff(filePath, originalText, oldText, newText) {
   for (let i = 0; i < oldLines.length; i++) {
     lines.push({ type: "remove", lineNum: startLine + i, text: oldLines[i] });
   }
+
   for (let i = 0; i < newLines.length; i++) {
     lines.push({ type: "add", lineNum: startLine + i, text: newLines[i] });
   }
 
   const afterSourceLine = startLine + oldLines.length;
+
   if (fileLines.length >= afterSourceLine) {
     lines.push({ type: "context", lineNum: startLine + newLines.length, text: fileLines[afterSourceLine - 1] });
   }
@@ -39,16 +42,20 @@ export function buildMultiEditDiff(filePath, originalText, replacements) {
   const parts = replacements.map(({ oldText, newText }) =>
     buildEditDiff(filePath, originalText, oldText, newText),
   );
+
   const lines = [];
   let shift = 0;
+
   for (const [index, part] of parts.entries()) {
     for (const line of part.lines) {
       if (line.type === "context") continue;
       lines.push(line.type === "add" ? { ...line, lineNum: line.lineNum + shift }
         : { ...line, newLineNum: Math.max(1, line.lineNum + shift) });
     }
+
     shift += replacements[index].newText.split("\n").length - replacements[index].oldText.split("\n").length;
   }
+
   return {
     path: filePath,
     op: "edit",
@@ -75,6 +82,7 @@ export function buildPatchDiff(filePath, patchText) {
 
   for (const patchLine of patchLines) {
     const headerMatch = (/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?/).exec(patchLine);
+
     if (headerMatch) {
       // A zero-length range names the line before the insertion/deletion point.
       oldLineNum = Number(headerMatch[1]) + Number(headerMatch[2] === "0");
@@ -82,9 +90,12 @@ export function buildPatchDiff(filePath, patchText) {
       inHunk = true;
       continue;
     }
+
     if (!inHunk || patchLine.startsWith("\\")) continue;
     const kind = classifyPatchLine(patchLine);
+
     if (!kind) continue;
+
     if (kind === "remove") {
       removed += 1;
       lines.push({ type: "remove", lineNum: oldLineNum, newLineNum, text: patchLine.slice(1) });
@@ -106,7 +117,9 @@ export function buildPatchDiff(filePath, patchText) {
 function contentLines(text) {
   if (!isString(text) || text.length === 0) return [];
   const lines = text.replace(/\r\n/g, "\n").split("\n");
+
   if (lines.at(-1) === "") lines.pop();
+
   return lines;
 }
 
@@ -115,12 +128,15 @@ export function buildWriteDiff(filePath, previousText, newText) {
   const oldLines = contentLines(previousText);
   const maxStoredLines = 64;
   const lines = [];
+
   for (let i = 0; i < oldLines.length && lines.length < maxStoredLines; i++) {
     lines.push({ type: "remove", lineNum: i + 1, text: oldLines[i] });
   }
+
   for (let i = 0; i < newLines.length && lines.length < maxStoredLines; i++) {
     lines.push({ type: "add", lineNum: i + 1, text: newLines[i] });
   }
+
   return {
     path: filePath,
     op: "write",

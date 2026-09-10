@@ -21,8 +21,10 @@ export { measureWidth, hardTruncate, clampLine };
 function formatDiffRows(diff, theme, maxShown = 6) {
 	if (!diff || !Array.isArray(diff.lines) || diff.lines.length === 0) return [];
 	const body = [];
+
 	for (const item of diff.lines.slice(0, maxShown)) {
 		const num = item.lineNum || 0;
+
 		if (item.type === "remove") {
 			const gut = theme.fg("toolDiffRemoved", `-${num}`.padStart(5));
 			body.push(`${gut}${theme.fg("borderMuted", " │ ")}${theme.fg("toolDiffRemoved", `- ${cleanInlineText(item.text)}`)}`);
@@ -34,10 +36,13 @@ function formatDiffRows(diff, theme, maxShown = 6) {
 			body.push(`${gut}${theme.fg("borderMuted", " │ ")}${theme.fg("toolDiffContext", `  ${cleanInlineText(item.text)}`)}`);
 		}
 	}
+
 	const displayLineCount = Number.isInteger(diff.displayLineCount) ? diff.displayLineCount : diff.lines.length;
+
 	if (displayLineCount > maxShown) {
 		body.push(theme.fg("dim", `      │ … ${displayLineCount - maxShown} more lines`));
 	}
+
 	return body;
 }
 
@@ -50,6 +55,7 @@ function stripUnsafeControls(value) {
 
 function cleanBlockText(value) {
 	const normalized = stripVTControlCharacters(String(value ?? "")).replace(/\r\n?/g, "\n");
+
 	return stripUnsafeControls(normalized).replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
 }
 
@@ -59,8 +65,10 @@ function cleanInlineText(value) {
 
 function displayOperation(tool, target, diff, ok, item) {
 	const rawName = cleanInlineText(tool);
+
 	if (!rawName) return null;
 	const normalized = rawName === "apply_patch" ? "patch" : rawName;
+
 	return { tool: normalized, target, diff, ok, ms: item?.ms, exitCode: item?.exitCode, time: item?.time, error: item?.error };
 }
 
@@ -76,12 +84,17 @@ function isTheme(value) {
 export function normalizeCallRenderArgs(a, b, c) {
 	if (isTheme(b)) {
 		const context = isObject(c) ? c : {};
+
 		if (!isObject(context.state)) context.state = {};
+
 		return { args: a, theme: b, context, host: "pi" };
 	}
+
 	if (isTheme(c)) {
 		const options = isObject(b) ? b : {};
+
 		if (!isObject(options.state)) options.state = {};
+
 		const context = {
 			...options,
 			state: options.state,
@@ -92,8 +105,10 @@ export function normalizeCallRenderArgs(a, b, c) {
 			lastComponent: options.lastComponent,
 			invalidate: options.invalidate,
 		};
+
 		return { args: a, theme: c, context, host: "omp", options };
 	}
+
 	throw new Error("supernova renderCall: theme missing (expected Pi or OMP signature)");
 }
 
@@ -109,14 +124,19 @@ function contextFrom(opts, ctxOrArgs) {
 	if (isObject(ctxOrArgs) && !isTheme(ctxOrArgs)) {
 		if ("lastComponent" in ctxOrArgs || "state" in ctxOrArgs || "invalidate" in ctxOrArgs) return ctxOrArgs;
 	}
+
 	return { state: opts.state, lastComponent: opts.lastComponent };
 }
 
 function detectResultHost(options, ctxOrArgs) {
 	if (isTheme(options)) return "pi";
+
 	if (!isObject(ctxOrArgs)) return "pi";
+
 	if ("lastComponent" in ctxOrArgs || "invalidate" in ctxOrArgs) return "pi";
+
 	if ("code" in ctxOrArgs || "file" in ctxOrArgs || "programs" in ctxOrArgs || "timeoutMs" in ctxOrArgs) return "omp";
+
 	return "pi";
 }
 
@@ -124,7 +144,9 @@ function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs) {
 	if (isTheme(themeOrCtx)) {
 		const opts = isObject(options) ? options : {};
 		const context = contextFrom(opts, ctxOrArgs);
+
 		if (!isObject(context.state)) context.state = {};
+
 		return {
 			result,
 			expanded: !!opts.expanded,
@@ -136,10 +158,13 @@ function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs) {
 			options: opts,
 		};
 	}
+
 	// Extremely defensive: (result, theme, context) oddball
 	if (isTheme(options)) {
 		const context = isObject(themeOrCtx) ? themeOrCtx : {};
+
 		if (!isObject(context.state)) context.state = {};
+
 		return {
 			result,
 			expanded: !!context.expanded,
@@ -151,18 +176,22 @@ function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs) {
 			options: {},
 		};
 	}
+
 	throw new Error("supernova renderResult: theme missing (expected Pi or OMP signature)");
 }
 
 function batchTarget(paths) {
 	const names = paths.map((p) => String(p).replace(/\\/g, "/").split("/").pop());
+
 	return `${paths.length} files: ${names.join(", ")}`;
 }
 
 const OPERATION_TARGETS = [
 	[(item) => item?.name === "snap", (item, args) => {
 		const query = args.query ? `"${args.query}"` : "";
+
 		if (!args.path) return query;
+
 		return `${query} → ${args.path}`;
 	}],
 	[(item) => item?.name === "search", (item, args) => (args.query ? `"${args.query}"` : "")],
@@ -177,60 +206,79 @@ const OPERATION_TARGETS = [
 
 function operationTarget(item) {
 	const args = item?.args || {};
+
 	for (const [predicate, formatter] of OPERATION_TARGETS) {
 		if (predicate(item, args)) return formatter(item, args);
 	}
+
 	return "";
 }
 
 function parseDiffLine(rawLine) {
 	const signed = /^([+-])\s*(\d+)\s?(.*)$/.exec(rawLine);
+
 	if (signed) return { type: signed[1] === "+" ? "add" : "remove", lineNum: Number(signed[2]), text: signed[3] };
 	const contextual = /^\s+(\d+)\s?(.*)$/.exec(rawLine);
+
 	if (contextual) return { type: "context", lineNum: Number(contextual[1]), text: contextual[2] };
+
 	return null;
 }
 
 // Text diffs are immutable, even when hosts replace trace snapshots on each frame.
 // Cache only parsed data, not theme, paths or mutable result objects.
 const textDiffCache = new Map();
+
 let cachedDiffChars = 0;
+
 const MAX_CACHED_DIFF_CHARS = 1_000_000;
 
 function normalizeTraceDiff(item) {
 	const diff = item?.diff;
+
 	if (isObject(diff)) return diff;
+
 	if (!isString(diff) || !diff.trim()) return undefined;
 	const cached = textDiffCache.get(diff);
+
 	if (cached) return cached;
 	const lines = [];
 	let displayLineCount = 0;
 	let added = 0;
 	let removed = 0;
+
 	for (const rawLine of cleanBlockText(diff).split("\n")) {
 		const parsed = parseDiffLine(rawLine);
+
 		if (!parsed) continue;
+
 		if (parsed.type === "add") added += 1;
 		else if (parsed.type === "remove") removed += 1;
 		displayLineCount++;
+
 		if (lines.length < 24) lines.push(parsed);
 	}
+
 	if (lines.length === 0) return undefined;
 	const parsed = { added, removed, lines, displayLineCount };
+
 	if (diff.length <= MAX_CACHED_DIFF_CHARS) {
 		while (textDiffCache.size >= 24 || cachedDiffChars + diff.length > MAX_CACHED_DIFF_CHARS) {
 			const oldest = textDiffCache.keys().next().value;
 			textDiffCache.delete(oldest);
 			cachedDiffChars -= oldest.length;
 		}
+
 		textDiffCache.set(diff, parsed);
 		cachedDiffChars += diff.length;
 	}
+
 	return parsed;
 }
 
 function operationsFromTrace(trace) {
 	if (!Array.isArray(trace)) return [];
+
 	return trace
 		.map((item) => displayOperation(item?.name || "tool", operationTarget(item), normalizeTraceDiff(item), item?.ok, item))
 		.filter(Boolean);
@@ -241,53 +289,71 @@ const EMPTY_CALL = { render: () => [], invalidate() {} };
 
 export function renderSupernovaCall(a, b, c) {
 	const { context, options } = normalizeCallRenderArgs(a, b, c);
+
 	if (options) options.lastComponent = EMPTY_CALL;
 	else if (context) context.lastComponent = EMPTY_CALL;
+
 	return EMPTY_CALL;
 }
 
 const TOOL_COL = 7;
+
 const DURATION_COL = 6;
 
 function formatDuration(ms) {
 	if (!Number.isFinite(ms) || ms < 0) return "";
+
 	if (ms < 1000) return `${Math.round(ms)}ms`;
+
 	if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
 	const minutes = Math.floor(ms / 60000);
 	const seconds = Math.round((ms % 60000) / 1000);
+
 	return `${minutes}m${String(seconds).padStart(2, "0")}s`;
 }
 
 /** First meaningful line of a shell command plus a count of the hidden remainder. */
 function summarizeCommand(raw) {
 	const lines = cleanBlockText(raw).split("\n").map((line) => line.trim()).filter(Boolean);
+
 	if (lines.length === 0) return "";
 	const first = lines[0].replace(/\s+/g, " ");
+
 	return lines.length > 1 ? `${first} …+${lines.length - 1} lines` : first;
 }
 
 const SHELL_TOOLS = ["bash", "exec"];
+
 const SEARCH_TOOLS = ["snap", "search"];
 
 function formatTarget(op, budget) {
 	if (SHELL_TOOLS.includes(op.tool)) return clampLine(summarizeCommand(op.target), budget);
 	const text = cleanInlineText(op.target);
+
 	if (!text) return "";
+
 	if (SEARCH_TOOLS.includes(op.tool)) return clampLine(text, budget);
+
 	return fitPath(text, budget);
 }
 
 function opMarker(theme, op, isPartial, isError) {
 	if (op.ok === false) return theme.fg("error", "×");
+
 	if (op.ok === true) return theme.fg("success", "✓");
+
 	if (isPartial) return theme.fg("dim", "·");
+
 	if (isError) return theme.fg("error", "×");
+
 	return theme.fg("success", "✓");
 }
 
 function opDuration(op, isPartial) {
 	if (Number.isFinite(op.ms)) return formatDuration(op.ms);
+
 	if (isPartial && op.ok === undefined && Number.isFinite(op.time)) return formatDuration(Date.now() - op.time) + "…";
+
 	return "";
 }
 
@@ -303,54 +369,69 @@ function formatOpRow(theme, op, width, isPartial, isError) {
 	const duration = theme.fg("dim", durationText.padStart(DURATION_COL));
 	let prefix = `${marker} ${tool} ${duration}  `;
 	let used = 2 + toolText.length + 1 + DURATION_COL + 2;
+
 	if (Number.isInteger(op.exitCode)) {
 		const exit = `exit ${op.exitCode}`;
 		prefix += theme.fg("error", exit) + "  ";
 		used += exit.length + 2;
 	}
+
 	if (op.diff && isObject(op.diff)) {
 		const added = `+${op.diff.added || 0}`;
 		const removed = `-${op.diff.removed || 0}`;
 		prefix += theme.fg("toolDiffAdded", added) + theme.fg("dim", "/") + theme.fg("toolDiffRemoved", removed) + " ";
 		used += added.length + 1 + removed.length + 1;
 	}
+
 	const budget = Math.max(1, width - used);
 	const target = formatTarget(op, budget);
+
 	if (target) return prefix + theme.fg("muted", target);
+
 	if (op.ok === false && op.error) return prefix + theme.fg("error", clampLine(cleanInlineText(op.error), budget));
+
 	return prefix.trimEnd();
 }
 
 function traceFor(payload, context) {
 	const trace = payload?.trace || context?.state?.trace;
+
 	return Array.isArray(trace) ? trace : [];
 }
 
 function resultLines(value, width) {
 	const text = isString(value) ? value : formatValue(value);
+
 	return cleanBlockText(text).split("\n").flatMap(line => wrapLine(line, width));
 }
 
 function appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, isError) {
 	for (const op of ops.slice(0, maxOps)) {
 		lines.push(formatOpRow(theme, op, width, isPartial, isError));
+
 		if (maxDiffLines === 0 || !op.diff || !isObject(op.diff)) continue;
+
 		for (const row of formatDiffRows(op.diff, theme, maxDiffLines)) lines.push("  " + row);
 	}
+
 	if (ops.length > maxOps) lines.push(theme.fg("dim", `  … ${ops.length - maxOps} more calls`));
 }
 
 function appendTail(lines, theme, payload, expanded, isError, width) {
 	if (isError) {
 		const error = "✗ " + (payload?.error ? cleanBlockText(payload.error) : "error");
+
 		for (const line of expanded ? resultLines(error, width) : error.split("\n")) lines.push(theme.fg("error", line));
 	}
 	else if (expanded && payload?.result !== undefined) {
 		lines.push(theme.fg("dim", "── result ──"));
+
 		for (const line of resultLines(payload.result, width)) lines.push(theme.fg("toolOutput", line));
 	}
+
 	if (expanded && payload?.logs?.length) {
 		lines.push(theme.fg("dim", "── logs ──"));
+
 		for (const log of payload.logs) for (const line of resultLines(log, width)) lines.push(theme.fg("dim", line));
 	}
 }
@@ -365,8 +446,10 @@ function buildBodyLines(theme, width, { payload, context, expanded, isPartial, i
 	const ops = operationsFromTrace(visible);
 	const lines = [];
 	appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, isError);
+
 	if (trace.length > maxOps) lines.push(theme.fg("dim", `  … ${trace.length - maxOps} ${isPartial ? "earlier" : "more"} calls`));
 	appendTail(lines, theme, payload, expanded, isError, width);
+
 	return { lines, opCount: trace.length };
 }
 
@@ -374,6 +457,7 @@ function describeCard(model, opCount) {
 	const wall = model.payload?.wallMs != null ? formatDuration(model.payload.wallMs) : "";
 	const calls = opCount > 0 ? `${opCount} call${opCount === 1 ? "" : "s"}` : "";
 	const status = model.isError ? "failed" : model.isPartial ? "running" : calls ? "" : "complete";
+
 	return [calls, status, wall].filter(Boolean).join(" · ");
 }
 
@@ -388,14 +472,18 @@ class UnifiedResultCard {
 	}
 	render(width = 80) {
 		const { theme, model } = this;
+
 		if (!theme || !model || width <= 0) return [];
+
 		if (this.cache?.width === width) return this.cache.lines;
 		const view = buildBodyLines(theme, Math.max(1, width - 4), model);
+
 		const header = novaStatusLine(theme, {
 			icon: model.isError ? "error" : model.isPartial ? "running" : undefined,
 			title: "nova",
 			description: describeCard(model, view.opCount),
 		});
+
 		// A program with no host calls has nothing to frame: one status line, no empty box.
 		const lines = view.lines.length === 0
 			? [clampLine(header, width)]
@@ -407,14 +495,18 @@ class UnifiedResultCard {
 					borderColor: model.isError ? "error" : "dim",
 					width,
 				})).render(width);
+
 		this.cache = { width, lines };
+
 		return lines;
 	}
 }
 
 function syncState(context, payload) {
 	if (!context?.state || !payload) return;
+
 	if (Array.isArray(payload.trace) && context.state.trace !== payload.trace) context.state.trace = payload.trace;
+
 	if (payload.wallMs != null && context.state.wallMs !== payload.wallMs) context.state.wallMs = payload.wallMs;
 }
 
@@ -432,8 +524,10 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 	const isError = result?.isError || payload?.ok === false;
 	const previous = host === "omp" ? options?.lastComponent : context?.lastComponent;
 	const comp = previous instanceof UnifiedResultCard ? previous : new UnifiedResultCard();
+
 	if (host === "omp" && options) options.lastComponent = comp;
 	else if (context) context.lastComponent = comp;
 	comp.set(theme, { payload, context, args, expanded, isPartial, isError });
+
 	return comp;
 }

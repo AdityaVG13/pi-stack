@@ -86,28 +86,36 @@ export function mergeNativeToolDefinitions(tools, capturedNames = []) {
     merged.push(fallback && !captured.has(tool.name)
       ? { ...tool, ...fallback, sourceInfo: { path: "<native:" + tool.name + ">" } }
       : tool);
+
     if (tool?.name) seen.add(tool.name);
   }
+
   for (const fallback of NATIVE_TOOL_DEFINITIONS) {
     if (!seen.has(fallback.name)) {
       merged.push({ ...fallback, sourceInfo: { path: "<native:" + fallback.name + ">" } });
     }
   }
+
   return merged;
 }
 
 function sourcePathOf(tool) {
   if (tool.sourceInfo && isString(tool.sourceInfo.path)) return tool.sourceInfo.path;
+
   if (isString(tool.extensionPath)) return tool.extensionPath;
+
   if (isString(tool.sourcePath)) return tool.sourcePath;
+
   return undefined;
 }
 
 function normalizeTool(tool) {
   if (!tool || !isObject(tool)) return null;
   const name = isString(tool.name) ? tool.name : "";
+
   if (!name) return null;
   const description = isString(tool.description) ? tool.description : "";
+
   return {
     name,
     nameLower: name.toLowerCase(),
@@ -122,12 +130,16 @@ function normalizeTool(tool) {
 export function buildCatalog(tools, excludeNames = []) {
   const exclude = new Set(excludeNames);
   const rows = [];
+
   for (const tool of tools || []) {
     const row = normalizeTool(tool);
+
     if (!row || exclude.has(row.name)) continue;
     rows.push(row);
   }
+
   rows.sort((a, b) => a.name.localeCompare(b.name));
+
   return rows;
 }
 
@@ -143,74 +155,94 @@ function scoreRow(row, tokens) {
   const name = row.nameLower || row.name.toLowerCase();
   const desc = row.descLower || row.description.toLowerCase();
   let score = 0;
+
   for (const token of tokens) {
     if (name === token) score += 10;
     else if (name.includes(token)) score += 5;
     else if (desc.includes(token)) score += 2;
   }
+
   return score;
 }
 
 export function searchCatalog(catalog, query, limit = 12) {
   const tokens = tokenize(query);
   const scored = [];
+
   for (const row of catalog) {
     const score = scoreRow(row, tokens);
+
     if (score <= 0 && tokens.length > 0) continue;
     scored.push({ name: row.name, description: row.description.slice(0, 160), score });
   }
+
   scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+
   return scored.slice(0, Math.max(1, limit)).map(({ score: _s, ...hit }) => hit);
 }
 
 /** Optimal string alignment distance: insert/delete/substitute/adjacent-transpose cost 1. */
 function editDistance(a, b) {
   const rows = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array.from({ length: b.length }, () => 0)]);
+
   for (let j = 1; j <= b.length; j++) rows[0][j] = j;
+
   for (let i = 1; i <= a.length; i++) {
     for (let j = 1; j <= b.length; j++) {
       const cost = a[i - 1] === b[j - 1] ? 0 : 1;
       let best = Math.min(rows[i - 1][j] + 1, rows[i][j - 1] + 1, rows[i - 1][j - 1] + cost);
+
       if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) best = Math.min(best, rows[i - 2][j - 2] + 1);
       rows[i][j] = best;
     }
   }
+
   return rows[a.length][b.length];
 }
 
 /** Closest tool names for a mistyped name: substring hits first, then a length-scaled edit distance. */
 function suggestNames(name, candidates, limit = 3) {
   const needle = String(name || "").toLowerCase();
+
   if (!needle) return [];
   const maxDistance = Math.max(1, Math.floor(needle.length / 3));
   const scored = [];
+
   for (const candidate of candidates) {
     const lower = candidate.toLowerCase();
+
     if (lower === needle) continue;
     const distance = lower.includes(needle) || needle.includes(lower) ? 1 : editDistance(needle, lower);
+
     if (distance <= maxDistance) scored.push({ candidate, distance });
   }
+
   scored.sort(
     (a, b) =>
       a.distance - b.distance ||
       Math.abs(a.candidate.length - needle.length) - Math.abs(b.candidate.length - needle.length) ||
       a.candidate.localeCompare(b.candidate),
   );
+
   return scored.slice(0, limit).map((s) => s.candidate);
 }
 
 export function unknownToolMessage(name, candidates) {
   const close = suggestNames(name, candidates);
   const hint = close.length ? ` Did you mean ${close.map((c) => JSON.stringify(c)).join(", ")}?` : "";
+
   return `unknown tool "${name}".${hint} Check the command name and configured tool exclusions.`;
 }
 
 export function describeTool(catalog, name) {
   const row = catalog.find((t) => t.name === name);
+
   if (!row) {
     return { ok: false, error: unknownToolMessage(name, catalog.map((t) => t.name)) };
   }
+
   if (!isObject(row.parameters)) return { ok: false, name, error: "tool schema unavailable: " + (row.schemaError ?? name) };
+
   if (!row._described) {
     row._described = {
       ok: true,
@@ -220,5 +252,6 @@ export function describeTool(catalog, name) {
       sourcePath: row.sourcePath,
     };
   }
+
   return row._described;
 }

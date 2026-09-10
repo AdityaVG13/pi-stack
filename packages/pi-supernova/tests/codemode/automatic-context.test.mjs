@@ -67,6 +67,7 @@ it("shell failures and timeouts carry fresh source relative to the command cwd",
   await fs.symlink(external,path.join(f.root,"outside.js"));
   await assert.rejects(f.execute('return await bash("printf outside.js:1; exit 1");'), error => {
     assert.doesNotMatch(error.message,/private-source-not-requested/);
+
     return true;
   });
   const absolute = await fs.realpath(path.join(f.root,"sub","fault.js"));

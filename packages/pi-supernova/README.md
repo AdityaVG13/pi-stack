@@ -330,6 +330,12 @@ outside the active callback are rejected. Await the checkpoint before proceeding
 
 Default limits are in `src/config/config.default.json`. Configuration loads from
 `~/.pi/agent/supernova.json`, the configured host directory, or `PI_SUPERNOVA_CONFIG`.
+
+Citation elision is **disabled by default** (`seenWindow: 0`): each result remains
+self-contained within the normal output budgets. A positive `seenWindow` explicitly
+opts into an experimental ledger with known retention gaps: hidden message details,
+later context transforms and missing citation targets can invalidate its assumptions.
+It is not a proven lossless optimization and is not recommended for production.
 Text limits are character budgets, not tokenizer counts. `/supernova` reports
 programs and output characters without labelling characters as tokens.
 

@@ -21,7 +21,9 @@ it("CodeMode guidance advertises the four commands, not optional command familie
   registerCodeMode(pi);
   const tool = tools.get("supernova");
   const guidance = [tool.description, ...(tool.promptGuidelines || [])].join("\n");
+
   for (const name of ["read", "edit", "write", "bash"]) assert.ok(guidance.includes(name));
+
   for (const alias of ["nova.call", "nova.search", "nova.describe", "parallel(", "pipeline("]) {
     assert.equal(guidance.includes(alias), false, `Additional command surface leaked into model guidance: ${alias}`);
   }

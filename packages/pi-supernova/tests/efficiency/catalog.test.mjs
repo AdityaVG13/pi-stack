@@ -12,8 +12,12 @@ it("a four-command program does not serialize an unrelated tool's schema", async
     description: "Not part of the four-command surface",
     parameters: {
       type: "object",
-      get properties() { schemaReads++; return { unused: { type: "string" } }; },
-      toJsonSchema() { schemaReads++; return { type: "object", properties: { unused: { type: "string" } } }; },
+      get properties() { schemaReads++;
+
+ return { unused: { type: "string" } }; },
+      toJsonSchema() { schemaReads++;
+
+ return { type: "object", properties: { unused: { type: "string" } } }; },
     },
     execute() { throw new Error("Unrelated executor must never run"); },
   });

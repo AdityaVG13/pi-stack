@@ -6,14 +6,18 @@ import { limits } from "../helpers/engine.mjs";
 it("independent read starts coalesce into one bridge request without callMany or a batching helper", async () => {
   const calls = [];
   const contents = { "a.txt": "alpha", "b.txt": "beta" };
+
   const nova = {
     batchRead: true,
     async call(name, args) {
       calls.push({ name, args });
+
       if (Array.isArray(args.path)) return { ok: true, items: args.path.map(file => contents[file]) };
+
       return { ok: true, value: contents[args.path] };
     },
   };
+
   const result = await runGuestProgram({ code: 'const a = read("a.txt"); const b = read("b.txt"); return [await a, await b];', nova, config: limits });
   assert.equal(result.ok, true, result.error);
   assert.deepEqual(result.result, ["alpha", "beta"], "Scheduling must preserve the individual values and order");

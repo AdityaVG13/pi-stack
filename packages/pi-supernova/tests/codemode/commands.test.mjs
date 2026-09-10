@@ -25,6 +25,7 @@ it("read accepts familiar object arguments inside CodeMode and honors the reques
 it("one edit command applies a related edit set and returns only after all replacements are visible", async t => {
   const fixture = await engineFixture(t);
   await fixture.write("pair.txt", "left=old\nright=old\n");
+
   const result = await fixture.execute(`
     await edit({path: "pair.txt", edits: [
       {oldText: "left=old", newText: "left=new"},
@@ -32,6 +33,7 @@ it("one edit command applies a related edit set and returns only after all repla
     ]});
     return await read("pair.txt");
   `);
+
   assert.equal(result.details.ok, true, result.details.error);
   assert.equal(await fs.readFile(path.join(fixture.root, "pair.txt"), "utf8"), "left=new\nright=new\n");
   assert.match(result.details.result, /left=new\nright=new/);

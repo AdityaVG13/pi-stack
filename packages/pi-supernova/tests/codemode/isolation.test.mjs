@@ -7,12 +7,15 @@ import { engineFixture } from "../helpers/engine.mjs";
 it("overlapping programs never silently lose a successful same-file edit", async t => {
   const f = await engineFixture(t);
   await f.write("shared.txt", "left=old\nright=old\n");
+
   const results = await Promise.allSettled([
     f.execute('await edit("shared.txt", "left=old", "left=new");'),
     f.execute('await edit("shared.txt", "right=old", "right=new");'),
   ]);
+
   assert.ok(results.some(result => result.status === "fulfilled"));
   const text = await fs.readFile(path.join(f.root, "shared.txt"), "utf8");
+
   for (const [i, result] of results.entries()) {
     if (result.status === "fulfilled") assert.ok(text.includes(i === 0 ? "left=new" : "right=new"));
     else assert.match(result.reason.message, /write conflict/);
@@ -22,12 +25,14 @@ it("overlapping programs never silently lose a successful same-file edit", async
 it("an active checkpoint rejects outside writes instead of absorbing them into its rollback", async t => {
   const f = await engineFixture(t);
   await f.write("state.txt", "original");
+
   const result = await f.execute(`
     const candidate = edit(async () => { await write("state.txt", "candidate"); throw Error("reject"); });
     const outside = await write("state.txt", "outside").then(() => "unexpected", error => error.message);
     await candidate;
     return {outside, text:await read("state.txt")};
   `);
+
   assert.match(result.details.result.outside, /checkpoint/);
   assert.equal(result.details.result.text, "original");
 });

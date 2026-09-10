@@ -16,7 +16,9 @@ it("large document chunks append without round-tripping bounded reads", async t 
   await f.execute('await write({path:"new.txt",content:"a",append:true}); await write({path:"new.txt",content:"b",append:true});');
   assert.equal(await fs.readFile(path.join(f.root,"new.txt"),"utf8"), "ab");
   let called = false;
-  f.pi.registerTool({name:"write",execute:async () => {called = true; return {};}});
+  f.pi.registerTool({name:"write",execute:async () => {called = true;
+
+ return {};}});
   await assert.rejects(f.execute('await write({path:"chunks.txt",content:"unsafe",append:true});'), /append.*owned/);
   assert.equal(called, false);
   const budget = f.tool.parameters.properties.code.maxLength;
@@ -52,6 +54,7 @@ it("read-modify-write refuses truncated source instead of persisting a hole", as
 it("complete reads reject aggregate clipping and intentional literal markers need opt-in", async t => {
   const f=await engineFixture(t);
   const body="payload\n".repeat(2500);
+
   for(const file of ["a.txt","b.txt","c.txt","d.txt"])await f.write(file,body);
   assert.equal((await f.execute('return await read({path:"a.txt",complete:true});')).details.result,body);
   await assert.rejects(f.execute('return await read(["a.txt","b.txt","c.txt","d.txt"],{complete:true});'),/incomplete read/);
@@ -69,12 +72,15 @@ it("explicit read batches reject missing files and expose per-path outcomes thro
 
 it("session resource reads preserve IDs, pagination and caller isolation", async t => {
   const f=await engineFixture(t);
+
   const roots=await Promise.all(["one","two"].map(async name=>{
     const dir=path.join(f.root,name); await fs.mkdir(dir);
     await fs.writeFile(path.join(dir,"ResearchDigest.md"),name+" λ😀\r\n".repeat(2000));
     await fs.writeFile(path.join(dir,"131.txt"),"artifact "+name);
+
     return dir;
   }));
+
   const execute=(code,dir)=>f.tool.execute("uri",{code,timeoutMs:2000},undefined,undefined,{cwd:f.root,sessionManager:{getArtifactsDir:()=>dir}});
   const values=await Promise.all(roots.map(dir=>execute('return await read(["agent://ResearchDigest","artifact://131"]);',dir)));
   assert.deepEqual(values.map(r=>r.details.result[1]),["artifact one","artifact two"]);
@@ -109,6 +115,7 @@ it("an independent failed read rejects only its own promise", async t => {
 it("read, mutation, read submission order survives automatic batching", async t => {
   const f = await engineFixture(t);
   await f.write("ordered.txt", "before");
+
   const result = await f.execute(`
     const before = read("ordered.txt");
     const change = edit("ordered.txt", "before", "after");
@@ -116,6 +123,7 @@ it("read, mutation, read submission order survives automatic batching", async t 
     await change;
     return [await before, await after];
   `);
+
   assert.deepEqual(result.details.result, ["before", "after"]);
 });
 
@@ -134,16 +142,20 @@ it("paged reads reconstruct CRLF and Unicode source without missing or duplicate
   await f.write("pages.txt", body);
   let offset = 1;
   let reconstructed = "";
+
   for (let page = 0; page < 30; page++) {
     const result = await f.execute(`return await read({path:"pages.txt", offset:${offset}});`);
     const text = result.details.result;
     const marker = text.lastIndexOf("\n[read truncated;");
+
     if (marker < 0) { reconstructed += text; break; }
+
     reconstructed += text.slice(0, marker);
     const next = Number(/offset\s*[:=]\s*(\d+)/.exec(text.slice(marker))?.[1]);
     assert.ok(next > offset, "Continuation must make forward progress");
     offset = next;
   }
+
   assert.equal(reconstructed, body);
 });
 
@@ -161,6 +173,7 @@ it("read arrays preserve returned images without sending base64 as model text", 
 
 it("patches preserve empty-file and newline boundaries and reject mismatched context", async t => {
   const f = await engineFixture(t);
+
   for (const [before, patch, after] of [
     ["", "@@ -0,0 +1,1 @@\n+created\n", "created\n"],
     ["before\r\n", "@@ -1 +1 @@\n-before\n+after\n", "after\r\n"],

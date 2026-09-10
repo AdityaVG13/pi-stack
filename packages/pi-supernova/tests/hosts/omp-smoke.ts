@@ -1,13 +1,17 @@
 // Loaded only in the disposable, network-denied OMP child used by verify.mjs.
 import fs from "node:fs/promises";
 import assert from "node:assert/strict";
+
 export default function (pi) {
   pi.on("session_start", async (_event, ctx) => {
     try {
       const id = ctx.sessionManager.getSessionId();
+
       const session = pi.pi.AgentRegistry.global().list().map(ref => ref.session)
         .find(session => session.sessionManager.getSessionId() === id);
+
       const tool = session.getToolForEvalBridge("supernova");
+
       if (!tool) throw new Error("Supernova is missing from the actual OMP registry");
       const artifactDir=ctx.sessionManager.getArtifactsDir();
       assert.ok(artifactDir,"actual OMP context must expose its artifact directory");

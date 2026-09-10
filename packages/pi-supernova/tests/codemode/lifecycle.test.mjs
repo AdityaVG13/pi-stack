@@ -11,9 +11,11 @@ it("recursive source watchers do not keep an otherwise idle host alive", async t
   await fs.mkdir(path.join(f.root, "nested"));
   await f.write("nested/source.js", "export const value = 1;");
   const moduleUrl = new URL("../../index.js", import.meta.url).href;
+
   const code = `import {registerCodeMode} from ${JSON.stringify(moduleUrl)};
     let tool; registerCodeMode({registerTool(t){tool=t;},registerCommand(){},on(){}});
     await tool.execute("idle",{code:'return await read({query:"value",evidence:true});'},undefined,undefined,{cwd:${JSON.stringify(f.root)}});`;
+
   const result = await runCommand([process.execPath, "--input-type=module", "-e", code], {timeoutMs:1500});
   assert.equal(result.exitCode, 0);
 });
@@ -25,14 +27,18 @@ it("cancelling a program prevents surviving shell descendants from writing later
   const parent = 'require("node:child_process").spawn(process.execPath,["-e",'+JSON.stringify(child)+'],{stdio:"ignore"});setInterval(()=>{},1000);';
   const controller = new AbortController();
   const stopped = assert.rejects(f.tool.execute("cancel", {code:`await bash({command:process.execPath,args:["-e",${JSON.stringify(parent)}]});`,timeoutMs:5000}, controller.signal, undefined, {cwd:f.root}), /aborted/);
+
   try {
     let started = false;
+
     for(let i=0;i<100;i++) {
       try { await fs.stat(ready); started=true; break; }
       catch(error) { if(error.code!=="ENOENT")throw error; await new Promise(resolve=>setTimeout(resolve,10)); }
     }
+
     assert.ok(started,"the descendant must be running before testing cancellation");
   } finally { controller.abort(); await stopped; }
+
   await new Promise(resolve=>setTimeout(resolve,750));
   await assert.rejects(fs.stat(late),{code:"ENOENT"});
 });
@@ -71,6 +77,7 @@ it("shell timeouts retain the output produced before termination", async t => {
 
 it("shell session environment comes from the current execution context", async t => {
   const f = await engineFixture(t);
+
   const result = await f.tool.execute("environment", {
     code: `return await bash('printf "%s|%s|%s" "$PI_SESSION_ID" "$PI_MODEL" "$PI_REASONING_LEVEL"');`,
   }, undefined, undefined, {
@@ -79,5 +86,6 @@ it("shell session environment comes from the current execution context", async t
     model: { provider: "fixture-provider", id: "fixture-model" },
     thinkingLevel: "high",
   });
+
   assert.equal(result.details.result, "fixture-session|fixture-model|high");
 });

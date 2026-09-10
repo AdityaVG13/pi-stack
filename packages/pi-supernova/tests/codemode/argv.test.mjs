@@ -9,6 +9,7 @@ it("literal arguments stay literal when a host overrides the shell executor", as
   const f = await engineFixture(t);
   f.pi.registerTool({name:"bash", async execute(_id, args, signal, _update, ctx) {
     const result = await runCommand(["bash", "-c", args.command], {cwd:ctx.cwd, signal});
+
     return {content:[{type:"text",text:result.stdout}],isError:result.exitCode !== 0};
   }});
   const literal = "$HOME; $(touch injected) 'quoted'";
@@ -23,9 +24,11 @@ it("literal argv bypasses shell startup while string commands retain it", {skip:
   const marker = path.join(f.root,"shell-started");
   await f.write("startup.sh", "printf started > " + JSON.stringify(marker));
   const before = Object.fromEntries(["BASH_ENV", "SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY"].map(key => [key, process.env[key]]));
+
   // SSH detection changes Bash startup rules; test an ordinary noninteractive shell.
   for (const key of ["SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY"]) delete process.env[key];
   process.env.BASH_ENV = startup;
+
   try {
     const result = await f.execute('return await bash({command:process.execPath,args:["-e",'+JSON.stringify('process.stdout.write("literal")')+']});');
     assert.equal(result.details.result,"literal");
@@ -37,12 +40,14 @@ it("literal argv bypasses shell startup while string commands retain it", {skip:
       assert.match(error.message,/exit 7/);
       assert.match(error.message,/argv diagnostic/);
       assert.ok(!error.message.includes("long-argument-"),"do not echo the caller's entire program in an error");
+
       return true;
     });
     const sleeping = payload.replace("process.exit(7)","setInterval(()=>{},1000)");
     await assert.rejects(f.execute('return await bash({command:process.execPath,args:["-e",'+JSON.stringify(sleeping)+'],timeoutMs:100});'),error=>{
       assert.match(error.message,/timed out/);
       assert.ok(!error.message.includes("long-argument-"));
+
       return true;
     });
   } finally {

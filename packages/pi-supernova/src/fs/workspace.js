@@ -5,10 +5,14 @@ import { constants } from "node:os";
 import { isString } from "../shared/decode.js";
 
 let cachedCwd = null;
+
 let cachedResolvedCwd = null;
+
 // realpath results per program: two syscalls per call otherwise dominate a cached read.
 const realRoots = new Map();
+
 const realNearest = new Map();
+
 const PATH_CACHE_MAX = 2048;
 
 export function clearPathCache() {
@@ -19,6 +23,7 @@ function getResolvedCwd(cwd) {
   if (cwd === cachedCwd && cachedResolvedCwd) return cachedResolvedCwd;
   cachedCwd = cwd;
   cachedResolvedCwd = path.resolve(cwd);
+
   return cachedResolvedCwd;
 }
 
@@ -30,12 +35,14 @@ function assertInside(rel, message) {
 
 async function realpathNearest(target) {
   let probe = target;
+
   while (true) {
     try {
       return await fs.realpath(probe);
     } catch (err) {
       if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") throw err;
       const parent = path.dirname(probe);
+
       if (parent === probe) throw err;
       probe = parent;
     }
@@ -53,6 +60,7 @@ const TEST_SEGMENTS = new Set(["test", "tests", "__tests__", "spec"]);
 export function isTestPath(filePath) {
   const segments = filePath.split(/[\\/]/);
   const base = segments[segments.length - 1];
+
   return segments.some((s) => TEST_SEGMENTS.has(s)) || /\.(test|spec)\./.test(base);
 }
 
@@ -60,25 +68,34 @@ export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = f
   if (inputPath == null || !isString(inputPath) || !inputPath.trim()) {
     throw new Error(`${opName} requires path`);
   }
+
   if (/^(?:agent|artifact):\/\//i.test(inputPath.trim())) throw new Error(`${opName} requires a filesystem path; session resource URIs are read-only`);
   const resolvedCwd = getResolvedCwd(cwd);
   const target = path.resolve(resolvedCwd, inputPath.trim());
   assertInside(path.relative(resolvedCwd, target), `${opName} path escapes workspace: paths resolve relative to ${resolvedCwd}`);
+
   if (!allowRoot && target === resolvedCwd) {
     throw new Error(`${opName} path cannot be the workspace root directory`);
   }
+
   let realRoot = realRoots.get(resolvedCwd);
+
   if (!realRoot) {
     realRoot = await fs.realpath(resolvedCwd);
     realRoots.set(resolvedCwd, realRoot);
   }
+
   let probe = fresh ? undefined : realNearest.get(target);
+
   if (!probe) {
     probe = await realpathNearest(target);
+
     if (realNearest.size >= PATH_CACHE_MAX) realNearest.clear();
     realNearest.set(target, probe);
   }
+
   assertInside(path.relative(realRoot, probe), `${opName} path escapes workspace through symlink`);
+
   return target;
 }
 
@@ -87,21 +104,25 @@ export async function runCommand(argv, options = {}) {
   const cwd = options.cwd || process.cwd();
   const timeoutMs = options.timeoutMs ?? 60_000;
   const maxOutputChars = options.maxOutputChars ?? 2 * 1024 * 1024;
+
   return new Promise((resolve, reject) => {
     const child = spawn(argv[0], argv.slice(1), {
       cwd, env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32",
     });
+
     let stdout = "";
     let stderr = "";
     let settled = false;
     let outputTruncated = false;
     let terminationError;
     let escalation;
+
     const cleanup = () => {
       clearTimeout(timer);
       clearTimeout(escalation);
       options.signal?.removeEventListener("abort", onAbort);
     };
+
     const fail = error => {
       if (settled) return;
       settled = true;
@@ -111,12 +132,16 @@ export async function runCommand(argv, options = {}) {
       error.stderr = stderr;
       error.outputTruncated = outputTruncated;
       const output = [stdout, stderr].filter(Boolean).join("\n").trimEnd();
+
       if (output) error.message += "\n" + output;
+
       if (outputTruncated) error.message += "\n[output truncated]";
       reject(error);
     };
+
     const signalTree = signal => {
       if (!child.pid) return;
+
       if (process.platform === "win32") {
         const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
         killer.on("error", () => child.kill(signal));
@@ -124,6 +149,7 @@ export async function runCommand(argv, options = {}) {
         try { process.kill(-child.pid, signal); } catch (err) { if (err.code !== "ESRCH") child.kill(signal); }
       }
     };
+
     const terminate = error => {
       if (settled || terminationError) return;
       terminationError = error;
@@ -131,13 +157,18 @@ export async function runCommand(argv, options = {}) {
       // Keep ownership after the direct child exits: descendants may ignore SIGTERM.
       escalation = setTimeout(() => { signalTree("SIGKILL"); fail(error); }, 150);
     };
+
     const onAbort = () => terminate(new Error("aborted"));
     const timer = setTimeout(() => terminate(new Error("command timed out after " + timeoutMs + "ms: " + (options.commandLabel ?? argv.join(" ")))), timeoutMs);
+
     const append = (current, chunk) => {
       const remaining = Math.max(0, maxOutputChars - stdout.length - stderr.length);
+
       if (chunk.length > remaining) outputTruncated = true;
+
       return remaining ? current + chunk.slice(0, remaining) : current;
     };
+
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", chunk => { stdout = append(stdout, chunk); });
@@ -145,6 +176,7 @@ export async function runCommand(argv, options = {}) {
     child.on("error", fail);
     child.on("close", (code, signal) => {
       if (settled) return;
+
       if (terminationError) {
         // A closed pipe alone says nothing about descendants. Only ESRCH proves
         // the owned POSIX group is gone; otherwise retain the escalation timer.
@@ -152,13 +184,16 @@ export async function runCommand(argv, options = {}) {
           try { process.kill(-child.pid, 0); }
           catch (error) { if (error.code === "ESRCH") fail(terminationError); }
         }
+
         return;
       }
+
       settled = true;
       cleanup();
       resolve({ stdout, stderr, exitCode: code ?? (128 + (constants.signals[signal] ?? 1)), signal, outputTruncated });
     });
     options.signal?.addEventListener("abort", onAbort, { once: true });
+
     if (options.signal?.aborted) onAbort();
   });
 }

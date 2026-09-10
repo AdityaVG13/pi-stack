@@ -28,6 +28,7 @@ it("workspace notifications describe disk commits, not checkpoint merges or roll
   await f.execute(`return await read("kept.txt");`);
   assert.equal(events.length, 1);
   f.pi.events.emit = () => { throw Error("broken subscriber"); };
+
   await f.execute(`await write("kept.txt", "survives listener");`);
   assert.equal(await fs.readFile(path.join(f.root, "kept.txt"), "utf8"), "survives listener");
 });
@@ -44,6 +45,7 @@ it("shell boundaries announce flushed paths and uncertain mutations even when th
 it("edit callbacks retain filesystem checkpoints without exposing a speculate command", async t => {
   const f = await engineFixture(t);
   await f.write("state.txt", "original");
+
   const result = await f.execute(`
     const rejected = await edit(async () => {
       await write("state.txt", "candidate");
@@ -56,6 +58,7 @@ it("edit callbacks retain filesystem checkpoints without exposing a speculate co
     });
     return {rejected, restored, accepted, final: await read("state.txt")};
   `);
+
   assert.equal(result.details.result.rejected.ok, false);
   assert.match(result.details.result.rejected.error, /candidate rejected/);
   assert.equal(result.details.result.restored, "original");

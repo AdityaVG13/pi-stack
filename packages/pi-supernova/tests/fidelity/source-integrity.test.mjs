@@ -72,6 +72,7 @@ it("edit references use staged callers, and separated edits return both changed 
 
 it("evidence admits content hits beyond the topology cap and reports exact clipped ranges", async t => {
   const f = await engineFixture(t);
+
   for(let i=0;i<24;i++) await f.write('a'+i+'.js','export function decoy'+i+'() { return 1; }');
   await f.write("z.js",'export function uniqueZebraToken() {\n  return 42;\n}\n');
   const evidence=(await f.execute('return await read({query:"uniqueZebraToken",evidence:true});')).details.result;

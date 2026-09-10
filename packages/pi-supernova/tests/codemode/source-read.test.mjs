@@ -12,12 +12,18 @@ it("a cold source read returns the complete selected file without an index or fo
   await f.write("auth.js", body);
   await f.write("caller.js", 'validateRefreshToken("hello");\n');
   const calls = [], spawn = childProcess.spawn;
-  childProcess.spawn = (...args) => { calls.push(args); return spawn(...args); };
+  childProcess.spawn = (...args) => { calls.push(args);
+
+ return spawn(...args); };
+
   syncBuiltinESMExports();
   let result;
+
   try { result = await f.execute('return await read("validateRefreshToken");'); }
   finally { childProcess.spawn = spawn; syncBuiltinESMExports(); }
+
   assert.ok(calls.length <= 1,"cold locate-and-read must not add a retrieval ladder");
+
   for (const [,args] of calls) assert.ok(!args.includes("--files"));
   assert.ok(result.details.result.includes(body),"return the actual file, not a location preview");
   assert.equal(result.details.trace.length,1);
@@ -42,6 +48,7 @@ it("structured source resolution supports a resolve-to-edit handoff in one progr
 
 it("ambiguous source resolution never opens an arbitrarily selected file", async t => {
   const f = await engineFixture(t);
+
   for(const name of ["a.js","b.js"]) await f.write(name,'export function duplicateToken() { return 1; }\n');
   const result = await f.execute('return await read({query:"duplicateToken",resolve:true});');
   assert.equal(result.details.result.status,"ambiguous");

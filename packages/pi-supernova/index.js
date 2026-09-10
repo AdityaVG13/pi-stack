@@ -12,7 +12,9 @@ export { renderSupernovaCall, renderSupernovaResult };
 
 // Sync only, never top-level await. Dynamic import of host/deps hung OMP plugin load.
 const require = createRequire(import.meta.url);
+
 let Type;
+
 try {
   Type = require("typebox").Type;
 } catch {
@@ -42,30 +44,38 @@ export function progressEmitter(onUpdate) {
   let pending = null;
   let timer = null;
   let lastSent = -Infinity;
+
   const send = () => {
     timer = null;
+
     if (pending === null) return;
     // Snapshot only at emission, not on every tool event. Completed records must
     // not mutate a previously emitted frame while Pi is still consuming it.
     const trace = pending.map(record => ({ ...record }));
     pending = null;
     lastSent = performance.now();
+
     try {
       onUpdate({ content: [{ type: "text", text: "" }], details: { trace, running: true } });
     } catch {}
   };
+
   const emit = (trace) => {
     pending = trace;
+
     if (timer !== null) return;
     const wait = PROGRESS_FRAME_MS - (performance.now() - lastSent);
+
     if (wait <= 0) send();
     else timer = setTimeout(send, wait);
   };
+
   emit.flush = () => {
     if (timer !== null) clearTimeout(timer);
     pending = null;
     timer = null;
   };
+
   return emit;
 }
 
@@ -75,27 +85,40 @@ function sessionStats({ programs, returnedChars }) {
 
 function logsBlock(outcome, tail = "") {
   if (!outcome.logs?.length && !outcome.logTruncated) return "";
+
   return `\n--- logs${outcome.logTruncated ? " [logs truncated]" : ""}\n${outcome.logs?.join("\n") ?? ""}${tail}`;
 }
 
 function mutationText(outcome) {
   const m = outcome.mutations;
+
   if (!m) return "";
   const external = m.external ? "; external calls attempted=" + m.external + ", their side effects cannot be rolled back" : "";
   const uncertain = m.pendingCommits || m.recoveryFailed ? "; filesystem outcome uncertain: inspect disk and any recovery backups before retrying" : "";
+
   return "\nmutations: committed=" + m.committed + " rolledBack=" + m.rolledBack + " (file versions)" + external + uncertain;
 }
 
+// Corrective hint, emitted only when a turn actually split. Independent work
+// belongs in one program: a split cannot use the single prewarmed worker and pays
+// one extra spawn per sibling. Costs nothing until it fires, so it needs no room in
+// the tool definition.
+function splitTurnHint(outcome) {
+  return outcome.overlappedTurn ? ` (${outcome.overlappedTurn} supernova calls ran at once; independent work belongs in one program)` : "";
+}
+
 function errorText(outcome, call) {
-  return `error #${call} ${outcome.wallMs}ms${outcome.returnTruncated ? " [output truncated]" : ""}${mutationText(outcome)}
+  return `error #${call} ${outcome.wallMs}ms${outcome.returnTruncated ? " [output truncated]" : ""}${mutationText(outcome)}${splitTurnHint(outcome)}
 error: ${outcome.error}${logsBlock(outcome)}`;
 }
 
 function successText(outcome, call) {
   const truncated = outcome.returnTruncated ? " [return truncated]" : "";
   const hint = outcome.undefinedReturn ? " (no return statement; add `return` to get a value)" : "";
-  return `ok #${call} ${outcome.wallMs}ms${truncated}${outcome.mutations?.committed || outcome.mutations?.rolledBack || outcome.mutations?.external ? mutationText(outcome) : ""}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
+
+  return `ok #${call} ${outcome.wallMs}ms${truncated}${outcome.mutations?.committed || outcome.mutations?.rolledBack || outcome.mutations?.external ? mutationText(outcome) : ""}${splitTurnHint(outcome)}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
 }
+
 const TOOL_DESCRIPTION = REFERENCE;
 
 export default function piSupernova(pi) {
@@ -104,12 +127,20 @@ export default function piSupernova(pi) {
 
 // Shared entry used by both host adapters and direct engine integration.
 export function registerCodeMode(pi) {
-  // Local cache residency cannot establish what remains in the model's context.
-  const config = { ...loadConfig(), seenWindow: 0 };
+  // Citation elision is experimental and disabled by default. A context event is
+  // not the final provider payload: hidden details or later transforms can invalidate
+  // a citation. A positive seenWindow explicitly opts in despite those limitations.
+  const config = loadConfig();
   let cwd = process.cwd();
   let programSeq = 0;
   let stopped = false;
   let warmTimer;
+  // Program runs currently executing. Only one pristine worker is ever prewarmed,
+  // so concurrent invocations cannot share it and each sibling pays a fresh spawn.
+  // Counting them lets a result say so without adding standing guidance to the
+  // tool definition, which is resent on every request.
+  let inFlight = 0;
+
   function cancelWarmTimer() {
     if (warmTimer !== undefined) clearImmediate(warmTimer);
     warmTimer = undefined;
@@ -169,6 +200,7 @@ export function registerCodeMode(pi) {
       const runCwd = ctx?.cwd || cwd;
       const runController = new AbortController();
       const abortRun = () => runController.abort(signal?.reason);
+
       if (signal?.aborted) abortRun();
       else signal?.addEventListener("abort", abortRun, { once: true });
       const runBridge = bridge.fork({ getCwd: () => runCwd, budget });
@@ -182,6 +214,9 @@ export function registerCodeMode(pi) {
       emitProgress([]);
       const started = performance.now();
       let outcome;
+      const overlappedTurn = inFlight > 0 ? inFlight + 1 : 0;
+      inFlight += 1;
+
       try {
         refreshCatalog(runBridge);
         runBridge.beginSpeculation();
@@ -196,6 +231,7 @@ export function registerCodeMode(pi) {
           onTimeout: abortRun,
         });
         runBridge.close();
+
         if (outcome.ok) {
           if (runBridge.getOverlayDepth() !== 1) throw new Error("program ended with an unfinished edit checkpoint; await it before returning");
           await runBridge.commitSpeculation();
@@ -204,53 +240,77 @@ export function registerCodeMode(pi) {
       } catch (error) {
         abortRun();
         runBridge.close();
+
         while (runBridge.getOverlayDepth()) runBridge.rollbackSpeculation();
         outcome = { ok: false, error: error instanceof Error ? error.message : String(error), logs: outcome?.logs ?? [], wallMs: Math.round(performance.now() - started) };
       } finally {
+        inFlight -= 1;
         runBridge.setCallListener(null);
         emitProgress.flush();
         signal?.removeEventListener("abort", abortRun);
         // Prepare one pristine worker during the model's next decision. Never
         // recycle a worker that has executed arbitrary guest JavaScript.
         cancelWarmTimer();
+
         if (!stopped && !runController.signal.aborted) {
           // Deliver the result before paying for another Worker constructor.
           warmTimer = setImmediate(() => {
             warmTimer = undefined;
+
             if (!stopped && !runController.signal.aborted) warmGuestWorker(config).catch(() => {});
           });
           warmTimer.unref?.();
         }
       }
+
       if (budget) budget.logLines += outcome.logs?.length ?? 0;
+      // inFlight has dropped by now, so a non-zero value means a sibling is still
+      // running: report the overlap from either side so the hint does not depend on
+      // which invocation happened to start first.
+      outcome.overlappedTurn = overlappedTurn || (inFlight > 0 ? inFlight + 1 : 0);
       outcome.mutations = runBridge.getMutations();
       const trace = runBridge.getTrace();
       const format = outcome.ok ? successText : errorText;
       let text = format(outcome, call);
+
       if (text.length > config.maxReturnChars) {
         outcome.returnTruncated = true;
         text = format(outcome, call);
       }
+
       const bounded = truncateChars(text, config.maxReturnChars, "output").text;
       const visible = runBridge.ledger.dedupe(bounded, call);
+
       const response = result(visible, {
         ok: outcome.ok, error: outcome.error, wallMs: outcome.wallMs,
         returnTruncated: outcome.returnTruncated, logTruncated: outcome.logTruncated,
         logs: outcome.logs, result: outcome.result, trace, mutations: outcome.mutations,
       });
+
       if (outcome.images?.length) response.content.push(...outcome.images);
+
       if (!outcome.ok) {
         const error = new Error(visible);
         Object.defineProperty(error,"supernovaResult",{value:response});
         throw error;
       }
+
       return response;
     },
   });
 
-  pi.on("session_shutdown", () => { stopped = true; cancelWarmTimer(); return stopWarmGuestWorker(); });
+  // This is a pre-conversion observation, not a final-payload retention proof.
+  // With the shipping seenWindow:0 default, observe is a no-op.
+  pi.on("context", event => {
+    try { bridge.ledger.observe(event?.messages); } catch {}
+  });
+
+  pi.on("session_shutdown", () => { stopped = true; cancelWarmTimer();
+
+ return stopWarmGuestWorker(); });
   pi.on("session_start", (_event, ctx) => {
     stopped = false;
+
     if (ctx && isString(ctx.cwd) && ctx.cwd) cwd = ctx.cwd;
     // A new session is a new model context: nothing has been seen yet.
     bridge.bindCallContext(ctx);
@@ -266,11 +326,13 @@ export function registerCodeMode(pi) {
       bridge.bindCallContext(ctx);
       refreshCatalog();
       const commands = ["read", "edit", "write", "bash"].filter(bridge.isCallable);
+
       const lines = [
         `Supernova CodeMode: ${commands.join(", ")}`,
         `timeoutMs=${config.timeoutMs} maxCallResultChars=${config.maxCallResultChars} maxReturnChars=${config.maxReturnChars} maxBridgeCalls=${config.maxBridgeCalls} maxHeapMb=${config.maxHeapMb}`,
         sessionStats(bridge.ledger.stats),
       ];
+
       ctx.ui.notify(lines.join("\n"), "info");
     },
   });
