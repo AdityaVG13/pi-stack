@@ -1,5 +1,5 @@
 // Complete model-facing API reference; kept in every request, not moved into history.
-export const REFERENCE = `Run one JavaScript program with four familiar commands: read, write, edit, bash. Use an async body or arrow. Return a small value; strings stay raw. For a single program, supply exactly one of code or file; file rereads a workspace program with the same limits and fresh guest, without resending its source.
+export const REFERENCE = `Run a JavaScript async body or arrow with read, write, edit and bash. Strings stay raw. Single program: exactly one of code or file; file rereads a workspace program with the same limits, bindings, calling-workspace cwd and fresh guest. Code and data character caps use UTF-16 units. Split large writes using append.
 
 Native commands (async):
 read(path|paths, offset?, limit?) → file text or text[]; read(directory) → directory entries
@@ -16,8 +16,8 @@ edit(async () => {...}) → filesystem checkpoint: commit on success, rollback o
 bash(command, {cwd?, timeoutMs?}) → bounded output; throws on non-zero exit
 bash({command, args:[...]}) → literal argv without shell expansion of arguments
 
-Only found selects and opens a file. Uncertain reads return ambiguous, not_found, or incomplete with no selected path. Use resolve:true for structured status checks; narrow the directory with path+about when uncertain.
-For read-modify-write, use read({path,complete:true}); it rejects partial output. For large JSON use json selectors: parse first, then project within the read budget (16 MiB input cap; no full jq). Do not JSON.parse line windows. For large text audits use about or offset/limit, not complete:true. Prefer edit for large files. Array reads reject failures; use Promise.allSettled for per-path outcomes.
+Start with a source question or scoped about read; do not redundantly reopen selected source. Only found selects and opens a file. Uncertain reads return ambiguous, not_found, or incomplete with no selected path. Use resolve:true to check status before editing its path; narrow the directory with path+about when uncertain.
+For read-modify-write, use read({path,complete:true}); it rejects partial output. JSON selectors parse the full document (16 MiB cap); selections must fit the read budget. No full jq; do not JSON.parse line windows. For large text audits use about or offset/limit, not complete:true. Prefer edit for large files. Array reads reject failures; use Promise.allSettled for per-path outcomes.
 Object arguments also work: read({path, offset?, limit?, about?, outline?, evidence?, resolve?, complete?}), edit({path, edits:[{oldText,newText}]}), edit({path,patch}), write({path,content}), bash({command,timeoutMs?}).
 File changes stage until program success; later errors roll them back. Shell calls commit preceding writes and cannot be rolled back. Outcomes report committed/rolledBack file versions and external-call attempts.
 Independent read starts batch automatically. Mutations preserve submission order. Plain reads remain self-contained; oversized reads provide continuation offsets. Return only what the model needs. console.log is captured.

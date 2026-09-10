@@ -2,8 +2,12 @@
 
 ## Unreleased
 
+- Consolidate overlapping tests into multi-operation failure-and-repair contracts covering JSON, saved programs, checkpoints, literal argv, images and concurrent workspaces. Retain distinct admission, isolation and resource-limit regressions.
+- Fix truncation reporting for complete tool responses, including logs and wrapper metadata; make log-limit omissions visible in model-facing output.
+- Remove duplicate startup guidance and batch wrapper metadata while retaining every original per-program result. The unchanged six-call benchmark uses another 5.15%/5.17% fewer tokens than d444eb7; add a request-hash guard against moving model decision boundaries.
+
 - Add explicit sequential `programs` batches with fresh guests and separate commits. Preserve complete per-program text and earlier images in typed stop reports; share deadlines, host calls, logs and outer output/image limits. Reject malformed/nested/oversized plans before execution.
-- Make the additional 40% token gate part of `npm test`, with a frozen post-previous-pass baseline, exact logical-result checks, both tokenizers, full tool-history replay and the final answer handoff. Measured 53.81%/53.88% fewer modeled tool tokens for the fixed workload; retain the full startup reference. No provider billing or model-quality claim.
+- Make the additional 40% token gate part of `npm test`, with a frozen post-previous-pass baseline, exact logical-result checks, both tokenizers, full tool-history replay and the final answer handoff. Measured 56.19%/56.26% fewer modeled tool tokens for the fixed workload; retain the full startup reference. No provider billing or model-quality claim.
 
 - Add explicit workspace program-file input as an alternative to inline code, with fresh loading/guests, strict bounded UTF-8 admission and unchanged deadlines/transactions. No implicit replay or persistent heap.
 - Extend verbatim string framing to nested source results, preserving all fields, types, duplicate strings and lengths; retain compact scalar output. Remove redundant guidance already present in parameter/command descriptions.

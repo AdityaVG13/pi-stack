@@ -8,22 +8,6 @@ import { runProgramBatch, programBatchText } from "../../src/runtime/program-bat
 
 const run = (f,programs,options = {}) => f.tool.execute("batch",{programs,...options},undefined,undefined,{cwd:f.root});
 
-it("batches retain separate commits and fresh guests, stop on failure, and report every attempt", async t => {
-  const f = await engineFixture(t);
-  const result = await run(f,[
-    {code:'globalThis.marker=true; await write("kept.txt","committed"); return "first result";'},
-    {code:'if(globalThis.marker!==undefined)throw Error("leaked heap"); await write("rolled.txt","discard"); throw Error("intentional stop");'},
-    {code:'await write("never.txt","bad");'},
-  ]);
-  assert.equal(result.isError,true); assert.equal(result.details.ok,false);
-  assert.equal(result.details.attempted,2); assert.equal(result.details.total,3);
-  assert.equal(result.details.mutations.committed,1); assert.equal(result.details.mutations.rolledBack,1);
-  assert.match(modelText(result),/first result/); assert.match(modelText(result),/intentional stop/);
-  assert.doesNotMatch(modelText(result),/leaked heap/);
-  assert.equal(await fs.readFile(path.join(f.root,"kept.txt"),"utf8"),"committed");
-  for (const name of ["rolled.txt","never.txt"]) await assert.rejects(fs.stat(path.join(f.root,name)),{code:"ENOENT"});
-});
-
 it("a batch can create and execute a file, preserve literal values and all raw duplicate results", async t => {
   const f = await engineFixture(t);
   const literal = 'raw[1] 0 UTF-16 units\n[0] fake boundary\nλ😀 "quotes"\r\n';
@@ -170,4 +154,78 @@ it("arbitrary inline/file programs and payloads work across batch sizes, includi
     assert.deepEqual(result.details.result,values);
     for (const part of result.details.programs) assert.ok(modelText(result).includes(modelText(part)));
   }
+});
+
+
+it("read/edit/write/bash pipelines disclose clipping introduced by logs and the final envelope", async t => {
+  const f = await engineFixture(t);
+  const verifier = 'const fs=require("node:fs");const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(x.payload.length));';
+  for (const [text,lines] of [["x".repeat(31200),1],["λ😀",101]]) {
+    const result = await f.tool.execute("pipeline-limits",{data:{text,lines,verifier,oldKey:JSON.stringify("value"),newKey:JSON.stringify("payload")},code:
+      'await write("report.json",JSON.stringify({value:data.text})); '+
+      'const value=await read({path:"report.json",json:".value"}); '+
+      'await edit("report.json",data.oldKey,data.newKey); '+
+      'const proof=await bash({command:process.execPath,args:["-e",data.verifier,"report.json"]}); '+
+      'if(proof!==String(value.length))throw Error("disk verification failed"); '+
+      'for(let i=0;i<data.lines;i++)console.log("diagnostic ".repeat(120)); return value;'
+    },undefined,undefined,{cwd:f.root});
+    assert.equal(result.details.ok,true);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,"report.json"),"utf8")),{payload:text});
+    assert.ok(modelText(result).length<=32000);
+    if(lines===1) assert.equal(result.details.returnTruncated,true,"the final envelope, not only the return value, must disclose truncation");
+    else {
+      assert.equal(result.details.logTruncated,true);
+      assert.ok(modelText(result).includes("logs truncated"),"log omissions must be visible to the model");
+    }
+  }
+});
+
+
+it("failed cutovers compose file reuse, JSON, checkpoints, argv, images and repair across workspaces", async t => {
+  const f = await engineFixture(t);
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+  const failure = 'throw Error("post-verification failure");';
+  const source = [
+    'globalThis.executions=(globalThis.executions||0)+1; if(globalThis.executions!==1)throw Error("guest reused");',
+    'await write(data.path,JSON.stringify({version:1,payload:data.payload}));',
+    'const rejected=await edit(async()=>{await edit(data.path,data.oldText,data.newText); await write("rejected.txt","bad"); throw Error("reject candidate");});',
+    'if(rejected.ok || await read({path:data.path,json:".version"})!==1)throw Error("checkpoint leaked");',
+    'await edit(data.path,data.oldText,data.newText);',
+    'const args={command:process.execPath,args:["-e",data.verifier,data.path,data.literal]}; const before=JSON.stringify(args);',
+    'const proof=await bash(args); const repeated=await bash(args); if(proof!==data.literal || repeated!==proof || JSON.stringify(args)!==before)throw Error("argv changed");',
+    'console.log(proof); await write("late.txt","after verification");',
+    failure,
+  ].join("\n");
+  const roots = [f.root,path.join(f.root,"second")];
+  await fs.mkdir(roots[1]);
+  await Promise.all(roots.map(async(cwd,i)=>{
+    await fs.writeFile(path.join(cwd,"pixel.png"),Buffer.from(png,"base64"));
+    const literal = String(i)+" quoted ' "+String.fromCharCode(34,96)+" $HOME $(touch injected) "+String.fromCharCode(36)+"{notCode} λ😀\r\n";
+    const data = {path:"cutover.json",literal,payload:literal+String.fromCharCode(0),oldText:'"version":1',newText:'"version":2',
+      verifier:'const fs=require("node:fs");const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(x.version!==2||x.payload!==process.argv[2]+String.fromCharCode(0))process.exit(9);process.stdout.write(process.argv[2]);'};
+    const execute = programs=>f.tool.execute("cutover",{programs},undefined,undefined,{cwd});
+    const stopped = await execute([
+      {code:'const saved=await write(data.path,data.content); return {saved,image:await read("pixel.png")};',data:{path:"scripts/flow.js",content:source}},
+      {file:"scripts/flow.js",data},
+      {code:'await write("never.txt","bad");'},
+    ]);
+    assert.equal(stopped.details.ok,false); assert.equal(stopped.details.attempted,2);
+    assert.equal(stopped.details.mutations.committed,2); assert.equal(stopped.details.mutations.rolledBack,3);
+    assert.equal(stopped.details.mutations.external,2);
+    assert.match(modelText(stopped),/cannot be rolled back/);
+    assert.equal(stopped.content.find(block=>block.type==="image")?.data,png);
+    assert.ok(modelText(stopped).includes(literal));
+    assert.match(modelText(stopped),/post-verification failure/);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(cwd,data.path),"utf8")),{version:2,payload:data.payload});
+    for(const name of ["rejected.txt","late.txt","never.txt","injected"]) await assert.rejects(fs.stat(path.join(cwd,name)),{code:"ENOENT"});
+    // Repair the saved source through Nova, then execute it again. Stale source
+    // or leaked worker state would repeat the failure instead of returning proof.
+    const repaired = await execute([
+      {code:'return await edit(data.path,data.oldText,data.newText);',data:{path:"scripts/flow.js",oldText:failure,newText:'return {version:await read({path:data.path,json:".version"}),alias:typeof exec};'}},
+      {file:"scripts/flow.js",data},
+    ]);
+    assert.equal(repaired.details.ok,true);
+    assert.deepEqual(repaired.details.result[1],{version:2,alias:"undefined"});
+    assert.equal(await fs.readFile(path.join(cwd,"late.txt"),"utf8"),"after verification");
+  }));
 });

@@ -5,32 +5,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { engineFixture, modelText } from "../helpers/engine.mjs";
-
-it("literal data crosses the worker boundary without interpreting quotes or templates", async t => {
-  const f = await engineFixture(t);
-  const content = "# Markdown\n\u0000";
-  const source = ['# Heading', '\u0000', 'print("backtick: \x60; interpolation: \x24{notCode}; regex: \\n")'].join("\n");
-  const data = { path: "literal.txt", content: source + content };
-  const result = await f.tool.execute("data", { code: 'await write(data.path,data.content); return await read(data.path);', data }, undefined, undefined, { cwd: f.root });
-  assert.equal(result.details.result, data.content);
-  assert.equal(await fs.readFile(path.join(f.root, data.path), "utf8"), data.content);
-  assert.ok(f.tool.parameters.properties.data);
-  assert.equal((await f.execute('const data = 7; return data;')).details.result, 7);
-  await assert.rejects(f.tool.execute("large-data", {code:'await write("bad.txt","bad");',data:"x".repeat(48001)}, undefined, undefined, {cwd:f.root}), /data exceeds/);
-  await assert.rejects(fs.stat(path.join(f.root,"bad.txt")), {code:"ENOENT"});
-});
-
-it("syntax failures explain that nothing ran and offer the literal data route", async t => {
-  const f = await engineFixture(t);
-  await assert.rejects(f.execute('await write("never.txt", \x60unescaped \x60markdown\x60\x60);'), error => {
-    assert.match(error.message, /syntax error/i);
-    assert.match(error.message, /no commands ran/i);
-    assert.match(error.message, /data/);
-    return true;
-  });
-  await assert.rejects(fs.stat(path.join(f.root,"never.txt")), {code:"ENOENT"});
-});
+import { engineFixture } from "../helpers/engine.mjs";
 
 it("unsupported edit overloads fail before dispatch with usable signatures", async t => {
   const f = await engineFixture(t);
@@ -40,25 +15,6 @@ it("unsupported edit overloads fail before dispatch with usable signatures", asy
   await f.write("edit.txt", "retained");
   await assert.rejects(f.execute('await edit("edit.txt", "");'), /edit.*(?:signature|use|requires)/i);
   assert.equal(await fs.readFile(path.join(f.root,"edit.txt"),"utf8"), "retained");
-});
-
-it("failed programs distinguish rollback from writes committed before shell execution", async t => {
-  const f = await engineFixture(t);
-  await assert.rejects(f.execute('await write("staged.txt","one"); await read("missing.txt");'), error => {
-    assert.match(error.message, /mutations:.*committed=0.*rolledBack=1/i);
-    return true;
-  });
-  await assert.rejects(fs.stat(path.join(f.root,"staged.txt")), {code:"ENOENT"});
-  await assert.rejects(f.execute('await write("kept.txt","one"); await bash("printf ok"); await write("staged.txt","two"); throw Error("later");'), error => {
-    assert.match(error.message, /mutations:.*committed=1.*rolledBack=1/i);
-    assert.match(error.message, /external.*cannot be rolled back/i);
-    return true;
-  });
-  assert.equal(await fs.readFile(path.join(f.root,"kept.txt"),"utf8"), "one");
-  await assert.rejects(fs.stat(path.join(f.root,"staged.txt")), {code:"ENOENT"});
-  const result = await f.execute('await write("kept.txt","two");');
-  assert.equal(result.details.mutations.committed, 1);
-  assert.match(modelText(result), /mutations:.*committed=1/);
 });
 
 it("JSON projection parses the full report before selecting fields and array slices", async t => {
@@ -113,14 +69,6 @@ it("projection fails closed for incompatible views, batches and delegated reader
   f.pi.registerTool({name:"read",execute:async()=>{calls++; return {content:[{type:"text",text:'{"wrong":true}'}]};}});
   await assert.rejects(f.execute('return await read({path:"report.json",json:".value"});'), /Supernova-owned read adapter/);
   assert.equal(calls,0);
-});
-
-it("literal script arguments execute without shell or JavaScript interpolation", async t => {
-  const f = await engineFixture(t);
-  const text = "quotes '\" backtick " + String.fromCharCode(96) + " $HOME \\n λ";
-  const data = {args:["-e",'console.log(process.argv[1])',text]};
-  const result = await f.tool.execute("argv-data", {code:'return await bash({command:"node",args:data.args});',data},undefined,undefined,{cwd:f.root});
-  assert.equal(result.details.result, text + "\n");
 });
 
 it("large Markdown path audits use matching windows rather than complete-file reads", async t => {
@@ -211,6 +159,9 @@ it("literal data respects encoded size, accepts falsy inputs and does not leak b
   assert.equal((await f.tool.execute("exact-data",{code,data},undefined,undefined,{cwd:f.root})).details.result,47998);
   await assert.rejects(execute("\n".repeat(24000)),/data exceeds/);
   assert.equal((await f.execute('return typeof data;')).details.result,"undefined");
+  assert.equal((await f.execute('const data=7; return data;')).details.result,7);
+  await assert.rejects(f.tool.execute("data-before-commands",{code:'await write("never.txt","bad");',data:"x".repeat(48001)},undefined,undefined,{cwd:f.root}),/data exceeds/);
+  await assert.rejects(fs.stat(path.join(f.root,"never.txt")),{code:"ENOENT"});
 });
 
 it("concurrent queried resources remain session-scoped and cannot escape through symlinks", async t => {

@@ -12,10 +12,9 @@ const mutationTotals = results => results.reduce((total, result) => {
 export function programBatchText(results, total, stopped = "") {
   const m = mutationTotals(results);
   return (stopped ? "error: programs stopped: " + stopped : "ok: programs") + " " + results.length + "/" + total +
-    "; committed=" + m.committed + " rolledBack=" + m.rolledBack + " externalAttempts=" + m.external +
-    (m.recoveryFailed || m.pendingCommits ? "; filesystem outcome uncertain: inspect disk" : "") + "\n" + results.map((result,i) => {
+    (m.recoveryFailed || m.pendingCommits ? "; filesystem outcome uncertain: inspect disk" : "") + "\nresults (UTF-16 lengths):\n" + results.map((result,i) => {
       const text = textOf(result);
-      return "[" + i + "] " + text.length + " UTF-16 units\n" + text + "\n";
+      return "[" + i + "] " + text.length + "\n" + text + "\n";
     }).join("");
 }
 

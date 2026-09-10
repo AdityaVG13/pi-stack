@@ -22,7 +22,8 @@ it("workspace notifications describe disk commits, not checkpoint merges or roll
   assert.deepEqual(events[0].contents, ["final"]);
   assert.ok(Object.isFrozen(events[0].event));
   assert.ok(Object.isFrozen(events[0].event.paths));
-  await assert.rejects(f.execute(`await write("failed.txt", "no"); throw Error("abort program");`), /abort program/);
+  await assert.rejects(f.execute(`await write("failed.txt", "no"); await read("missing.txt");`), /ENOENT|no such file/);
+  await assert.rejects(fs.stat(path.join(f.root,"failed.txt")),{code:"ENOENT"});
   assert.equal(events.length, 1);
   await f.execute(`return await read("kept.txt");`);
   assert.equal(events.length, 1);

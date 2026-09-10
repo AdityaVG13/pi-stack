@@ -8,31 +8,6 @@ import { engineFixture } from "../helpers/engine.mjs";
 
 const run = (f, args, signal, cwd = f.root) => f.tool.execute("program-file", args, signal, undefined, { cwd });
 
-it("file programs reuse exact source and data with fresh guests, not cached code", async t => {
-  const f = await engineFixture(t);
-  const code = 'globalThis.count = (globalThis.count || 0) + 1; return {count:globalThis.count, data};';
-  // Creation uses Nova's existing literal-input and transaction path.
-  await run(f, { code: 'await write(data.path,data.content);', data: {path:"audit.js",content:code} });
-  for (const data of [false, 0, null, "", {text:'quotes " backtick \u0060 \u0024{literal} λ😀\r\n'}]) {
-    assert.deepEqual((await run(f, {file:"audit.js",data})).details.result, {count:1,data});
-  }
-  await f.write("audit.js", "async () => 42");
-  assert.equal((await run(f, {file:"audit.js"})).details.result, 42);
-  assert.equal((await run(f, {code:"return 42;"})).details.result, 42);
-});
-
-it("file programs use the calling workspace even when script directories and calls differ", async t => {
-  const f = await engineFixture(t);
-  const roots = [f.root, path.join(f.root,"second")];
-  for (const [i, root] of roots.entries()) {
-    await fs.mkdir(path.join(root,"scripts"), {recursive:true});
-    await fs.writeFile(path.join(root,"value.txt"), String(i));
-    await fs.writeFile(path.join(root,"scripts/audit.js"), 'return await read("value.txt");');
-  }
-  const results = await Promise.all(roots.map(cwd => run(f,{file:"scripts/audit.js"},undefined,cwd)));
-  assert.deepEqual(results.map(result => result.details.result), ["0","1"]);
-});
-
 it("file admission rejects ambiguity, non-files, invalid UTF-8 and invalid syntax before commands", async t => {
   const f = await engineFixture(t);
   await f.write("audit.js", 'await write("never.txt","bad"); return 1;');
@@ -47,6 +22,15 @@ it("file admission rejects ambiguity, non-files, invalid UTF-8 and invalid synta
   await assert.rejects(run(f,{file:"broken.js"}), /syntax error.*no commands ran/);
   await f.write("empty.js", "  ");
   await assert.rejects(run(f,{file:"empty.js"}), /non-empty/);
+  await assert.rejects(run(f,{code:'await write("never.txt","bad"); )'}),error=>{
+    assert.match(error.message,/syntax error.*no commands ran/s);
+    assert.match(error.message,/data/); return true;
+  });
+  await f.write("empty.js","async () => 42");
+  assert.equal((await run(f,{file:"empty.js"})).details.result,42);
+  await assert.rejects(run(f,{file:"empty.js"},AbortSignal.abort()),/aborted/);
+  await f.write("empty.js",'await new Promise(()=>{}); await write("never.txt","bad");');
+  await assert.rejects(run(f,{file:"empty.js",timeoutMs:100}),/timed out or aborted/);
   await assert.rejects(fs.stat(path.join(f.root,"never.txt")), {code:"ENOENT"});
 });
 
@@ -63,21 +47,6 @@ it("file programs enforce complete-source UTF-16 caps including multibyte input"
     await f.write("audit.js", code);
     await assert.rejects(run(f,{file:"audit.js"}), /code exceeds/);
   }
-  await assert.rejects(fs.stat(path.join(f.root,"never.txt")), {code:"ENOENT"});
-});
-
-it("file programs retain rollback, external commit and cancellation semantics", async t => {
-  const f = await engineFixture(t);
-  await f.write("audit.js", 'await write("state.txt","staged"); throw Error("stop");');
-  await assert.rejects(run(f,{file:"audit.js"}), /committed=0 rolledBack=1/);
-  await assert.rejects(fs.stat(path.join(f.root,"state.txt")), {code:"ENOENT"});
-  await f.write("audit.js", 'await write("state.txt","committed"); await bash("printf smoke"); throw Error("stop");');
-  await assert.rejects(run(f,{file:"audit.js"}), /committed=1 rolledBack=0.*external calls attempted=1/);
-  assert.equal(await fs.readFile(path.join(f.root,"state.txt"),"utf8"), "committed");
-  const controller = new AbortController(); controller.abort();
-  await assert.rejects(run(f,{file:"audit.js"},controller.signal), /aborted/);
-  await f.write("audit.js", 'await new Promise(() => {}); await write("never.txt","bad");');
-  await assert.rejects(run(f,{file:"audit.js",timeoutMs:100}), /timed out or aborted/);
   await assert.rejects(fs.stat(path.join(f.root,"never.txt")), {code:"ENOENT"});
 });
 

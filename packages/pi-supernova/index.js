@@ -74,7 +74,8 @@ function sessionStats({ programs, returnedChars }) {
 }
 
 function logsBlock(outcome, tail = "") {
-  return outcome.logs?.length ? `\n--- logs\n${outcome.logs.join("\n")}${tail}` : "";
+  if (!outcome.logs?.length && !outcome.logTruncated) return "";
+  return `\n--- logs${outcome.logTruncated ? " [logs truncated]" : ""}\n${outcome.logs?.join("\n") ?? ""}${tail}`;
 }
 
 function mutationText(outcome) {
@@ -86,7 +87,7 @@ function mutationText(outcome) {
 }
 
 function errorText(outcome, call) {
-  return `error #${call} ${outcome.wallMs}ms${mutationText(outcome)}
+  return `error #${call} ${outcome.wallMs}ms${outcome.returnTruncated ? " [output truncated]" : ""}${mutationText(outcome)}
 error: ${outcome.error}${logsBlock(outcome)}`;
 }
 
@@ -144,11 +145,10 @@ export function registerCodeMode(pi) {
     name: "supernova",
     label: "Supernova",
     description: TOOL_DESCRIPTION,
-    promptSnippet: "Use read, write, edit, and bash in one program, including JSON selection and image viewing",
-    promptGuidelines: ["Use read, write, edit, and bash inside supernova. Start with read(question), or read(directory, {about: question}) for scoped source selection. A source question already opens the selected file; do not issue a redundant read. Use read({query,resolve:true}) and check status before editing its path."],
+    promptSnippet: "JavaScript with read, write, edit, and bash",
     parameters: Type.Object({
-      code: Type.Optional(Type.String({ maxLength: config.maxCodeChars ?? 48000, description: `JavaScript program: async body or arrow function. Maximum ${config.maxCodeChars ?? 48000} UTF-16 code units; split large writes into write({path,content,append:true}) chunks.` })),
-      file: Type.Optional(Type.String({ minLength: 1, description: "Workspace program path instead of code. Same character cap, bindings and workspace cwd; reread each invocation." })),
+      code: Type.Optional(Type.String({ maxLength: config.maxCodeChars ?? 48000 })),
+      file: Type.Optional(Type.String({ minLength: 1 })),
       data: Type.Optional(Type.Unknown({ description: "Literal JSON input available as data in the program; put Markdown, scripts or argv here instead of nesting JavaScript quoting. JSON-encoded size is limited to the code character budget." })),
       timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, description: "Hard timeout in ms." })),
       programs: Type.Optional(Type.Array(Type.Object({
@@ -225,7 +225,12 @@ export function registerCodeMode(pi) {
       if (budget) budget.logLines += outcome.logs?.length ?? 0;
       outcome.mutations = runBridge.getMutations();
       const trace = runBridge.getTrace();
-      const text = outcome.ok ? successText(outcome, call) : errorText(outcome, call);
+      const format = outcome.ok ? successText : errorText;
+      let text = format(outcome, call);
+      if (text.length > config.maxReturnChars) {
+        outcome.returnTruncated = true;
+        text = format(outcome, call);
+      }
       const bounded = truncateChars(text, config.maxReturnChars, "output").text;
       const visible = runBridge.ledger.dedupe(bounded, call);
       const response = result(visible, {
