@@ -16,6 +16,7 @@ import { SeenLedger } from "../context/ledger.js";
 import { quickCheck } from "../fs/check.js";
 import { declaredName } from "../context/repo-index.js";
 import { CausalVfs } from "../fs/vfs.js";
+import { MAX_JSON_BYTES, jsonProjector, sessionJsonArgs, validateJsonRead } from "../fs/json-read.js";
 import { applyPatchToText } from "../fs/patch.js";
 import { resolveWorkspacePath, runCommand, clearPathCache, relativeSlash } from "../fs/workspace.js";
 import { fuzzyFind, grepIndexed, listIndexed, listWithTools, rgGrepArgs, referencesForNames } from "../context/search.js";
@@ -173,8 +174,8 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
     const cwd = getCwd();
     const targetParam = params?.path ?? params?.target;
     if (Array.isArray(targetParam)) {
-      if (targetParam.some(p => !isString(p) || !p.trim())) throw new Error("read paths must be non-empty strings");
       if (targetParam.length > 64) throw new Error("read accepts at most 64 paths per batch");
+      for (const p of targetParam) if (!isString(p) || !p.trim()) throw new Error("read paths must be non-empty strings");
       const results = await Promise.all(targetParam.map(async p => {
         try {
           const block = (await readAdapter({ ...params, path: p }, signal)).content[0];
@@ -222,6 +223,9 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
   }
 
   async function readSingle(params, cwd, targetParam, signal) {
+    params = sessionJsonArgs({ ...params, path: targetParam });
+    validateJsonRead(params);
+    targetParam = params.path;
     if (isString(targetParam) && /^(?:agent|artifact):\/\//i.test(targetParam)) {
       const target = await resolveSessionResource(targetParam, signal);
       return params.resolve
@@ -237,9 +241,10 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
       if (!existing.directory) return params.resolve
         ? openSource({ status: "found", path: relativeSlash(cwd, existing.path), line: params.offset ?? 1 }, params, signal)
         : readFile(existing.path, params);
+      if (params.json !== undefined) throw new Error("JSON read requires a file, not a directory");
       return isString(params?.about) ? sourceRead(params.about, existing.path, signal, params) : readDirectory(existing.path, signal);
     }
-    if (!looksLikePath(targetParam)) return sourceRead(targetParam, cwd, signal, params);
+    if (params.json === undefined && !looksLikePath(targetParam)) return sourceRead(targetParam, cwd, signal, params);
     const targetPath = resolveReadPath(cwd, targetParam);
     return readFile(targetPath, params);
   }
@@ -248,6 +253,23 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
   async function readFile(targetPath, params, sourceLine, displayPath) {
     const cwd = getCwd();
     const rel = displayPath ?? relativeSlash(cwd, targetPath);
+    if (params.json !== undefined) {
+      const project = jsonProjector(params.json);
+      const text = await vfs.read(targetPath, { maxBytes: MAX_JSON_BYTES });
+      let document;
+      try { document = JSON.parse(text); }
+      catch { throw new Error("invalid JSON in " + rel + "; the entire document must parse before projection"); }
+      const many = Array.isArray(params.json);
+      let remaining = Math.max(1, Math.min(config.maxCallResultChars ?? 65536, config.maxReturnChars ?? 32000) - 256) - (many ? params.json.length + 1 : 0);
+      const parts = [];
+      for (const value of project(document)) {
+        const encoded = JSON.stringify(value);
+        remaining -= encoded.length;
+        if (remaining < 0) throw new Error("JSON selection exceeds the read budget; select narrower fields or an array slice such as .items[0:10]");
+        parts.push(encoded);
+      }
+      return textResult(many ? "[" + parts.join(",") + "]" : parts[0], { path: targetPath, json: true, complete: true });
+    }
     const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp" }[path.extname(targetPath).toLowerCase()];
     if (mime) {
       if ((await fs.stat(targetPath)).size > 20 * 1024 * 1024) throw new Error("image exceeds 20 MiB; resize it before reading");
@@ -271,9 +293,10 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
     const firstLine = isNumber(offset) ? Math.max(1, Math.floor(offset)) : 1;
     const sliced = sliceLines(text, offset, params?.limit);
     if (params.complete === true && (sliced !== text || sliced.length > budget || (params.resolve && JSON.stringify(sliced).length > budget))) {
-      throw new Error(`incomplete read of ${rel}: complete:true requires the entire file within the read budget; use edit() for replacements or reconstruct resolve:true source windows`);
+      throw new Error(`incomplete read of ${rel}: complete:true requires the entire file within the read budget; use json:".field" for JSON reports, about for text selection, edit() for replacements, or reconstruct resolve:true source windows`);
     }
     if (sliced.length > budget || (params.resolve && JSON.stringify(sliced).length > budget)) {
+      if (!explicit && !params.resolve && path.extname(targetPath).toLowerCase() === ".json") throw new Error("incomplete JSON read of " + rel + "; use the json selector option to parse the whole document before projection, or explicit offset/limit for raw text windows");
       let cap = budget - 160;
       if (params.resolve) {
         // Budget the actual JSON string, not a pessimistic fixed escape multiplier.
@@ -639,7 +662,7 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
   };
 }
 
-export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedger }) {
+export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedger, budget }) {
   const index = registry?.index ?? new WorkspaceIndex((argv, opts) => runCommand(argv, opts));
   const ledger = runLedger ?? new SeenLedger({ window: config.seenWindow ?? 40 });
   const vfs = new CausalVfs(paths => {
@@ -807,6 +830,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
   function checkCallBudget(name) {
     if (closed) throw new Error("program is already complete");
     const maxCalls = config.maxBridgeCalls ?? 256;
+    if (budget && ++budget.calls > maxCalls) throw new Error("host call budget exceeded (" + maxCalls + " calls per program batch): split the batch");
     callCount += 1;
     if (callCount > maxCalls) {
       throw new Error(
@@ -861,6 +885,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
       const delegated = hostTool(name);
       const exec = delegated ? delegated.execute.bind(delegated) : hostSession ? undefined : executors.get(name);
       if (exec) {
+        if (name === "read" && (args?.json !== undefined || /^(agent|artifact):\/\/.*\?/i.test(String(args?.path)))) throw new Error("JSON projection requires the Supernova-owned read adapter, not an external override");
         if (name === "write" && args?.append === true) throw new Error("append requires the Supernova-owned write adapter, not an external override");
         const fallbackDiff = await writeFallbackDiff(name, args);
         const mutating = isMutatingTool(name, config, args, definitions.get(name));
@@ -955,12 +980,13 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
       },
     },
     fork(options) {
-      return createHostBridge({ pi, config, getCwd: options.getCwd, registry: sharedRegistry, ledger: ledger.fork() });
+      return createHostBridge({ pi, config, getCwd: options.getCwd, registry: sharedRegistry, ledger: ledger.fork(), budget: options.budget });
     },
     close() { closed = true; vfs.closed = true; },
     bindCallContext,
     resetCallBudget,
     getTrace,
+    getMutations: () => ({ ...vfs.mutations }),
     setCallListener,
     barrier: run => scheduler.schedule("write", run, activeSignal),
     beginSpeculation,

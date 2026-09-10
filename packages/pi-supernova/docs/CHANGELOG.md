@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Add explicit sequential `programs` batches with fresh guests and separate commits. Preserve complete per-program text and earlier images in typed stop reports; share deadlines, host calls, logs and outer output/image limits. Reject malformed/nested/oversized plans before execution.
+- Make the additional 40% token gate part of `npm test`, with a frozen post-previous-pass baseline, exact logical-result checks, both tokenizers, full tool-history replay and the final answer handoff. Measured 53.81%/53.88% fewer modeled tool tokens for the fixed workload; retain the full startup reference. No provider billing or model-quality claim.
+
+- Add explicit workspace program-file input as an alternative to inline code, with fresh loading/guests, strict bounded UTF-8 admission and unchanged deadlines/transactions. No implicit replay or persistent heap.
+- Extend verbatim string framing to nested source results, preserving all fields, types, duplicate strings and lengths; retain compact scalar output. Remove redundant guidance already present in parameter/command descriptions.
+- Add reproducible two-tokenizer measurements and package comparisons in `TOKEN_COSTS.md`, including creation/definition overhead and explicit no-claim boundaries for billing and end-to-end quality.
+
+- Stress follow-up: budget each JSON selector before allocating the next slice, reject non-regular JSON inputs without blocking on FIFO open, and reject sparse selector/path/edit arrays. Add a heap-limited host-survival regression, exact input boundaries, concurrent queried-resource isolation, and failed-recovery backup verification. The mixed stress lane now exercises literal input data and JSON projection.
+
+- Add literal tool-level `data` input for Markdown/scripts/argv without nested JavaScript quoting; parse failures explicitly state no commands ran.
+- Parse full JSON before bounded field/index/slice projection with `read({path,json})`, including session `?q=.answer` resources. Reject invalid selectors, missing fields, oversized inputs/selections and incompatible read options. Oversized unwindowed plain JSON reads fail with actionable guidance.
+- Validate edit overloads before dispatch and show supported signatures, without touching a file on invalid input.
+- Report committed/rolledBack file versions and external-call attempts on failure, and distinguish uncertain commit recovery from complete rollback.
+- Advertise direct image viewing and targeted large-text reads in model-facing guidance. Add Spark papercut regressions through the registered tool and real worker.
+
 ## [0.3.2] - 2026-09-07
 
 - Focus `read(path,{about})` on matching line windows in unstructured logs/text instead of returning a truncated unrelated prefix; report no matches explicitly.

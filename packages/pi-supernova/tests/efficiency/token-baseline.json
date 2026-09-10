@@ -1,0 +1,187 @@
+{
+  "label": "Current implementation after source framing and explicit file reuse; before the additional 40% pass",
+  "source": "import { isString, isObject } from \"../shared/decode.js\";\n\nexport const MAX_JSON_BYTES = 16 * 1024 * 1024;\nconst SELECTOR_HELP = 'JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq';\n\n/** Parse a small, non-evaluating selector language. No dynamic code or prototype lookup. */\nfunction parseSelector(selector) {\n  if (!isString(selector) || !selector.startsWith(\".\") || selector.length > 2048) throw new Error(SELECTOR_HELP);\n  let rest = selector.slice(1);\n  const steps = [];\n  let first = true;\n  while (rest) {\n    let match;\n    if ((match = (first ? /^([A-Za-z_$][\\w$]*)/ : /^\\.([A-Za-z_$][\\w$]*)/).exec(rest))) {\n      steps.push({ key: match[1] });\n    } else if ((match = /^\\[(\"(?:[^\"\\\\]|\\\\.)*\")\\]/.exec(rest))) {\n      try { steps.push({ key: JSON.parse(match[1]) }); } catch { throw new Error(SELECTOR_HELP); }\n    } else if ((match = /^\\[(\\d+)(?::(\\d+))?\\]/.exec(rest))) {\n      const start = Number(match[1]), end = match[2] === undefined ? undefined : Number(match[2]);\n      if (!Number.isSafeInteger(start) || (end !== undefined && (!Number.isSafeInteger(end) || end < start))) throw new Error(SELECTOR_HELP);\n      steps.push(end === undefined ? { index: start } : { start, end });\n    } else throw new Error(SELECTOR_HELP);\n    rest = rest.slice(match[0].length);\n    first = false;\n  }\n  return steps;\n}\n\nexport function jsonProjector(json) {\n  const many = Array.isArray(json);\n  const selectors = many ? json : [json === true ? \".\" : json];\n  if (!selectors.length || selectors.length > 64) throw new Error(\"JSON selector list requires 1 to 64 selectors\");\n  const plans = Array.from(selectors, parseSelector);\n  // Yield one selection at a time so the caller can budget it before the next\n  // slice allocation. Eagerly mapping 64 large slices can exhaust the host heap.\n  return function* (root) {\n    for (const steps of plans) yield steps.reduce((value, step) => {\n      if (step.key !== undefined) {\n        if (!isObject(value) || !Object.hasOwn(value, step.key)) throw new Error(\"JSON field not found: \" + JSON.stringify(step.key));\n        return value[step.key];\n      }\n      if (!Array.isArray(value)) throw new Error(\"JSON index requires an array\");\n      if (step.index !== undefined) {\n        if (step.index >= value.length) throw new Error(\"JSON index out of range: \" + step.index);\n        return value[step.index];\n      }\n      return value.slice(step.start, step.end);\n    }, root);\n  };\n}\n\nexport function sessionJsonArgs(args) {\n  if (!isString(args.path) || !/^(agent|artifact):\\/\\//i.test(args.path) || !args.path.includes(\"?\")) return args;\n  const [uri, query] = args.path.split(\"?\");\n  const params = new URLSearchParams(query);\n  if (args.path.includes(\"#\") || args.path.split(\"?\").length !== 2 || params.size !== 1 || !params.has(\"q\") || args.json !== undefined) {\n    throw new Error(\"session resource supports only one ?q=<JSON selector>; do not combine it with json\");\n  }\n  const json = params.get(\"q\");\n  jsonProjector(json); // Reject invalid selectors before artifact lookup.\n  return { ...args, path: uri, json };\n}\n\nexport function validateJsonRead(args) {\n  if (args.json === undefined) return;\n  if ([\"offset\", \"limit\", \"about\", \"query\", \"outline\", \"evidence\", \"resolve\", \"complete\"].some(key => args[key] !== undefined)) {\n    throw new Error(\"JSON reads cannot combine json with line windows, source views, or complete; select fields after parsing the whole document\");\n  }\n  jsonProjector(args.json);\n}\n",
+  "decode": "const toStr = Object.prototype.toString;\n\nexport const isString = (v) => toStr.call(v) === \"[object String]\";\nexport const isObject = (v) => toStr.call(v) === \"[object Object]\";\nexport const isFunction = (v) => toStr.call(v) === \"[object Function]\" || v instanceof Function;\nexport const isNumber = (v) => toStr.call(v) === \"[object Number]\" && Number.isFinite(v);\n\nconst MAX_DEPTH = 64;\nconst MAX_TYPED_ARRAY = 4096;\n\nfunction plainFromBinary(value) {\n  const bytes = value.byteLength;\n  if (value instanceof ArrayBuffer) value = new Uint8Array(value);\n  else if (value instanceof DataView) value = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);\n  if (value.length > MAX_TYPED_ARRAY) return \"[\" + value.constructor.name + \" \" + bytes + \" bytes]\";\n  return value instanceof BigInt64Array || value instanceof BigUint64Array\n    ? Array.from(value, x => x.toString() + \"n\")\n    : Array.from(value);\n}\n\nfunction plainFromMap(value, seen, depth) {\n  const allStringKeys = [...value.keys()].every(isString);\n  if (!allStringKeys) return [...value].map(([k, v]) => [toPlain(k, seen, depth + 1), toPlain(v, seen, depth + 1)]);\n  const out = Object.create(null);\n  for (const [k, v] of value) out[k] = toPlain(v, seen, depth + 1);\n  return out;\n}\n\nfunction plainFromCollection(value, seen, depth) {\n  if (Array.isArray(value)) return value.map((x) => toPlain(x, seen, depth + 1));\n  if (value instanceof Set) return [...value].map((x) => toPlain(x, seen, depth + 1));\n  if (value instanceof Map) return plainFromMap(value, seen, depth);\n  const out = Object.create(null);\n  for (const k of Object.keys(value)) out[k] = toPlain(value[k], seen, depth + 1);\n  return out;\n}\n\n/** Convert any guest value to structured-clone-safe, JSON-shaped data. */\nexport function toPlain(value, seen = new Set(), depth = 0) {\n  if (value === null || value === undefined) return value;\n  const tag = toStr.call(value);\n  if (tag === \"[object String]\" || tag === \"[object Number]\" || tag === \"[object Boolean]\") return value.valueOf();\n  if (tag === \"[object BigInt]\") return value.toString() + \"n\";\n  if (isFunction(value)) return \"[Function\" + (value.name ? \" \" + value.name : \"\") + \"]\";\n  if (tag === \"[object Symbol]\") return value.toString();\n  if (depth > MAX_DEPTH) return \"[Depth]\";\n  if (seen.has(value)) return \"[Circular]\";\n  if (value instanceof Date) return Number.isNaN(value.getTime()) ? \"Invalid Date\" : value.toISOString();\n  if (value instanceof RegExp) return value.toString();\n  if (value instanceof Error) {\n    const out = { name: value.name, message: value.message };\n    if (value.cause !== undefined) out.cause = toPlain(value.cause, seen, depth + 1);\n    return out;\n  }\n  if (value instanceof Promise) return \"[Promise]\";\n  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return plainFromBinary(value);\n  if (isFunction(value.toJSON)) return toPlain(value.toJSON(), seen, depth + 1);\n  seen.add(value);\n  try {\n    return plainFromCollection(value, seen, depth);\n  } finally {\n    seen.delete(value);\n  }\n}\n\n// ---- RPC to the host thread ----\n\n",
+  "workloadHash": "2591f5d1e899dc8c51b7bcf23c96333ee0ff6da5cd70d2cbe7501cc6443aad3f",
+  "definition": {
+    "description": "Run one JavaScript program with four familiar commands: read, write, edit, bash. Use an async body or arrow. Return a small value; strings stay raw. Supply exactly one of code or file; file rereads a workspace program with the same limits and fresh guest, without resending its source.\n\nNative commands (async):\nread(path|paths, offset?, limit?) → file text or text[]; read(directory) → directory entries\nread(imagePath) → image attachment when returned (PNG/JPEG/GIF/WebP/BMP); no browser needed\nread({path,json:\".field\"}) → parsed JSON field; supports .items[0:3], quoted keys, selector arrays, or true for the whole JSON value\nread(\"agent://id?q=.answer\") → JSON field from a calling-session resource (when host artifacts are available)\nread(\"symbol or question\") → locate and open source in one call, without an index; selected file text stays raw\nread({query, resolve:true}) → {status,path,line,lines,text,complete,nextOffset?} for a direct resolve→edit handoff\nread(path, {about: question}) → relevant file bodies, or source selection inside a directory\nread({query, evidence:true}) → ranked evidence; read({path, outline:true}) → structural declarations\nwrite(path, text) → write a file; write({path,content,append:true}) appends a chunk without a bounded read\nedit(path, oldText, newText) → post-edit lines, checks, and references\nedit(async () => {...}) → filesystem checkpoint: commit on success, rollback on throw; no shell commands, nesting, or concurrent outside commands\nbash(command, {cwd?, timeoutMs?}) → bounded output; throws on non-zero exit\nbash({command, args:[...]}) → literal argv without shell expansion of arguments\n\nOnly found selects and opens a file. Uncertain reads return ambiguous, not_found, or incomplete with no selected path. Use resolve:true for structured status checks; narrow the directory with path+about when uncertain.\nFor read-modify-write, use read({path,complete:true}); it rejects partial output. For large JSON use json selectors: parse first, then project within the read budget (16 MiB input cap; no full jq). Do not JSON.parse line windows. For large text audits use about or offset/limit, not complete:true. Prefer edit for large files. Array reads reject failures; use Promise.allSettled for per-path outcomes.\nObject arguments also work: read({path, offset?, limit?, about?, outline?, evidence?, resolve?, complete?}), edit({path, edits:[{oldText,newText}]}), edit({path,patch}), write({path,content}), bash({command,timeoutMs?}).\nFile changes stage until program success; later errors roll them back. Shell calls commit preceding writes and cannot be rolled back. Outcomes report committed/rolledBack file versions and external-call attempts.\nIndependent read starts batch automatically. Mutations preserve submission order. Plain reads remain self-contained; oversized reads provide continuation offsets. Return only what the model needs. console.log is captured.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "maxLength": 48000,
+          "description": "JavaScript program: async body or arrow function. Maximum 48000 UTF-16 code units; split large writes into write({path,content,append:true}) chunks."
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Workspace program path instead of code. Same character cap, bindings and workspace cwd; reread each invocation."
+        },
+        "data": {
+          "description": "Literal JSON input available as data in the program; put Markdown, scripts or argv here instead of nesting JavaScript quoting. JSON-encoded size is limited to the code character budget."
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "description": "Hard timeout in ms."
+        }
+      }
+    },
+    "promptSnippet": "Use read, write, edit, and bash in one program, including JSON selection and image viewing",
+    "promptGuidelines": [
+      "Use read, write, edit, and bash inside supernova. Start with read(question), or read(directory, {about: question}) for scoped source selection. A source question already opens the selected file; do not issue a redundant read. Use read({query,resolve:true}) and check status before editing its path."
+    ]
+  },
+  "events": [
+    {
+      "group": "repair",
+      "args": {
+        "code": "return await read({query:\"MAX_JSON_BYTES\",resolve:true});"
+      },
+      "error": false,
+      "output": "ok #0 0ms\n{status:\"found\",path:\"src/fs/json-read.js\",line:3,lines:[1,70],text:raw[0],complete:true}\nraw strings[1]\nraw[0] 3520 UTF-16 units\nimport { isString, isObject } from \"../shared/decode.js\";\n\nexport const MAX_JSON_BYTES = 8 * 1024 * 1024;\nconst SELECTOR_HELP = 'JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq';\n\n/** Parse a small, non-evaluating selector language. No dynamic code or prototype lookup. */\nfunction parseSelector(selector) {\n  if (!isString(selector) || !selector.startsWith(\".\") || selector.length > 2048) throw new Error(SELECTOR_HELP);\n  let rest = selector.slice(1);\n  const steps = [];\n  let first = true;\n  while (rest) {\n    let match;\n    if ((match = (first ? /^([A-Za-z_$][\\w$]*)/ : /^\\.([A-Za-z_$][\\w$]*)/).exec(rest))) {\n      steps.push({ key: match[1] });\n    } else if ((match = /^\\[(\"(?:[^\"\\\\]|\\\\.)*\")\\]/.exec(rest))) {\n      try { steps.push({ key: JSON.parse(match[1]) }); } catch { throw new Error(SELECTOR_HELP); }\n    } else if ((match = /^\\[(\\d+)(?::(\\d+))?\\]/.exec(rest))) {\n      const start = Number(match[1]), end = match[2] === undefined ? undefined : Number(match[2]);\n      if (!Number.isSafeInteger(start) || (end !== undefined && (!Number.isSafeInteger(end) || end < start))) throw new Error(SELECTOR_HELP);\n      steps.push(end === undefined ? { index: start } : { start, end });\n    } else throw new Error(SELECTOR_HELP);\n    rest = rest.slice(match[0].length);\n    first = false;\n  }\n  return steps;\n}\n\nexport function jsonProjector(json) {\n  const many = Array.isArray(json);\n  const selectors = many ? json : [json === true ? \".\" : json];\n  if (!selectors.length || selectors.length > 64) throw new Error(\"JSON selector list requires 1 to 64 selectors\");\n  const plans = Array.from(selectors, parseSelector);\n  // Yield one selection at a time so the caller can budget it before the next\n  // slice allocation. Eagerly mapping 64 large slices can exhaust the host heap.\n  return function* (root) {\n    for (const steps of plans) yield steps.reduce((value, step) => {\n      if (step.key !== undefined) {\n        if (!isObject(value) || !Object.hasOwn(value, step.key)) throw new Error(\"JSON field not found: \" + JSON.stringify(step.key));\n        return value[step.key];\n      }\n      if (!Array.isArray(value)) throw new Error(\"JSON index requires an array\");\n      if (step.index !== undefined) {\n        if (step.index >= value.length) throw new Error(\"JSON index out of range: \" + step.index);\n        return value[step.index];\n      }\n      return value.slice(step.start, step.end);\n    }, root);\n  };\n}\n\nexport function sessionJsonArgs(args) {\n  if (!isString(args.path) || !/^(agent|artifact):\\/\\//i.test(args.path) || !args.path.includes(\"?\")) return args;\n  const [uri, query] = args.path.split(\"?\");\n  const params = new URLSearchParams(query);\n  if (args.path.includes(\"#\") || args.path.split(\"?\").length !== 2 || params.size !== 1 || !params.has(\"q\") || args.json !== undefined) {\n    throw new Error(\"session resource supports only one ?q=<JSON selector>; do not combine it with json\");\n  }\n  const json = params.get(\"q\");\n  jsonProjector(json); // Reject invalid selectors before artifact lookup.\n  return { ...args, path: uri, json };\n}\n\nexport function validateJsonRead(args) {\n  if (args.json === undefined) return;\n  if ([\"offset\", \"limit\", \"about\", \"query\", \"outline\", \"evidence\", \"resolve\", \"complete\"].some(key => args[key] !== undefined)) {\n    throw new Error(\"JSON reads cannot combine json with line windows, source views, or complete; select fields after parsing the whole document\");\n  }\n  jsonProjector(args.json);\n}\n\n"
+    },
+    {
+      "group": "repair",
+      "args": {
+        "code": "return await bash({command:\"node\",args:[\"check.mjs\"]});"
+      },
+      "error": true,
+      "output": "error #0 0ms\nmutations: committed=0 rolledBack=0 (file versions); external calls attempted=1, their side effects cannot be rolled back\nerror: command failed (exit 1): node\nJSON input cap regression (line 1:8)"
+    },
+    {
+      "group": "repair",
+      "args": {
+        "code": "return await edit(\"src/fs/json-read.js\",\"MAX_JSON_BYTES = 8\",\"MAX_JSON_BYTES = 16\");"
+      },
+      "error": false,
+      "output": "ok #0 0ms\nmutations: committed=1 rolledBack=0 (file versions)\nedited src/fs/json-read.js:1-5\n    1 import { isString, isObject } from \"../shared/decode.js\";\n    2 \n    3 export const MAX_JSON_BYTES = 16 * 1024 * 1024;\n    4 const SELECTOR_HELP = 'JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq';\n    5 \nMAX_JSON_BYTES also referenced in check.mjs:1"
+    },
+    {
+      "group": "repair",
+      "args": {
+        "code": "return await bash({command:\"node\",args:[\"check.mjs\"]});"
+      },
+      "error": false,
+      "output": "ok #0 0ms\nmutations: committed=0 rolledBack=0 (file versions); external calls attempted=1, their side effects cannot be rolled back\nJSON input cap ok\n"
+    },
+    {
+      "group": "report",
+      "args": {
+        "code": "return await read({path:\"report.json\",json:[\".verdict\",\".candidates\"]});"
+      },
+      "error": false,
+      "output": "ok #0 0ms\n[\n \"PENDING\",\n [\n  {id:\"a\",available:true,score:0,reason:\"source λ😀\"},\n  {id:\"b\",available:false,score:null,reason:\"needs review\"},\n  {id:\"c\",available:true,score:3,reason:\"verified file\"}\n ]\n]"
+    },
+    {
+      "group": "report",
+      "args": {
+        "code": "return await edit(data.path,data.oldText,data.newText);",
+        "data": {
+          "path": "report.json",
+          "oldText": "\"PENDING\"",
+          "newText": "\"REVIEW\""
+        }
+      },
+      "error": false,
+      "output": "ok #0 0ms\nmutations: committed=1 rolledBack=0 (file versions)\nedited report.json:1-4\n    1 {\n    2   \"verdict\": \"REVIEW\",\n    3   \"candidates\": [\n    4     {"
+    },
+    {
+      "group": "report",
+      "args": {
+        "code": "const report=await read({path:\"report.json\",json:[\".verdict\",\".candidates\"]}); if(report[0]!==\"REVIEW\"||report[1].length!==3)throw Error(\"report regression\"); return report;"
+      },
+      "error": false,
+      "output": "ok #0 0ms\n[\n \"REVIEW\",\n [\n  {id:\"a\",available:true,score:0,reason:\"source λ😀\"},\n  {id:\"b\",available:false,score:null,reason:\"needs review\"},\n  {id:\"c\",available:true,score:3,reason:\"verified file\"}\n ]\n]"
+    },
+    {
+      "group": "reuse",
+      "args": {
+        "code": "return await write(data.path,data.content);",
+        "data": {
+          "path": ".work/audit.js",
+          "content": "const results = await Promise.all(data.paths.map(async path => {\n  const source = await read({path, complete:true});\n  const lines = source.split(\"\\n\");\n  const matches = lines.flatMap((line, index) => line.includes(data.term) ? [{line:index+1, text:line}] : []);\n  return {path, lines:lines.length, matches};\n}));\nreturn results;"
+        }
+      },
+      "error": false,
+      "output": "ok #0 0ms\nmutations: committed=1 rolledBack=0 (file versions)\nwrote /workspace/.work/audit.js (speculative)"
+    },
+    {
+      "group": "reuse",
+      "args": {
+        "file": ".work/audit.js",
+        "data": {
+          "paths": [
+            "src/fs/json-read.js",
+            "src/shared/decode.js"
+          ],
+          "term": "JSON"
+        }
+      },
+      "error": false,
+      "output": "ok #0 0ms\n[\n {\n  path:\"src/fs/json-read.js\",\n  lines:71,\n  matches:[\n   {line:3,text:\"export const MAX_JSON_BYTES = 16 * 1024 * 1024;\"},\n   {\n    line:4,\n    text:\"const SELECTOR_HELP = 'JSON selector supports .field, .nested[0], .items[0:3], .[\\\"quoted.key\\\"], or . (whole value); not full jq';\"\n   },\n   {line:17,text:\"      try { steps.push({ key: JSON.parse(match[1]) }); } catch { throw new Error(SELECTOR_HELP); }\"},\n   {\n    line:32,\n    text:\"  if (!selectors.length || selectors.length > 64) throw new Error(\\\"JSON selector list requires 1 to 64 selectors\\\");\"\n   },\n   {\n    line:39,\n    text:\"        if (!isObject(value) || !Object.hasOwn(value, step.key)) throw new Error(\\\"JSON field not found: \\\" + JSON.stringify(step.key));\"\n   },\n   {line:42,text:\"      if (!Array.isArray(value)) throw new Error(\\\"JSON index requires an array\\\");\"},\n   {line:44,text:\"        if (step.index >= value.length) throw new Error(\\\"JSON index out of range: \\\" + step.index);\"},\n   {\n    line:57,\n    text:\"    throw new Error(\\\"session resource supports only one ?q=<JSON selector>; do not combine it with json\\\");\"\n   },\n   {\n    line:67,\n    text:\"    throw new Error(\\\"JSON reads cannot combine json with line windows, source views, or complete; select fields after parsing the whole document\\\");\"\n   }\n  ]\n },\n {\n  path:\"src/shared/decode.js\",\n  lines:68,\n  matches:[\n   {line:38,text:\"/** Convert any guest value to structured-clone-safe, JSON-shaped data. */\"},\n   {line:57,text:\"  if (isFunction(value.toJSON)) return toPlain(value.toJSON(), seen, depth + 1);\"}\n  ]\n }\n]"
+    },
+    {
+      "group": "reuse",
+      "args": {
+        "file": ".work/audit.js",
+        "data": {
+          "paths": [
+            "src/fs/json-read.js",
+            "src/shared/decode.js"
+          ],
+          "term": "throw"
+        }
+      },
+      "error": false,
+      "output": "ok #0 0ms\n[\n {\n  path:\"src/fs/json-read.js\",\n  lines:71,\n  matches:[\n   {\n    line:8,\n    text:\"  if (!isString(selector) || !selector.startsWith(\\\".\\\") || selector.length > 2048) throw new Error(SELECTOR_HELP);\"\n   },\n   {line:17,text:\"      try { steps.push({ key: JSON.parse(match[1]) }); } catch { throw new Error(SELECTOR_HELP); }\"},\n   {\n    line:20,\n    text:\"      if (!Number.isSafeInteger(start) || (end !== undefined && (!Number.isSafeInteger(end) || end < start))) throw new Error(SELECTOR_HELP);\"\n   },\n   {line:22,text:\"    } else throw new Error(SELECTOR_HELP);\"},\n   {\n    line:32,\n    text:\"  if (!selectors.length || selectors.length > 64) throw new Error(\\\"JSON selector list requires 1 to 64 selectors\\\");\"\n   },\n   {\n    line:39,\n    text:\"        if (!isObject(value) || !Object.hasOwn(value, step.key)) throw new Error(\\\"JSON field not found: \\\" + JSON.stringify(step.key));\"\n   },\n   {line:42,text:\"      if (!Array.isArray(value)) throw new Error(\\\"JSON index requires an array\\\");\"},\n   {line:44,text:\"        if (step.index >= value.length) throw new Error(\\\"JSON index out of range: \\\" + step.index);\"},\n   {\n    line:57,\n    text:\"    throw new Error(\\\"session resource supports only one ?q=<JSON selector>; do not combine it with json\\\");\"\n   },\n   {\n    line:67,\n    text:\"    throw new Error(\\\"JSON reads cannot combine json with line windows, source views, or complete; select fields after parsing the whole document\\\");\"\n   }\n  ]\n },\n {path:\"src/shared/decode.js\",lines:68,matches:[]}\n]"
+    },
+    {
+      "group": "reuse",
+      "args": {
+        "file": ".work/audit.js",
+        "data": {
+          "paths": [
+            "src/fs/json-read.js",
+            "src/shared/decode.js"
+          ],
+          "term": "return"
+        }
+      },
+      "error": false,
+      "output": "ok #0 0ms\n[\n {\n  path:\"src/fs/json-read.js\",\n  lines:71,\n  matches:[\n   {line:26,text:\"  return steps;\"},\n   {line:36,text:\"  return function* (root) {\"},\n   {line:40,text:\"        return value[step.key];\"},\n   {line:45,text:\"        return value[step.index];\"},\n   {line:47,text:\"      return value.slice(step.start, step.end);\"},\n   {\n    line:53,\n    text:\"  if (!isString(args.path) || !/^(agent|artifact):\\\\/\\\\//i.test(args.path) || !args.path.includes(\\\"?\\\")) return args;\"\n   },\n   {line:61,text:\"  return { ...args, path: uri, json };\"},\n   {line:65,text:\"  if (args.json === undefined) return;\"}\n  ]\n },\n {\n  path:\"src/shared/decode.js\",\n  lines:68,\n  matches:[\n   {\n    line:15,\n    text:\"  if (value.length > MAX_TYPED_ARRAY) return \\\"[\\\" + value.constructor.name + \\\" \\\" + bytes + \\\" bytes]\\\";\"\n   },\n   {line:16,text:\"  return value instanceof BigInt64Array || value instanceof BigUint64Array\"},\n   {\n    line:23,\n    text:\"  if (!allStringKeys) return [...value].map(([k, v]) => [toPlain(k, seen, depth + 1), toPlain(v, seen, depth + 1)]);\"\n   },\n   {line:26,text:\"  return out;\"},\n   {line:30,text:\"  if (Array.isArray(value)) return value.map((x) => toPlain(x, seen, depth + 1));\"},\n   {line:31,text:\"  if (value instanceof Set) return [...value].map((x) => toPlain(x, seen, depth + 1));\"},\n   {line:32,text:\"  if (value instanceof Map) return plainFromMap(value, seen, depth);\"},\n   {line:35,text:\"  return out;\"},\n   {line:40,text:\"  if (value === null || value === undefined) return value;\"},\n   {\n    line:42,\n    text:\"  if (tag === \\\"[object String]\\\" || tag === \\\"[object Number]\\\" || tag === \\\"[object Boolean]\\\") return value.valueOf();\"\n   },\n   {line:43,text:\"  if (tag === \\\"[object BigInt]\\\") return value.toString() + \\\"n\\\";\"},\n   {line:44,text:\"  if (isFunction(value)) return \\\"[Function\\\" + (value.name ? \\\" \\\" + value.name : \\\"\\\") + \\\"]\\\";\"},\n   {line:45,text:\"  if (tag === \\\"[object Symbol]\\\") return value.toString();\"},\n   {line:46,text:\"  if (depth > MAX_DEPTH) return \\\"[Depth]\\\";\"},\n   {line:47,text:\"  if (seen.has(value)) return \\\"[Circular]\\\";\"},\n   {\n    line:48,\n    text:\"  if (value instanceof Date) return Number.isNaN(value.getTime()) ? \\\"Invalid Date\\\" : value.toISOString();\"\n   },\n   {line:49,text:\"  if (value instanceof RegExp) return value.toString();\"},\n   {line:53,text:\"    return out;\"},\n   {line:55,text:\"  if (value instanceof Promise) return \\\"[Promise]\\\";\"},\n   {line:56,text:\"  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return plainFromBinary(value);\"},\n   {line:57,text:\"  if (isFunction(value.toJSON)) return toPlain(value.toJSON(), seen, depth + 1);\"},\n   {line:60,text:\"    return plainFromCollection(value, seen, depth);\"}\n  ]\n }\n]"
+    },
+    {
+      "group": "reuse",
+      "args": {
+        "file": ".work/audit.js",
+        "data": {
+          "paths": [
+            "src/fs/json-read.js",
+            "src/shared/decode.js"
+          ],
+          "term": "isString"
+        }
+      },
+      "error": false,
+      "output": "ok #0 0ms\n[\n {\n  path:\"src/fs/json-read.js\",\n  lines:71,\n  matches:[\n   {line:1,text:\"import { isString, isObject } from \\\"../shared/decode.js\\\";\"},\n   {\n    line:8,\n    text:\"  if (!isString(selector) || !selector.startsWith(\\\".\\\") || selector.length > 2048) throw new Error(SELECTOR_HELP);\"\n   },\n   {\n    line:53,\n    text:\"  if (!isString(args.path) || !/^(agent|artifact):\\\\/\\\\//i.test(args.path) || !args.path.includes(\\\"?\\\")) return args;\"\n   }\n  ]\n },\n {\n  path:\"src/shared/decode.js\",\n  lines:68,\n  matches:[\n   {line:3,text:\"export const isString = (v) => toStr.call(v) === \\\"[object String]\\\";\"},\n   {line:22,text:\"  const allStringKeys = [...value.keys()].every(isString);\"}\n  ]\n }\n]"
+    },
+    {
+      "group": "reuse",
+      "args": {
+        "file": ".work/audit.js",
+        "data": {
+          "paths": [
+            "src/fs/json-read.js",
+            "src/shared/decode.js"
+          ],
+          "term": "not present"
+        }
+      },
+      "error": false,
+      "output": "ok #0 0ms\n[{path:\"src/fs/json-read.js\",lines:71,matches:[]},{path:\"src/shared/decode.js\",lines:68,matches:[]}]"
+    }
+  ],
+  "normalization": "Outer run counters/timing and temporary workspace prefix in write receipts only."
+}

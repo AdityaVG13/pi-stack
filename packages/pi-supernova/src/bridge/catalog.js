@@ -4,7 +4,7 @@ import { isString, isObject } from "../shared/decode.js";
 const NATIVE_TOOL_DEFINITIONS = [
   {
     name: "read",
-    description: "Read files or directories. Source questions locate and open source directly; resolve returns structured source/status without guessing.",
+    description: "Read files, images or directories. JSON selectors project full documents within output budgets. Source questions locate and open source directly; resolve returns structured source/status without guessing.",
     parameters: { type: "object", properties: {
       path: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }], description: "Workspace-relative file or directory, source question, or array of paths" },
       target: { anyOf: [{ type: "string" }, { type: "array" }], description: "File path/query or array of paths" },
@@ -14,6 +14,7 @@ const NATIVE_TOOL_DEFINITIONS = [
       query: { type: "string", description: "Source question; optional path scopes the search directory" },
       resolve: { type: "boolean", description: "Return structured source/status for a direct resolve-to-edit handoff" },
       complete: { type: "boolean", description: "Fail unless the entire requested file fits without clipping" },
+      json: { anyOf: [{ type: "boolean" }, { type: "string" }, { type: "array", items: { type: "string" } }], description: "Parse the complete JSON input (up to 16 MiB), then select .field, .items[0:3], or quoted keys. A selector array returns an array of values; true selects the root. Oversized selections fail, never clip." },
     } },
   },
   {

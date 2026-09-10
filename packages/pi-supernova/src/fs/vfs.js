@@ -16,6 +16,7 @@ export class CausalVfs {
     this.onNewFile = onNewFile;
     this.closed = false;
     this.signal = undefined;
+    this.mutations = { committed: 0, rolledBack: 0, external: 0, pendingCommits: 0, recoveryFailed: false };
   }
 
   assertWritable() {
@@ -38,12 +39,33 @@ export class CausalVfs {
     return [...new Set(this.overlays.flatMap(overlay => [...overlay.keys()]))];
   }
 
-  async read(target, { preserveRead = false } = {}) {
+  async read(target, { preserveRead = false, maxBytes } = {}) {
     const overlay = this.getOverlay(target);
-    if (overlay !== undefined) return overlay;
+    if (overlay !== undefined) {
+      if (maxBytes !== undefined && Buffer.byteLength(overlay, "utf8") > maxBytes) throw new Error("JSON input exceeds " + maxBytes + " bytes; use a streaming parser through bash");
+      return overlay;
+    }
     // External editors and captured tools can change a file between any two reads.
     try {
-      const text = await fs.readFile(target, "utf8");
+      let text;
+      if (maxBytes === undefined) text = await fs.readFile(target, "utf8");
+      else {
+        const file = await fs.open(target, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+        try {
+          const stat = await file.stat();
+          if (!stat.isFile()) throw new Error("JSON read requires a regular file: " + target);
+          const tooLarge = () => new Error("JSON input exceeds " + maxBytes + " bytes; use a streaming parser through bash");
+          if (stat.size > maxBytes) throw tooLarge();
+          const chunks = [];
+          let size = 0;
+          for await (const chunk of file.createReadStream({ end: maxBytes, autoClose: false, signal: this.signal })) {
+            size += chunk.length;
+            if (size > maxBytes) throw tooLarge();
+            chunks.push(chunk);
+          }
+          text = Buffer.concat(chunks).toString("utf8");
+        } finally { await file.close(); }
+      }
       if (!preserveRead || !this.cache.has(target)) this.setCache(target, text);
       return text;
     } catch (err) {
@@ -90,7 +112,8 @@ export class CausalVfs {
 
   /** Stage every file and its backup before replacing any destination. */
   async flush(writes) {
-    const work = commitTail.then(() => this.flushWrites(writes));
+    this.mutations.pendingCommits++;
+    const work = commitTail.then(() => this.flushWrites(writes)).finally(() => { this.mutations.pendingCommits--; });
     commitTail = work.catch(() => {});
     return work;
   }
@@ -158,6 +181,7 @@ export class CausalVfs {
         this.expected.delete(entry.logicalPath);
       }
       if (staged.length) this.onNewFile?.(staged.map(entry => entry.target));
+      this.mutations.committed += staged.length;
     } catch (error) {
       failed = true;
       const recoveryErrors = [];
@@ -173,6 +197,7 @@ export class CausalVfs {
         }
       }
       this.invalidateCache();
+      if (recoveryErrors.length) this.mutations.recoveryFailed = true;
       if (recoveryErrors.length) this.onNewFile?.(null);
       if (recoveryErrors.length) throw new AggregateError([error, ...recoveryErrors.map(message => new Error(message))], "commit failed: " + error.message + "; recovery failed: " + recoveryErrors.join("; "));
       throw error;
@@ -202,6 +227,7 @@ export class CausalVfs {
 
   rollback() {
     const top = this.overlays.pop();
+    this.mutations.rolledBack += top?.size ?? 0;
     for (const target of top?.keys() ?? []) {
       if (this.getOverlay(target) === undefined) this.expected.delete(target);
     }
@@ -211,11 +237,12 @@ export class CausalVfs {
   async prepareExternalMutation(name) {
     this.assertWritable();
     if (this.overlays.length > 1) throw new Error(name + " cannot run inside an edit checkpoint because external mutations cannot be rolled back");
-    if (!this.overlays.length) return false;
+    if (!this.overlays.length) { this.mutations.external++; return false; }
     const pending = this.overlays[0];
     await this.flush(pending);
     this.assertWritable();
     this.overlays[0] = new Map();
+    this.mutations.external++;
     return pending.size > 0;
   }
 

@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { readProgramFile } from "./program-file.js";
 import { parse } from "acorn";
 import { performance } from "node:perf_hooks";
 import { packageFinalReturn } from "../output/bottleneck.js";
@@ -132,14 +133,23 @@ const RPC_METHODS = {
   speculateRollback: (nova) => nova.speculateRollback(),
 };
 
-export async function runGuestProgram({ code, nova = {}, config = {}, signal, onTimeout }) {
+export async function runGuestProgram({ code, file, cwd = process.cwd(), data, nova = {}, config = {}, signal, onTimeout }) {
   const started = performance.now();
   const wall = () => Math.round(performance.now() - started);
   const logs = [];
   const fail = (error) => ({ ok: false, error: truncateChars(String(error), config.maxReturnChars ?? 32000, "error").text, logs, logTruncated, wallMs: wall() });
   let logTruncated = false;
-  if (!isString(code) || !code.trim()) return fail("code must be a non-empty string");
-  if (code.length > (config.maxCodeChars ?? 48000)) return fail("code exceeds " + (config.maxCodeChars ?? 48000) + " characters; split large writes into write({path,content,append:true}) chunks");
+  if ((code === undefined) === (file === undefined)) return fail("supply exactly one of code or file; no commands ran");
+  if (file === undefined && (!isString(code) || !code.trim())) return fail("code must be a non-empty string");
+  if (file === undefined && code.length > (config.maxCodeChars ?? 48000)) return fail("code exceeds " + (config.maxCodeChars ?? 48000) + " characters; split large writes into write({path,content,append:true}) chunks");
+  if (data !== undefined) {
+    try {
+      const encoded = JSON.stringify(data);
+      if (encoded === undefined) return fail("data must be JSON-serializable");
+      if (encoded.length > (config.maxCodeChars ?? 48000)) return fail("data exceeds " + (config.maxCodeChars ?? 48000) + " characters; split literal inputs across invocations");
+      data = JSON.parse(encoded);
+    } catch { return fail("data must be JSON-serializable"); }
+  }
   if (signal?.aborted) return fail(ABORT_MESSAGE);
   const runId = ++runSeq;
   const timeoutMs = config.timeoutMs ?? 60000;
@@ -153,7 +163,9 @@ export async function runGuestProgram({ code, nova = {}, config = {}, signal, on
     let hostError;
     let notifyingHost = false;
     const pending = new Set();
+    const inputController = new AbortController();
     const cleanup = () => {
+      inputController.abort();
       clearTimeout(timer);
       clearInterval(memTimer);
       signal?.removeEventListener("abort", signalAbort);
@@ -256,6 +268,13 @@ export async function runGuestProgram({ code, nova = {}, config = {}, signal, on
     void (async () => {
       try {
         if (signal?.aborted) return abort();
+        if (file !== undefined) code = await readProgramFile(file, cwd, config.maxCodeChars ?? 48000, inputController.signal);
+        if (finished) return;
+        if (!code.trim()) return finish(fail("code must be a non-empty string; no commands ran"));
+        let prepared;
+        try { prepared = prepareProgram(code); }
+        catch (error) { return finish(fail("JavaScript syntax error: " + error.message + "; no commands ran. Put literal file/script content in the tool's data parameter and use write(data.path,data.content) or bash({command,args:data.args}).")); }
+        if (wall() >= timeoutMs) return abort();
         handle = acquireWorker(config);
         await handle.ready;
         if (finished || signal?.aborted) return abort();
@@ -264,15 +283,15 @@ export async function runGuestProgram({ code, nova = {}, config = {}, signal, on
         handle.worker.on("message", onMessage);
         handle.worker.on("error", onError);
         handle.worker.on("exit", onExit);
-        const prepared = prepareProgram(code);
         if (wall() >= timeoutMs) return abort();
-        handle.worker.postMessage({ op: "run", runId, prepared, available,
+        handle.worker.postMessage({ op: "run", runId, prepared, data, available,
           batchRead: nova.batchRead !== false,
           nativeArgv: nova.nativeArgv === true,
           limits: { maxLogLines: config.maxLogLines ?? 100, maxLogLineChars: config.maxLogLineChars ?? 4096 } });
       } catch (err) {
+        if (finished) return;
         cancelHost();
-        finish(fail("guest worker failed to start: " + err.message));
+        finish(fail("program failed to start: " + err.message + "; no commands ran"));
       }
     })();
   });

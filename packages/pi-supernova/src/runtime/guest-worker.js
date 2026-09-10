@@ -2,6 +2,7 @@ import { parentPort } from "node:worker_threads";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isString, isObject, isFunction, toPlain } from "../shared/decode.js";
 import { truncateChars } from "../output/format.js";
+import { sessionJsonArgs, validateJsonRead } from "../fs/json-read.js";
 
 // Guest programs run here, off the host thread. The host can terminate() this
 // worker mid-loop, so a runaway "while (true) {}" or process.exit() in guest
@@ -51,7 +52,7 @@ function unwrapValue(res) {
 
 function unwrapRead(res, args) {
   const value = unwrapValue(res);
-  if (args.complete === true && res?.truncated) throw new Error("incomplete read: complete:true refuses truncated host output");
+  if ((args.complete === true || args.json !== undefined) && res?.truncated) throw new Error("incomplete read: complete:true or json refuses truncated host output");
   return value;
 }
 
@@ -148,7 +149,9 @@ function buildGuestApi(available, batchRead, runId, nativeArgv) {
     : isObject(a) && !Array.isArray(a) ? { path: p, ...a } : { path: p, offset: a, limit: b };
   const read = async (p, a, b) => {
     assertScope();
-    const args = readArgs(p, a, b);
+    const args = sessionJsonArgs(readArgs(p, a, b));
+    validateJsonRead(args);
+    const decode = value => args.resolve || args.json !== undefined ? JSON.parse(value) : value;
     if (args.complete === true && (args.outline || args.evidence || args.about)) throw new Error("complete:true requires a raw file read, not an outline or evidence view");
     const evidencePath = isObject(p) && !Array.isArray(p) ? p.path : args.about ? p : undefined;
     p = args.path;
@@ -156,33 +159,46 @@ function buildGuestApi(available, batchRead, runId, nativeArgv) {
     if (args.outline) return unwrapJsonValue(await invoke("surface", args));
     if (Array.isArray(p)) {
       if (p.length > 64) throw new Error("read accepts at most 64 paths per batch");
-      if (p.some(item => !isString(item) || !item.trim())) throw new Error("read paths must be non-empty strings");
+      for (const item of p) if (!isString(item) || !item.trim()) throw new Error("read paths must be non-empty strings");
       const readEach = () => Promise.all(p.map(item => read({ ...args, path: item })));
-      if (!batchRead || args.resolve) return readEach();
+      if (!batchRead || args.resolve || p.some(item => /^(agent|artifact):\/\/.*\?/i.test(item))) return readEach();
       const res = await invoke("read", args);
       const failed = res?.itemErrors?.findIndex(error => error != null) ?? -1;
       if (failed >= 0) throw new Error(`read failed for ${p[failed]}: ${res.itemErrors[failed]}; use Promise.allSettled(paths.map(path => read(path))) for per-path outcomes`);
       unwrapRead(res, args);
-      if (Array.isArray(res?.items)) return res.items;
+      if (Array.isArray(res?.items)) return res.items.map(decode);
       // Captured host executor without batch support: fan out.
       return readEach();
     }
     if (!batchRead) {
       const res = await invoke("read", args);
       unwrapRead(res, args);
-      return args.resolve ? unwrapJsonValue(res) : unwrapRead(res, args);
+      return decode(unwrapRead(res, args));
     }
     const key = JSON.stringify({ ...args, path: undefined });
     if (queuedReads.length && queuedReads[0].key !== key) flushReads();
     return new Promise((resolve, reject) => {
       queuedReads.push({ args, key, resolve, reject });
       if (queuedReads.length === 1) queueMicrotask(flushReads);
-    }).then(value => args.resolve ? JSON.parse(value) : value);
+    }).then(decode);
   };
   const write = async (p, content) => unwrapValue(await invoke("write", isObject(p) ? p : { path: p, content }));
   const edit = async (p, oldText, newText) => {
     if (isFunction(p)) return nova.speculate(p);
+    const usage = 'invalid edit signature; use edit(path,oldText,newText), edit({path,edits:[{oldText,newText}]}), or edit({path,patch:"@@ -1 +1 @@\n-old\n+new\n"})';
+    if (isObject(p) && (Array.isArray(p) || oldText !== undefined || newText !== undefined)) throw new Error(usage);
+    if (!isObject(p) && isObject(oldText) && !Array.isArray(oldText)) throw new Error(usage);
     const args = isObject(p) ? p : Array.isArray(oldText) ? { path: p, edits: oldText } : { path: p, oldText, newText };
+    if (!isString(args.path) || !args.path.trim()) throw new Error(usage);
+    const modes = Number(args.patch !== undefined) + Number(args.edits !== undefined) + Number(args.oldText !== undefined || args.newText !== undefined);
+    if (modes !== 1 || (Array.isArray(oldText) && newText !== undefined)) throw new Error(usage);
+    if (args.patch !== undefined) {
+      if (!isString(args.patch) || !args.patch.trim()) throw new Error(usage);
+    } else {
+      const edits = args.edits === undefined ? [args] : args.edits;
+      if (!Array.isArray(edits) || !edits.length) throw new Error(usage);
+      for (const e of edits) if (!isString(e?.oldText) || !e.oldText.length || !isString(e?.newText)) throw new Error(usage + "; replacements require non-empty oldText and string newText");
+    }
     return unwrapValue(await invoke(args.patch === undefined ? "edit" : "apply_patch", args));
   };
   const patch = async (p, diff) => unwrapValue(await nova.call("apply_patch", { path: p, patch: diff }));
@@ -263,16 +279,18 @@ async function handleRun(msg) {
   runActive = true;
   let compiled;
   try {
-    compiled = { fn: new AsyncFunction(...PARAMS, prepared.body), hasReturn: prepared.hasReturn };
+    // Existing programs may declare their own data variable; bind it only when supplied.
+    const bindings = msg.data === undefined ? PARAMS : [...PARAMS, "data"];
+    compiled = { fn: new AsyncFunction(...bindings, prepared.body), hasReturn: prepared.hasReturn };
   } catch (err) {
-    postFailure(runId, err);
+    postFailure(runId, new Error("JavaScript syntax error: " + err.message + "; no commands ran. When passing data, do not redeclare its binding."));
     return;
   }
   const api = buildGuestApi(available, batchRead, runId, msg.nativeArgv === true);
   const scopedConsole = makeConsole(runId, limits);
   try {
     const value = await compiled.fn(
-      scopedConsole, api.read, api.edit, api.write, api.bash,
+      scopedConsole, api.read, api.edit, api.write, api.bash, msg.data,
     );
     if (runId !== activeRunId) return;
     let plain;

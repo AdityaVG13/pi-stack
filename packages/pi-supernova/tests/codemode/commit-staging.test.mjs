@@ -49,3 +49,32 @@ test("a disk failure after one replacement restores every original and reports f
   assert.equal(await fs.readFile(second, "utf8"), "second original");
   assert.deepEqual((await fs.readdir(f.root)).sort(), ["first.txt", "second.txt"]);
 });
+
+
+test("failed recovery is reported as uncertain and retains the original backup", async t => {
+  const f = await engineFixture(t);
+  await f.write("first.txt", "first original");
+  await f.write("second.txt", "second original");
+  const first = await fs.realpath(path.join(f.root, "first.txt"));
+  const second = await fs.realpath(path.join(f.root, "second.txt"));
+  const rename = fs.rename;
+  let installed = false, recoveryFailed = false;
+  fs.rename = async (from, to) => {
+    if (String(to) === second || (String(to) === first && installed)) {
+      if (String(to) === first) recoveryFailed = true;
+      throw Object.assign(new Error("recovery fault sentinel"), {code:"EIO"});
+    }
+    const result = await rename(from,to);
+    if (String(to) === first) installed = true;
+    return result;
+  };
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(f.execute('await write("first.txt","changed"); await write("second.txt","changed");'), /filesystem outcome uncertain.*\nerror:.*recovery failed/s);
+  } finally { fs.rename = rename; syncBuiltinESMExports(); }
+  assert.ok(recoveryFailed);
+  assert.equal(await fs.readFile(first,"utf8"),"changed");
+  assert.equal(await fs.readFile(second,"utf8"),"second original");
+  const retained = await Promise.all((await fs.readdir(f.root)).map(file => fs.readFile(path.join(f.root,file),"utf8")));
+  assert.ok(retained.includes("first original"), "failed recovery must retain a copy of the original bytes");
+});

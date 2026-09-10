@@ -65,14 +65,26 @@ runner.bindCore({
   getAllTools: () => tools.map(({ name, description, parameters }) => ({ name, description, parameters })),
   getActiveTools: () => ["supernova"], getThinkingLevel: () => undefined,
 }, { getModel: () => undefined, getScopedModels: () => [], isIdle: () => true, isProjectTrusted: () => false, getSignal: () => undefined });
-const result = await tools[0].execute("pi-contract", { code }, undefined, undefined, runner.createContext());
+const { validateToolArguments } = await importPi("node_modules/@earendil-works/pi-ai/dist/utils/validation.js");
+const fileArgs = validateToolArguments(tools[0], {name:"supernova",arguments:{file:"program.js"}});
+assert.deepEqual(fileArgs,{file:"program.js"});
+const result = await tools[0].execute("pi-contract", fileArgs, undefined, undefined, runner.createContext());
 verify(result);
+const projected = await tools[0].execute("pi-json-data", { code: 'await write("report.json",JSON.stringify(data)); return await read({path:"report.json",json:".answer"});', data: { answer: "literal `backticks` ${braces}" } }, undefined, undefined, runner.createContext());
+assert.equal(projected.details.result, "literal `backticks` ${braces}");
+const batchArgs = validateToolArguments(tools[0],{name:"supernova",arguments:{programs:[{code:"return data;",data:false},{code:"return 42;"}]}});
+const batched = await tools[0].execute("pi-batch",batchArgs,undefined,undefined,runner.createContext());
+assert.deepEqual(batched.details.result,[false,42]);
+const stoppedBatch = await tools[0].execute("pi-batch-stop",{programs:[{code:'return await read("pixel.png");'},{code:'throw Error("batch-stop");'},{code:"return 9;"}]},undefined,undefined,runner.createContext());
+assert.equal(stoppedBatch.details.ok,false); assert.equal(stoppedBatch.isError,true);
+assert.equal(stoppedBatch.details.attempted,2);
+assert.equal(stoppedBatch.content.find(block=>block.type==="image")?.data,png);
 await assert.rejects(tools[0].execute("pi-failure", { code: 'throw Error("host-failure-sentinel");' }, undefined, undefined, runner.createContext()), /host-failure-sentinel/);
 const { visibleWidth } = await importPi("node_modules/@earendil-works/pi-tui/dist/index.js");
 const { initTheme } = await importPi("dist/modes/interactive/theme/theme.js");
 const { ToolExecutionComponent } = await importPi("dist/modes/interactive/components/tool-execution.js");
 initTheme("dark");
-const row = new ToolExecutionComponent("supernova", "pi-contract", { code }, {}, tools[0], { requestRender() {} }, root);
+const row = new ToolExecutionComponent("supernova", "pi-contract", { file:"program.js" }, {}, tools[0], { requestRender() {} }, root);
 row.markExecutionStarted(); row.setArgsComplete(); row.updateResult(result, false);
 for (const expanded of [false, true]) {
   row.setExpanded(expanded);
@@ -81,6 +93,12 @@ for (const expanded of [false, true]) {
     assert.ok(lines.length > 0);
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `Pi row exceeds ${width} columns`);
   }
+}
+const batchRow = new ToolExecutionComponent("supernova","pi-batch-stop",{programs:[{code:"return 1;"}]},{},tools[0],{requestRender(){}},root);
+batchRow.markExecutionStarted(); batchRow.setArgsComplete(); batchRow.updateResult(stoppedBatch,true);
+for (const expanded of [false,true]) {
+  batchRow.setExpanded(expanded);
+  for (const width of [40,80,120,240]) for (const line of batchRow.render(width)) assert.ok(visibleWidth(line)<=width);
 }
 await fs.writeFile(path.join(root, "auth.js"), sourceBody);
 const child = spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)(deny network*)", omp,

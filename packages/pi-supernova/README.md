@@ -1,6 +1,6 @@
 # pi-supernova
 
-**One nova / `supernova({code})` invocation. Four commands inside CodeMode.**
+**One `supernova` invocation. Inline code, a workspace program, or an explicit program batch. Four commands inside CodeMode.**
 
 ```javascript
 const source = await read("validateRefreshToken");
@@ -48,6 +48,8 @@ settings. The runtime does not silently rewrite your tool policy.
 | Function | Examples and behavior |
 | --- | --- |
 | `read` | `read(path, offset?, limit?)`, `read({path,offset,limit})`; one-based line windows |
+| `read` | `return await read("plot.png")`; displays images directly, without a browser |
+| `read` | `read({path,json:".verdict"})`; parse full JSON before bounded field selection |
 | `read` | `read(directory)`, `read("symbol or question")`, `read(path,{about:question})`; questions locate and open source directly |
 | `read` | `read({query,resolve:true})`; structured source and status for a resolve-to-edit handoff |
 | `read` | `read({query,evidence:true})`; ranked evidence with provenance; optional `path` scopes discovery |
@@ -122,22 +124,100 @@ full dataflow tracking or a security sandbox.
 
 Explicit read arrays reject missing/failed paths. For typed partial outcomes use
 `Promise.allSettled(paths.map(path => read(path)))`. Successful arrays remain arrays.
-For embedded source with backslash escapes, use `String.raw` template literals
-(and escape delimiter backticks), or JSON-quoted strings. Validate generated code.
+For literal file content or scripts, prefer the optional tool-level `data` parameter:
+
+```json
+{
+  "code": "await write(data.path,data.content); return await bash({command:\"python3\",args:[data.path]});",
+  "data": {
+    "path": "probe.py",
+    "content": "print(\"literal `backticks` and ${braces}\")\n"
+  }
+}
+```
+
+`data` crosses the worker boundary as JSON, never as JavaScript source. Its
+JSON-encoded length is capped separately at `maxCodeChars`; split larger inputs.
+The binding exists only when supplied, so older programs declaring their own `data`
+remain valid. Syntax errors run no commands and give quoting guidance. For inline
+source, use `String.raw` (escaping backtick delimiters) or JSON-quoted strings.
 
 On hosts exposing `sessionManager.getArtifactsDir()`, bare `agent://<id>` and
 `artifact://<number>` read files from the calling session's artifact directory.
 They preserve ID casing and support offset/limit and structured continuation.
 These resources are read-only; ambiguous artifact IDs and escaping symlinks fail.
-This is not the full OMP URI language: cross-session search, nested path/query
-selectors and other schemes are not implemented. Hosts without an artifact
-directory report that limitation rather than treating the URI as a local path.
+A single `?q=.answer` (URL-encoded when needed) selects JSON from either resource
+using the same bounded projection as `read({path,json})`. The resource must contain
+valid JSON; ordinary Markdown is not parsed heuristically. This is not the full
+OMP URI language: full jq, cross-session search and other schemes are not implemented.
+Hosts without an artifact directory report that limitation rather than treating the URI as a local path.
 
 For unstructured logs/text, `read(path,{about:"STT database"})` returns bounded,
 line-numbered matching windows, or explicitly reports no matching text. It is not
 a complete-file read. Write temporary investigation files under the workspace
 (e.g. `.work/probe.py`): ordinary `write`/`edit` paths cannot escape it, including
 absolute `/tmp` paths. Shell execution is a separate trusted boundary, not a sandbox.
+
+### Reuse a program without resending its source
+
+Save a trusted JavaScript async body or arrow in the workspace, then invoke it:
+
+```json
+{"file":".work/audit.js","data":{"paths":["src/a.js","src/b.js"],"term":"TODO"}}
+```
+
+Supply exactly one of `code` or `file`. File programs get the same four commands,
+optional `data`, limits, deadlines and transaction semantics. Each invocation
+rereads the file and starts a fresh guest; there is no implicit last-program
+state, auto-replay, or retained heap. Paths inside the program still resolve from
+the calling workspace, not the script directory. This runs a Nova program, not
+an arbitrary JavaScript module or a Python/shell script.
+
+Program files must be regular UTF-8 files inside the workspace, including symlink
+targets. Invalid encoding, oversized input and syntax errors fail before commands;
+no truncated prefix is executed. Review untrusted source before running it.
+Use ordinary `edit` to revise saved programs. This is explicit source reuse, not
+conversation compression: prior calls and read results remain intact. Creation
+costs an additional call unless combined with other work, so prefer inline code
+for short one-off operations. See [token measurements](docs/TOKEN_COSTS.md).
+
+### Batch already-known continuations
+
+~~~json
+{
+  "programs": [
+    {"code": "return await edit(data.path,data.oldText,data.newText);", "data": {"path":"src/config.js","oldText":"limit = 8","newText":"limit = 16"}},
+    {"code": "return await bash(\"npm test\");"},
+    {"file": ".work/audit.js", "data": {"paths":["src/config.js"],"term":"limit"}}
+  ],
+  "timeoutMs": 60000
+}
+~~~
+
+Use programs instead of top-level code/file/data. Supply 1--32 entries, each with
+code OR file and optional data; the JSON-encoded array must fit maxCodeChars.
+Entries run sequentially in fresh guests and commit separately. A successful
+entry can create the file executed by a later entry. No implicit retries,
+reordering, shared heap or nested batches are introduced.
+
+The batch stops on the first failed entry, cancellation/deadline, or exhausted
+output/log/image budget. Earlier successful commits remain; only the active
+program's uncommitted writes roll back. Admission errors throw before any program.
+Execution failures return a **typed stop report**, rather than throwing away prior
+results/images: isError and details.ok identify failure, details.programs contains
+every attempted result, and details.attempted/total identifies unstarted work.
+Single code/file invocations retain their existing throwing behavior.
+
+The outer deadline, host-call budget, log allowance, text budget and image limits
+are shared across the batch. Individual read budgets are not reduced. Every
+attempted program's original text is returned in length-delimited blocks; ordinary
+limits still disclose clipping. Images retain program/image labels. Split a plan
+that would exceed the aggregate output budget.
+
+Batch only continuations already chosen by the agent, such as edit then known
+verification, or create then run known audits. Keep a separate call whenever new
+source/results are needed to decide the next action. This does not lower reasoning
+settings, hide observations, or infer a plan on the agent's behalf.
 
 ### Large inputs and report outputs
 
@@ -159,17 +239,38 @@ output delivery; progress files survive shell execution but staged VFS writes ma
 roll back.
 
 Large returned objects are bounded previews, not retained artifacts. Select fields
-and array windows before returning, rather than parsing a truncated preview:
+and array windows before returning, rather than parsing a truncated preview.
+
+## JSON reports and targeted text audits
+
+For JSON, select fields inside the read adapter, **before** output budgeting:
 
 ```js
-const report = JSON.parse(await read({path:"report.json",complete:true}));
-return {verdict:report.verdict, values:report.values.slice(5000,5003)};
+const [verdict, values] = await read({path:"report.json",json:[".verdict",".values[5000:5003]"]});
+return {verdict, values};
 ```
 
-If the raw JSON exceeds the read budget, reconstruct exact source windows or run
-a bounded parser through `bash`. There is no implicit continuation handle for
-arbitrary guest objects. For embedded code, JSON-encode the source string once;
-do not nest shell, JavaScript, and Python quoting unless it is necessary.
+Selectors support "." (root), .field, .nested[0], .items[0:10], and .["quoted.key"].
+Use json:true for the complete parsed value. Selectors are not full jq: pipes,
+filters, wildcards and negative indices fail explicitly. Missing keys and indices
+fail; false, zero and null remain values. Slices use an exclusive end and clamp to
+array length. Only own JSON properties are traversed; nothing is evaluated.
+
+Inputs are capped at 16 MiB, including staged files. JSON reads require regular
+files and reject named pipes without waiting for a writer. The entire input must
+be valid JSON before any selection. Each selector is budgeted before allocating
+the next slice; sparse selector/path/edit arrays are rejected. Selected JSON must
+fit the ordinary read budget or the
+read throws; it is never returned as malformed/truncated JSON. Oversized unwindowed
+plain .json reads also fail with a projection hint. Explicit offset/limit or
+resolve:true still allow raw inspection, but line windows are not JSON documents.
+Do not combine json with complete, line windows, or source views. External read
+overrides reject JSON projection rather than silently ignoring the option.
+
+For large Markdown/log path audits, use read(path,{about:"document path"}) or
+explicit offset/limit, not complete:true. Larger JSON needs a streaming parser via
+bash. Arbitrary returned objects still have bounded previews, not implicit
+continuation handles.
 
 ## Execution and automatic batching
 
@@ -191,7 +292,12 @@ File changes are staged until program success. A throw before an external-mutati
 barrier rolls them back. Shell execution flushes preceding changes; external shell
 side effects cannot be rolled back. Stale commits fail explicitly rather than
 silently overwriting successful concurrent changes. This is not a cross-process
-filesystem lock.
+filesystem lock. Outcomes explicitly report committed/rolledBack **file versions**
+(counted per flush/checkpoint, not unique paths) and external-call attempts. A
+successful inner checkpoint merges into the program, not necessarily onto disk.
+Pending commits or failed recovery are reported as uncertain: inspect disk and
+recovery backups before retrying. Import-based mutations and shell side effects
+are outside the VFS counters; this is not a filesystem audit.
 
 `edit(async () => {...})` creates a nested filesystem checkpoint. It returns
 `{ok:true,committed:true,value}` on success or `{ok:false,committed:false,error}` on
@@ -212,6 +318,10 @@ outside the active callback are rejected. Await the checkpoint before proceeding
   strings and result types are unchanged. This is output framing, not source
   compression. It is chosen only when shorter in characters than escaped output;
   it does not guarantee lower billed tokens for every tokenizer or input.
+  Nested multiline strings use the same approach: the complete value structure
+  references `raw[n]`, followed by length-delimited verbatim string blocks. Literal
+  `"raw[0]"` values stay quoted; duplicate source is never deduplicated. Small values
+  keep their existing format. Machine-facing result values are unchanged.
 - Intermediate values stay inside CodeMode unless returned or logged. Final text,
   errors and logs are bounded with explicit truncation. Details support rendering;
   they are not a second model-facing transcript.
@@ -259,7 +369,9 @@ privileges. Do not run untrusted programs as though these adapters isolate them.
 Pi preflights the outer `supernova` call. Internal primitives do not emit ordinary
 native `tool_call` events, so third-party guards that only recognize top-level
 `edit` or `bash` need CodeMode-aware handling. Configured exclusions and supported
-host-session execution safeguards remain enforced. Actual-host smoke checks are
+host-session execution safeguards remain enforced. Guards inspecting code/file
+inputs must also understand the programs array; its entries do not emit separate
+top-level tool_call events. Actual-host smoke checks are
 not a claim that every third-party permission extension has been validated.
 
 ## Development and evidence
@@ -284,6 +396,7 @@ arbitrary wall-clock assertions.
 npm test --prefix packages/pi-supernova
 npm run lint:supernova
 npm run measure --prefix packages/pi-supernova
+npm run test:tokens --prefix packages/pi-supernova
 
 PI_SUPERNOVA_PI_ROOT=/path/to/pi-coding-agent \
 PI_SUPERNOVA_OMP=/path/to/omp \

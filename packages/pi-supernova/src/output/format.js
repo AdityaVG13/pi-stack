@@ -59,9 +59,26 @@ export function formatReturn(value) {
     const escapedSize = value.reduce((sum, text) => sum + JSON.stringify(text).length, value.length + 1);
     if (raw.length < escapedSize) return raw;
   }
-  return formatValue(value);
+  const escaped = formatValue(value);
+  const strings = [];
+  const visit = input => {
+    if (isString(input) && input.includes("\n") && !UNPAIRED_SURROGATE.test(input) && JSON.stringify(input).length - input.length > 64) {
+      const index = strings.push(input) - 1;
+      return { [RAW_TEXT]: "raw[" + index + "]" };
+    }
+    if (Array.isArray(input)) return input.map(visit);
+    if (isObject(input)) return Object.fromEntries(Object.entries(input).map(([key, child]) => [key, visit(child)]));
+    return input;
+  };
+  const referencedValue = visit(value);
+  if (!strings.length) return escaped;
+  // Keep every key, value, duplicate string and byte. References are unquoted
+  // expressions, so literal "raw[0]" values and header-like source cannot collide.
+  const framed = formatValue(referencedValue) + "\nraw strings[" + strings.length + "]\n" + strings.map((text, i) => "raw[" + i + "] " + text.length + " UTF-16 units\n" + text + "\n").join("");
+  return framed.length < escaped.length ? framed : escaped;
 }
 
+const RAW_TEXT = Symbol("raw text reference");
 const IDENT_KEY = /^[A-Za-z_$][\w$]*$/;
 const FORMAT_WIDTH = 120;
 
@@ -83,6 +100,7 @@ function formatFlatList(value) {
 }
 
 function formatFlat(value) {
+  if (value?.[RAW_TEXT] !== undefined) return value[RAW_TEXT];
   if ((!isObject(value) && !Array.isArray(value))) return formatPrimitive(value);
   if (Array.isArray(value)) return formatFlatList(value);
   let out = "";
@@ -100,6 +118,7 @@ function formatFlat(value) {
  * than JSON.stringify(value, null, 2) on typical shaped returns (gpt-tokenizer).
  */
 export function formatValue(value, indent = "", width = FORMAT_WIDTH) {
+  if (value?.[RAW_TEXT] !== undefined) return value[RAW_TEXT];
   const flat = formatFlat(value);
   if ((!isObject(value) && !Array.isArray(value)) || flat.length + indent.length <= width) return flat;
   const pad = indent + " ";

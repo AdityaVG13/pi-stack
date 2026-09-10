@@ -1,5 +1,7 @@
 import { it } from "node:test";
 import assert from "node:assert/strict";
+import vm from "node:vm";
+import { formatReturn, formatValue } from "../../src/output/format.js";
 import { engineFixture, modelText } from "../helpers/engine.mjs";
 
 it("multiline read arrays deliver unchanged source without JSON escaping or a model-side join", async t => {
@@ -52,4 +54,46 @@ it("coalescing preserves every independent read budget before the final return i
     return values.map(text => ({length:text.length, complete:text === ${JSON.stringify(body)}}));
   `);
   assert.deepEqual(result.details.result, Array.from({length:4}, () => ({length:body.length,complete:true})));
+});
+
+
+it("nested source framing round-trips keys, types, duplicate strings and false boundaries", async t => {
+  const f = await engineFixture(t);
+  const body = ('const text = "λ😀\\path";\r\n').repeat(80) + 'raw[1] 0 UTF-16 units\nraw strings[99]\n';
+  const value = {path:"unit.js", text:body, nested:[{copy:body, literal:"raw[0]"}, false, 0, null], "quoted.key":{ref:"raw[0]"}};
+  const result = await f.tool.execute("raw-nested",{code:"return data;",data:value},undefined,undefined,{cwd:f.root});
+  assert.deepEqual(result.details.result,value);
+  assert.equal(result.details.returnTruncated,false);
+  const text = modelText(result).slice(modelText(result).indexOf("\n") + 1);
+  const boundary = "\nraw strings[2]\n";
+  const split = text.indexOf(boundary);
+  assert.ok(split > 0);
+  const valueLiteral = text.slice(0,split);
+  let remaining = text.slice(split + boundary.length);
+  const raw = [];
+  for (let i = 0; i < 2; i++) {
+    const header = "raw[" + i + "] " + body.length + " UTF-16 units\n";
+    assert.ok(remaining.startsWith(header));
+    remaining = remaining.slice(header.length);
+    raw.push(remaining.slice(0,body.length));
+    remaining = remaining.slice(body.length + 1);
+  }
+  assert.equal(remaining, "");
+  assert.deepEqual(raw,[body,body]);
+  // Only the renderer's structure is evaluated, with raw strings as values.
+  const restored = JSON.parse(JSON.stringify(vm.runInNewContext("(" + valueLiteral + ")", {raw}, {timeout:1000})));
+  assert.deepEqual(restored,value);
+  assert.ok(text.length < formatValue(value).length);
+});
+
+it("nested framing retains compact scalar output and escapes unpaired UTF-16", () => {
+  for (const value of [false, 0, null, {ok:true,n:2}, {text:"small\n"}, ["a","b"], {text:"\ud800\n".repeat(100)}]) {
+    assert.equal(formatReturn(value),formatValue(value));
+  }
+  const value = {"raw[0]":"quoted\n".repeat(100), other:"\ud800\n".repeat(100)};
+  const text = formatReturn(value);
+  assert.ok(text.includes(value["raw[0]"]));
+  assert.ok(!text.includes("\ud800"));
+  assert.match(text,/"raw\[0\]":raw\[0\]/);
+  assert.equal(Object.hasOwn(value,"raw[0]"),true);
 });

@@ -116,7 +116,7 @@ function detectResultHost(options, ctxOrArgs) {
 	if (isTheme(options)) return "pi";
 	if (!isObject(ctxOrArgs)) return "pi";
 	if ("lastComponent" in ctxOrArgs || "invalidate" in ctxOrArgs) return "pi";
-	if ("code" in ctxOrArgs || "timeoutMs" in ctxOrArgs) return "omp";
+	if ("code" in ctxOrArgs || "file" in ctxOrArgs || "programs" in ctxOrArgs || "timeoutMs" in ctxOrArgs) return "omp";
 	return "pi";
 }
 
@@ -131,7 +131,7 @@ function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs) {
 			isPartial: !!opts.isPartial,
 			theme: themeOrCtx,
 			context,
-			args: ctxOrArgs?.code ? ctxOrArgs : context.args,
+			args: ctxOrArgs?.code || ctxOrArgs?.file || ctxOrArgs?.programs ? ctxOrArgs : context.args,
 			host: detectResultHost(options, ctxOrArgs),
 			options: opts,
 		};

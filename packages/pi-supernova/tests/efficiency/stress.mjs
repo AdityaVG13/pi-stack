@@ -20,7 +20,7 @@ const report = {packageRoot,root,node:process.version,machine:os.cpus()[0].model
 console.error("Stress fixture retained: " + root);
 const times = [];
 const tick = () => new Promise(resolve=>setImmediate(resolve));
-async function run(id,cwd,code,timeoutMs=5000,cancelOnWrite=false) {
+async function run(id,cwd,code,timeoutMs=5000,cancelOnWrite=false,data,programs) {
   report.programs++;
   const started=performance.now();
   let first, snapshot, updates=0, staged=false;
@@ -32,7 +32,7 @@ async function run(id,cwd,code,timeoutMs=5000,cancelOnWrite=false) {
     if (updates===2 && report.programs%17===0) throw Error("intentional UI callback failure");
   };
   try {
-    return await tool.execute(id,{code,timeoutMs},cancellation?.signal,onUpdate,{cwd,
+    return await tool.execute(id,{code,timeoutMs,data,programs},cancellation?.signal,onUpdate,{cwd,
       sessionManager:{getSessionId:()=>id,getSessionFile:()=>undefined},model:{provider:"stress",id},thinkingLevel:"high"});
   } finally {
     times.push(performance.now()-started);
@@ -66,20 +66,21 @@ try {
         globalThis.stressMarker=${JSON.stringify(id)};
         const checkpoint=await edit(async()=>{await write(${JSON.stringify(candidate)},"discard");throw Error("reject");});
         if(checkpoint.ok)throw Error("checkpoint accepted");
-        await write(${JSON.stringify(file)},${JSON.stringify(JSON.stringify({id,counter:0}))});
+        await write(${JSON.stringify(file)},JSON.stringify({id:data.id,counter:0}));
         await edit(${JSON.stringify(file)},'"counter":0','"counter":1');
         const saved=JSON.parse(await read(${JSON.stringify(file)}));
         const values=await Promise.all(Array.from({length:129},()=>read("input.txt")));
-        if(values.some(value=>value!==${JSON.stringify(body)}))throw Error("read corruption");
+        if(values.some(value=>value!==data.body))throw Error("read corruption");
         const session=await bash('printf "%s" "$PI_SESSION_ID"');
-        return {saved,session};
-      `);
-      assert.deepEqual(result.details.result,{saved:{id,counter:1},session:id});
+        const selected=await read({path:${JSON.stringify(file)},json:[".id",".counter"]});
+        return {saved,session,selected};
+      `,5000,false,{id,body});
+      assert.deepEqual(result.details.result,{saved:{id,counter:1},session:id,selected:[id,1]});
       assert.deepEqual(JSON.parse(await fs.readFile(path.join(cwd,file),"utf8")),{id,counter:1});
       await assert.rejects(fs.stat(path.join(cwd,candidate)),{code:"ENOENT"});
       assert.deepEqual(result.details.trace.filter(row=>row.name==="read" && Array.isArray(row.args.path)).map(row=>row.args.path.length),[64,64]);
     }));
-    return {programs:rounds,independentReads:rounds*129,concurrency:8};
+    return {programs:rounds,independentReads:rounds*129,jsonProjections:rounds,literalDataInputs:rounds,concurrency:8};
   });
   await phase("contention",async()=>{
     const cwd=workspaces[0].cwd;
@@ -119,6 +120,25 @@ try {
       assert.equal(text.split(body).length-1,8,"source copies were escaped, omitted or deduplicated");
     }
     return {programs:16,completeSourceCopies:128};
+  });
+  await phase("programBatches",async()=>{
+    for(let base=0;base<32;base+=8) await Promise.all(Array.from({length:8},async(_,offset)=>{
+      const i=base+offset,{cwd,body}=workspaces[i%2],id="batch-"+i,file=id+".txt",fail=i%4===0;
+      const result=await run(id,cwd,undefined,5000,false,undefined,[
+        {code:'globalThis.batchMarker=true; return await write(data.file,data.body);',data:{file,body}},
+        {code:'if(globalThis.batchMarker!==undefined)throw Error("reused guest"); const body=await read(data.file); if(data.fail)throw Error("planned stop"); return body;',data:{file,fail}},
+        {code:'return data;',data:false},
+      ]);
+      assert.equal(result.details.ok,!fail);
+      assert.equal(result.details.attempted,fail?2:3);
+      assert.equal(await fs.readFile(path.join(cwd,file),"utf8"),body);
+      if(!fail) {
+        assert.deepEqual(result.details.result.slice(1),[body,false]);
+        assert.ok(result.content[0].text.includes(body));
+      } else assert.match(result.content[0].text,/planned stop/);
+      assert.doesNotMatch(result.content[0].text,/reused guest/);
+    }));
+    return {invocations:32,guestPrograms:88,stoppedReports:8,successfulReports:24,concurrency:8};
   });
   await phase("patchSource",async()=>{
     const cwd=workspaces[0].cwd;

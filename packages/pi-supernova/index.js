@@ -1,4 +1,6 @@
 import { createRequire } from "node:module";
+import { runProgramBatch } from "./src/runtime/program-batch.js";
+import { REFERENCE } from "./src/runtime/reference.js";
 import { isString, isFunction } from "./src/shared/decode.js";
 import { loadConfig } from "./src/config/config.js";
 import { createHostBridge } from "./src/bridge/host-bridge.js";
@@ -17,6 +19,8 @@ try {
   Type = {
     Object: (props, opts) => ({ type: "object", properties: props || {}, additionalProperties: false, ...opts }),
     String: (opts) => ({ type: "string", ...opts }),
+    Unknown: (opts) => ({ ...opts }),
+    Array: (items, opts) => ({ type: "array", items, ...opts }),
     Integer: (opts) => ({ type: "integer", ...opts }),
     Optional: (s) => ({ ...s }),
   };
@@ -73,33 +77,25 @@ function logsBlock(outcome, tail = "") {
   return outcome.logs?.length ? `\n--- logs\n${outcome.logs.join("\n")}${tail}` : "";
 }
 
+function mutationText(outcome) {
+  const m = outcome.mutations;
+  if (!m) return "";
+  const external = m.external ? "; external calls attempted=" + m.external + ", their side effects cannot be rolled back" : "";
+  const uncertain = m.pendingCommits || m.recoveryFailed ? "; filesystem outcome uncertain: inspect disk and any recovery backups before retrying" : "";
+  return "\nmutations: committed=" + m.committed + " rolledBack=" + m.rolledBack + " (file versions)" + external + uncertain;
+}
+
 function errorText(outcome, call) {
-  return `error #${call} ${outcome.wallMs}ms: ${outcome.error}${logsBlock(outcome)}`;
+  return `error #${call} ${outcome.wallMs}ms${mutationText(outcome)}
+error: ${outcome.error}${logsBlock(outcome)}`;
 }
 
 function successText(outcome, call) {
   const truncated = outcome.returnTruncated ? " [return truncated]" : "";
   const hint = outcome.undefinedReturn ? " (no return statement; add `return` to get a value)" : "";
-  return `ok #${call} ${outcome.wallMs}ms${truncated}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
+  return `ok #${call} ${outcome.wallMs}ms${truncated}${outcome.mutations?.committed || outcome.mutations?.rolledBack || outcome.mutations?.external ? mutationText(outcome) : ""}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
 }
-const TOOL_DESCRIPTION = `Run one JavaScript program with four familiar commands: read, write, edit, bash. Use an async body or arrow. Return a small value; strings stay raw.
-
-Native commands (async):
-read(path|paths, offset?, limit?) → file text or text[]; read(directory) → directory entries
-read("symbol or question") → locate and open source in one call, without an index; selected file text stays raw
-read({query, resolve:true}) → {status,path,line,lines,text,complete,nextOffset?} for a direct resolve→edit handoff
-read(path, {about: question}) → relevant file bodies, or source selection inside a directory
-read({query, evidence:true}) → ranked evidence; read({path, outline:true}) → structural declarations
-write(path, text) → write a file; write({path,content,append:true}) appends a chunk without a bounded read
-edit(path, oldText, newText) → post-edit lines, checks, and references
-edit(async () => {...}) → filesystem checkpoint: commit on success, rollback on throw; no shell commands, nesting, or concurrent outside commands
-bash(command, {cwd?, timeoutMs?}) → bounded output; throws on non-zero exit
-bash({command, args:[...]}) → literal argv without shell expansion of arguments
-
-Only found selects and opens a file. Uncertain reads return ambiguous, not_found, or incomplete with no selected path. Use resolve:true for structured status checks; narrow the directory with path+about when uncertain.
-For read-modify-write, use read({path,complete:true}); it rejects partial output. Prefer edit for large files. Array reads reject failures; use Promise.allSettled for per-path outcomes.
-Object arguments also work: read({path, offset?, limit?, about?, outline?, evidence?, resolve?, complete?}), edit({path, edits:[{oldText,newText}]}), edit({path,patch}), write({path,content}), bash({command,timeoutMs?}).
-Independent read starts batch automatically. Mutations preserve submission order. Plain reads remain self-contained; oversized reads provide continuation offsets. Return only what the model needs. console.log is captured.`;
+const TOOL_DESCRIPTION = REFERENCE;
 
 export default function piSupernova(pi) {
   registerCodeMode(pi);
@@ -148,28 +144,34 @@ export function registerCodeMode(pi) {
     name: "supernova",
     label: "Supernova",
     description: TOOL_DESCRIPTION,
-    promptSnippet: "Use read, write, edit, and bash in one program",
-    promptGuidelines: [
-      "Use read, write, edit, and bash inside supernova. Start with read(question), or read(directory, {about: question}) for scoped source selection. A source question already opens the selected file; do not issue a redundant read. Use read({query,resolve:true}) and check status before editing its path. Explicit about/outline/evidence reads remain available when needed. Return a compact value.",
-    ],
+    promptSnippet: "Use read, write, edit, and bash in one program, including JSON selection and image viewing",
+    promptGuidelines: ["Use read, write, edit, and bash inside supernova. Start with read(question), or read(directory, {about: question}) for scoped source selection. A source question already opens the selected file; do not issue a redundant read. Use read({query,resolve:true}) and check status before editing its path."],
     parameters: Type.Object({
-      code: Type.String({ maxLength: config.maxCodeChars ?? 48000, description: `JavaScript program: async body or arrow function. Maximum ${config.maxCodeChars ?? 48000} UTF-16 code units; split large writes into write({path,content,append:true}) chunks.` }),
+      code: Type.Optional(Type.String({ maxLength: config.maxCodeChars ?? 48000, description: `JavaScript program: async body or arrow function. Maximum ${config.maxCodeChars ?? 48000} UTF-16 code units; split large writes into write({path,content,append:true}) chunks.` })),
+      file: Type.Optional(Type.String({ minLength: 1, description: "Workspace program path instead of code. Same character cap, bindings and workspace cwd; reread each invocation." })),
+      data: Type.Optional(Type.Unknown({ description: "Literal JSON input available as data in the program; put Markdown, scripts or argv here instead of nesting JavaScript quoting. JSON-encoded size is limited to the code character budget." })),
       timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, description: "Hard timeout in ms." })),
-    }, { required: ["code"] }),
+      programs: Type.Optional(Type.Array(Type.Object({
+        code: Type.Optional(Type.String({ maxLength: config.maxCodeChars ?? 48000 })),
+        file: Type.Optional(Type.String({ minLength: 1 })),
+        data: Type.Optional(Type.Unknown()),
+      }, {additionalProperties:false}), {minItems:1,maxItems:32,description:"Instead of top-level code/file/data. JSON-encoded array shares the code character cap."})),
+    }),
     // One self-owned result frame is shared by Pi and OMP; renderCall stays empty
     // so separate call/result slots cannot duplicate the lifecycle card.
     renderShell: "self",
     mergeCallAndResult: true,
     renderCall: renderSupernovaCall,
     renderResult: renderSupernovaResult,
-    async execute(_id, params, signal, onUpdate, ctx) {
+    execute: async function execute(_id, params, signal, onUpdate, ctx, budget) {
+      if (params?.programs !== undefined) return runProgramBatch(_id,params,signal,onUpdate,ctx,config,execute);
       cancelWarmTimer();
       const runCwd = ctx?.cwd || cwd;
       const runController = new AbortController();
       const abortRun = () => runController.abort(signal?.reason);
       if (signal?.aborted) abortRun();
       else signal?.addEventListener("abort", abortRun, { once: true });
-      const runBridge = bridge.fork({ getCwd: () => runCwd });
+      const runBridge = bridge.fork({ getCwd: () => runCwd, budget });
       runBridge.bindCallContext(ctx, runController.signal);
       runBridge.resetCallBudget();
 
@@ -185,8 +187,11 @@ export function registerCodeMode(pi) {
         runBridge.beginSpeculation();
         outcome = await runGuestProgram({
           code: params?.code,
+          file: params?.file,
+          cwd: runCwd,
+          data: params?.data,
           nova: makeNovaApi(runBridge, abortRun),
-          config: { ...config, timeoutMs: Number.isInteger(params?.timeoutMs) ? params.timeoutMs : config.timeoutMs },
+          config: { ...config, maxLogLines: Math.max(0,config.maxLogLines-(budget?.logLines ?? 0)), timeoutMs: Number.isInteger(params?.timeoutMs) ? params.timeoutMs : config.timeoutMs },
           signal: runController.signal,
           onTimeout: abortRun,
         });
@@ -195,11 +200,11 @@ export function registerCodeMode(pi) {
           if (runBridge.getOverlayDepth() !== 1) throw new Error("program ended with an unfinished edit checkpoint; await it before returning");
           await runBridge.commitSpeculation();
         }
-        else runBridge.rollbackSpeculation();
+        else while (runBridge.getOverlayDepth()) runBridge.rollbackSpeculation();
       } catch (error) {
         abortRun();
         runBridge.close();
-        runBridge.rollbackSpeculation();
+        while (runBridge.getOverlayDepth()) runBridge.rollbackSpeculation();
         outcome = { ok: false, error: error instanceof Error ? error.message : String(error), logs: outcome?.logs ?? [], wallMs: Math.round(performance.now() - started) };
       } finally {
         runBridge.setCallListener(null);
@@ -217,17 +222,23 @@ export function registerCodeMode(pi) {
           warmTimer.unref?.();
         }
       }
+      if (budget) budget.logLines += outcome.logs?.length ?? 0;
+      outcome.mutations = runBridge.getMutations();
       const trace = runBridge.getTrace();
       const text = outcome.ok ? successText(outcome, call) : errorText(outcome, call);
       const bounded = truncateChars(text, config.maxReturnChars, "output").text;
       const visible = runBridge.ledger.dedupe(bounded, call);
-      if (!outcome.ok) throw new Error(visible);
       const response = result(visible, {
         ok: outcome.ok, error: outcome.error, wallMs: outcome.wallMs,
         returnTruncated: outcome.returnTruncated, logTruncated: outcome.logTruncated,
-        logs: outcome.logs, result: outcome.result, trace,
+        logs: outcome.logs, result: outcome.result, trace, mutations: outcome.mutations,
       });
       if (outcome.images?.length) response.content.push(...outcome.images);
+      if (!outcome.ok) {
+        const error = new Error(visible);
+        Object.defineProperty(error,"supernovaResult",{value:response});
+        throw error;
+      }
       return response;
     },
   });
