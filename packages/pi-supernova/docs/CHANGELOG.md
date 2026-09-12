@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.0] - 2026-09-12
+
+- Report overlapping `supernova` calls from every participant in the wave, including the first-started call that finishes last. Start-order or finish-order counters missed that side; a peak concurrent count resets when the wave drains. Sequential calls, `programs` batches, and failed programs still do not leak a split hint. The regression forces the slower first program so the last-finisher case cannot flake under load.
+
+- Shrink the standing tool definition without compressing source or results. Duplicate object-form restatements, schema prose already covered by the command list, and discoverable operational asides are gone; signatures and safety rules stay in the always-sent reference. Frozen six-call traffic is 14,970 / 14,787 tokens (o200k / cl100k): 19.23% / 19.24% below d444eb7. The current-pass gate now requires 19% vs d444eb7.
+
+- An unmatched or non-unique edit keeps the file and returns a numbered window of the actual source (16-line cap, same coordinates as a successful edit) so the next program can copy oldText without a blind re-read. Successful read/write/edit results are unchanged.
+
+- A program that writes or edits and returns nothing still delivers those mutation receipts (numbered post-edit lines, `wrote` paths). Reads without a return stay a no-return hint and do not dump file contents. Explicit `return await edit(...)` is not duplicated.
+
+- `edit(view, text)` replaces a `resolve:true` window by line span with CAS against the viewed bytes. Duplicate substrings no longer block a ranged edit; a stale view fails and rolls back. The silent receipt names that span (`edited path:2-2`), not a ±2 context window.
+
+- A `resolve:true` snap of a declaration is that declaration's span, not the whole file just because the file fits the read budget. `edit(view, text)` then replaces the function, not the file. `edit(view, old, new)` is unique inside that span. A budget-clipped view (`nextOffset`) is not editable.
+
+- Gravity: `read("symbol")` is the same view as `read({query, resolve:true})`. `read(path)` stays raw text. `looksLikePath` lives in `shared/decode.js` so guest and host share the identifier-vs-path rule.
+
+- Nested declaration spans: a parent still includes its body (brace-matched from the opening line), one-line class methods resolve, and two exact same-name declarations in one file are ambiguous instead of snapping the first. Ambiguous candidates (same-file or cross-file) are that hit's span (signature, lines, text, context), not a clone of the first match's window. Span pick/slice live in `src/context/spans.js` for locate + host resolve.
+
+- Do not subscribe a `context` observer when `seenWindow` is 0. A no-op listener still ran on every provider context event; opt-in retention windows still register.
+
+- Encode the module BIND spine as a regression: acyclic imports, no upward edges, context and runtime stay siblings. host-bridge remains the fused INVOKE kernel.
+
+- Drop guest/host RPC for `search` and `describe`, and stop returning unused `exec`/`patch`/`nova` bindings from the worker API. The guest still injects only read, write, edit, bash.
+
 ## [0.4.0] - 2026-09-10
 
 - Disable citation elision by default (`seenWindow: 0`), including direct bridge/ledger defaults. A failure-first integration regression preserves complete results across hidden, reordered and removed context. Positive windows remain an explicit research opt-in, not a validated retention guarantee. The historical ledger measurements below describe that experimental mode only.

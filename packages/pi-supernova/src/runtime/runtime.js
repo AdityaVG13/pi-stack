@@ -154,8 +154,6 @@ const RPC_METHODS = {
 
     return Array.isArray(wave) ? { results: [...wave], mode: wave.mode, reason: wave.reason } : wave;
   },
-  search: (nova, args) => nova.search(args[0], args[1]),
-  describe: (nova, args) => nova.describe(args[0]),
   speculateBegin: (nova) => nova.speculateBegin(),
   speculateCommit: (nova) => nova.speculateCommit(),
   speculateRollback: (nova) => nova.speculateRollback(),

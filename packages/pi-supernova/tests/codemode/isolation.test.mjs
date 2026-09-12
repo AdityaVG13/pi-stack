@@ -33,7 +33,7 @@ it("an active checkpoint rejects outside writes instead of absorbing them into i
     return {outside, text:await read("state.txt")};
   `);
 
-  assert.match(result.details.result.outside, /checkpoint/);
+  assert.equal(result.details.result.outside, "await the active edit checkpoint before issuing other commands; completed checkpoints cannot issue commands");
   assert.equal(result.details.result.text, "original");
 });
 

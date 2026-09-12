@@ -15,6 +15,9 @@ coverage/
 **/.graphzero/
 .cut-branches/
 .papercuts.jsonl
+.papercuts.archive.jsonl
+.asgrep/
+dogfood/
 .ee/
 .hermes/
 .pi-subagents/

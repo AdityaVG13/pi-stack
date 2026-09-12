@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isString, isObject } from "../shared/decode.js";
-import { truncateChars, formatReturn } from "./format.js";
+import { truncateChars, formatReturn, formatBoundedStringArray } from "./format.js";
 
 function json(value) {
   try { return JSON.stringify(value) ?? "null"; } catch { return JSON.stringify(String(value)); }
@@ -152,12 +152,19 @@ export function packageHostResult(raw, config) {
 export function packageFinalReturn(value, logs, config) {
   const images = [];
   let imageBytes = 0;
+  let imageOverflow = false;
 
   const collect = input => {
     if (input?.type === "image" && isString(input.data) && isString(input.mimeType) && input.mimeType.startsWith("image/")) {
-      imageBytes += Buffer.byteLength(input.data, "base64");
+      const size = Buffer.byteLength(input.data, "base64");
 
-      if (images.length >= 16 || imageBytes > 20 * 1024 * 1024) throw new Error("returned images exceed 16 attachments or 20 MiB; return fewer or smaller images");
+      if (images.length >= 16 || imageBytes + size > 20 * 1024 * 1024) {
+        imageOverflow = true;
+
+        return "[image omitted: exceeds 16 attachments or 20 MiB]";
+      }
+
+      imageBytes += size;
       images.push({ type: "image", data: input.data, mimeType: input.mimeType });
 
       return `[image ${images.length}: ${input.mimeType}]`;
@@ -171,7 +178,13 @@ export function packageFinalReturn(value, logs, config) {
   };
 
   value = collect(value);
-  const serialized = truncateChars(formatReturn(value), config.maxReturnChars ?? 32000, "return");
+  const maxReturn = config.maxReturnChars ?? 32000;
+  const formatted = formatReturn(value);
+  const serialized = formatted.length <= maxReturn
+    ? { text: formatted, truncated: imageOverflow }
+    : Array.isArray(value) && value.length && value.every(isString)
+      ? { text: formatBoundedStringArray(value, maxReturn), truncated: true }
+      : { ...truncateChars(formatted, maxReturn, "return"), truncated: true };
   const maxLines = config.maxLogLines ?? 100;
   let logTruncated = logs.length > maxLines;
 

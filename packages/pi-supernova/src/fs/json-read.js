@@ -43,7 +43,11 @@ export function jsonProjector(json) {
   return function* (root) {
     for (const steps of plans) yield steps.reduce((value, step) => {
       if (step.key !== undefined) {
-        if (!isObject(value) || !Object.hasOwn(value, step.key)) throw new Error("JSON field not found: " + JSON.stringify(step.key));
+        if (!isObject(value) || !Object.hasOwn(value, step.key)) {
+          const keys = isObject(value) ? Object.keys(value) : [];
+          const preview = keys.length ? "; available keys: " + keys.slice(0, 24).map(key => JSON.stringify(key)).join(", ") + (keys.length > 24 ? ", …" : "") : "";
+          throw new Error("JSON field not found: " + JSON.stringify(step.key) + preview);
+        }
 
         return value[step.key];
       }

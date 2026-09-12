@@ -69,30 +69,29 @@ text contributes to totals through later history, not as a second charge.
 
 ## Measured results
 
-Observed on macOS with Node v26.7.0 and Linux aarch64 with Node v24.16.0; both
-produced the same token counts.
+Observed on macOS with Node v26.7.0.
 
 | Tokenizer | Non-batched baseline | Batched baseline (d444eb7) | Current | Further reduction | Total reduction |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| o200k_base | 40,129 | 18,535 | 17,581 | **5.15%** | **56.19%** |
-| cl100k_base | 39,697 | 18,310 | 17,363 | **5.17%** | **56.26%** |
+| o200k_base | 28,130 | 18,535 | 9,537 | **48.55%** | **66.10%** |
+| cl100k_base | 27,841 | 18,310 | 9,420 | **48.55%** | **66.17%** |
 
 The gate requires at least 40% reduction on **each tokenizer for the complete
 workload**, not for every scenario individually. Token counts and reductions are
 computed from the recorded baseline and fresh execution results, not constants
-returned by the runtime. A second gate requires another 5% against the measured
+returned by the runtime. A second gate requires another 19% against the measured
 batched baseline from commit d444eb7. Its six-call argument hash is pinned as well
 as the original workload: removing a decision boundary cannot satisfy this gate.
 
 ### What changed after the batched baseline
 
-The serialized definition falls from 1,068 to 947 tokens with o200k_base and from
-1,057 to 937 with cl100k_base. Repeated guidance now has one model-visible home;
-the command reference, safety rules and schema constraints remain available.
-Batch framing declares UTF-16 length units once instead of on every entry and
-omits redundant aggregate mutation totals from the wrapper. Every original
-per-program result, including its mutation report, remains intact. Structured
-aggregate counters are unchanged. No source text or independent result is removed.
+The serialized definition falls from 1,068 to 577 tokens with o200k_base and from
+1,057 to 572 with cl100k_base. Duplicate object-form restatements, parameter
+prose already covered by the command list, and discoverable operational asides
+were removed; command signatures and safety rules (`complete:true`, JSON 16 MiB /
+no jq, array-read rejection, transactions, `programs` batch, edit oldText as an
+exact substring, `edit(view,text)`) remain in the standing reference. No source
+text or independent result is removed or compressed.
 
 For the fixed six-call schedule, the accounting can also be written as:
 
@@ -100,14 +99,17 @@ For the fixed six-call schedule, the accounting can also be written as:
 Total = (N+1)*D + sum((N-i+2)*A_i + (N-i+1)*R_i, i = 1..N)
 ~~~
 
-Seven definition appearances save 7*121 = 847 tokens with o200k_base. The smaller
-batch wrappers save another 107 after history replay, for 954/18,535 = 5.15%.
-For cl100k_base the corresponding saving is 7*120 + 107 = 947 tokens. The logical
-programs, their arguments, complete results and decision boundaries are unchanged.
+Seven definition appearances still save 7*491 = 3,437 tokens with o200k_base versus
+d444eb7's 1,068-token definition. Snap-to-span then changed the first repair
+observation from a whole-file view to the `MAX_JSON_BYTES` declaration
+(`lines:[3,3]`, `complete:false`). That smaller result is replayed through later
+requests; no source or independent result is compressed or dropped. Frozen
+programs, arguments and decision boundaries are unchanged. Combined with
+batching, current o200k traffic is 9,558 vs d444eb7's 18,535 (48.43%).
 
-There are still costs: the current definition exceeds the non-batched baseline
-by 39/36 tokens per request, and batching adds result framing. One-off calls should
-not be assumed to benefit from the batch API.
+The current definition is now *below* the non-batched baseline (577 vs 908
+o200k_base). Batching still adds result framing. One-off calls should not be
+assumed to benefit from the batch API.
 
 The report also includes separate source-framing and argument-reuse comparisons.
 Those component measurements are not total-session savings, and the reported

@@ -3,10 +3,11 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { homedir } from "node:os";
 import { packageHostResult, hostResultFailed } from "../output/bottleneck.js";
-import { isString, isNumber, isFunction, isObject } from "../shared/decode.js";
+import { isString, isNumber, isFunction, isObject, looksLikePath } from "../shared/decode.js";
 import { isMutatingTool, runParallelWave, createNativeScheduler } from "../runtime/parallel.js";
 import { unknownToolMessage } from "./catalog.js";
 import { extractStructuralSurface } from "../context/surface.js";
+import { pickSpan } from "../context/spans.js";
 import { buildEditDiff, buildMultiEditDiff, buildPatchDiff, buildWriteDiff } from "../fs/diff.js";
 import { executeSnap } from "../context/snap.js";
 import { selectEvidence } from "../context/evidence.js";
@@ -18,7 +19,7 @@ import { declaredName } from "../context/repo-index.js";
 import { CausalVfs } from "../fs/vfs.js";
 import { MAX_JSON_BYTES, jsonProjector, sessionJsonArgs, validateJsonRead } from "../fs/json-read.js";
 import { applyPatchToText } from "../fs/patch.js";
-import { resolveWorkspacePath, runCommand, clearPathCache, relativeSlash } from "../fs/workspace.js";
+import { resolveWorkspacePath, runCommand, clearPathCache, relativeSlash, assertFilesystemPath } from "../fs/workspace.js";
 import { fuzzyFind, grepIndexed, listIndexed, listWithTools, rgGrepArgs, referencesForNames } from "../context/search.js";
 
 function textResult(text, details) {
@@ -26,6 +27,20 @@ function textResult(text, details) {
     content: [{ type: "text", text: String(text ?? "") }],
     details: details || {},
   };
+}
+
+function resultDiff(response) {
+  let details = response?.details;
+
+  if (isString(details)) {
+    try {
+      details = JSON.parse(details);
+    } catch {
+      return undefined;
+    }
+  }
+
+  return isObject(details) ? details.diff : undefined;
 }
 
 /** Unwrap a single matching quote pair around the whole string (`'git status'`). */
@@ -52,19 +67,9 @@ function sliceLines(text, offset, limit) {
   return lines.slice(startIndex, startIndex + count).join("\n");
 }
 
-function looksLikePath(target) {
-  return (
-    isString(target) &&
-    (target.includes("/") ||
-      target.includes("\\") ||
-      target.startsWith(".") ||
-      (!/\s/.test(target) && path.extname(target).length > 0))
-  );
-}
-
 function resolveReadPath(cwd, target) {
   if (!isString(target) || !target.trim()) throw new Error("read requires path");
-  const input = target.trim();
+  const input = assertFilesystemPath(target, "read");
 
   return path.resolve(cwd, input === "~" ? homedir() : input.startsWith("~/") ? path.join(homedir(), input.slice(2)) : input);
 }
@@ -87,6 +92,39 @@ async function probeExistingPath(cwd, targetParam, vfs) {
   }
 }
 
+const EDIT_PREVIEW_LINES = 16;
+
+function sourceLines(content) {
+  const raw = content.split("\n");
+
+  if (raw.at(-1) === "") raw.pop();
+
+  return raw;
+}
+
+function lineNumberAt(content, index) {
+  let line = 1;
+
+  for (let i = 0; i < index; i++) if (content.charCodeAt(i) === 10) line++;
+
+  return line;
+}
+
+function formatNumberedLine(n, text) {
+  return String(n).padStart(5) + " " + text;
+}
+
+function numberedPreview(content, cap = EDIT_PREVIEW_LINES) {
+  const lines = sourceLines(content);
+
+  if (lines.length === 0) return "0 lines";
+  const shown = lines.slice(0, cap);
+  const body = shown.map((line, i) => formatNumberedLine(i + 1, line)).join("\n");
+  const suffix = lines.length > cap ? lines.length + " lines total" : lines.length + " lines";
+
+  return body + "\n" + suffix;
+}
+
 function applyReplacements(target, content, requestedEdits) {
   if (requestedEdits.length === 0) throw new Error("edit requires at least one replacement");
 
@@ -99,11 +137,16 @@ function applyReplacements(target, content, requestedEdits) {
     const index = content.indexOf(replacement.oldText);
 
     if (index < 0) {
-      throw new Error(`edit target not found in ${target}: oldText must match the file byte-for-byte (read() it first; check whitespace and quotes)`);
+      throw new Error("edit target not found in " + target + ": oldText must match the file byte-for-byte\n" + numberedPreview(content));
     }
+    const second = content.indexOf(replacement.oldText, index + 1);
 
-    if (content.indexOf(replacement.oldText, index + 1) >= 0) {
-      throw new Error(`edit target is not unique in ${target}: include more surrounding lines in oldText, or pass edits:[{oldText,newText},…]`);
+    if (second >= 0) {
+      const lines = sourceLines(content);
+      const a = lineNumberAt(content, index);
+      const b = lineNumberAt(content, second);
+
+      throw new Error("edit target is not unique in " + target + ": lines " + a + " and " + b + "; include more surrounding lines in oldText, or pass edits:[{oldText,newText},…]\n" + formatNumberedLine(a, lines[a - 1] ?? "") + "\n" + formatNumberedLine(b, lines[b - 1] ?? ""));
     }
 
     return { ...replacement, index, end: index + replacement.oldText.length };
@@ -123,6 +166,27 @@ function applyReplacements(target, content, requestedEdits) {
   }
 
   return { updated, matches };
+}
+
+function applyViewReplace(target, content, start, end, oldText, newText) {
+  const current = sliceLines(content, start, end - start + 1);
+
+  if (current !== oldText) {
+    const shown = current.length ? current : content;
+
+    throw new Error("edit view is stale in " + target + ": lines " + start + "-" + end + " changed\n" + numberedPreview(shown));
+  }
+
+  const hadTrail = content.endsWith("\n");
+  const lines = content.split("\n");
+
+  if (hadTrail && lines.at(-1) === "") lines.pop();
+  const insert = newText.split("\n");
+
+  if (newText.endsWith("\n") && insert.at(-1) === "") insert.pop();
+  const updated = [...lines.slice(0, start - 1), ...insert, ...lines.slice(end)].join("\n") + (hadTrail ? "\n" : "");
+
+  return { updated, oldText, newText };
 }
 
 function formatDirectoryEntry(name, type, size = 0) {
@@ -151,6 +215,7 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
   const reads = createNativeScheduler();
 
   async function sourceRead(query, searchDir, signal, params = {}) {
+    params = { ...params, resolve: params.resolve !== false };
     const cwd = getCwd();
 
     const includeHidden = path.relative(cwd, searchDir).split(path.sep)
@@ -160,15 +225,15 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
       pathContext: { frecency: index.frecency, currentFile: index.lastTouched },
       overlayText: p => vfs.getOverlay(p), pendingPaths: vfs.getOverlayPaths(), signal });
 
-    return openSource(result, params, signal);
+    return openSource(result, params, signal, undefined, query);
   }
 
-  async function openSource(result, params, signal, resolvedPath) {
+  async function openSource(result, params, signal, resolvedPath, query) {
     const cwd = getCwd();
 
     if (result.status !== "found") return textResult(JSON.stringify(result), { isSnap: true });
     signal?.throwIfAborted();
-    const opened = await readFile(resolvedPath ?? path.resolve(cwd, result.path), { ...params, about: undefined }, result.line, result.path);
+    const opened = await readFile(resolvedPath ?? path.resolve(cwd, result.path), { ...params, about: undefined }, result.line, result.path, query);
     const block = opened.content[0];
 
     if (block.type !== "text") throw new Error("source resolution requires a text file; read the image path directly");
@@ -318,7 +383,7 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
   }
 
   /** Plain text, a line window, or (with `about`) a relevance-folded outline of the whole file. */
-  async function readFile(targetPath, params, sourceLine, displayPath) {
+  async function readFile(targetPath, params, sourceLine, displayPath, query) {
     const cwd = getCwd();
     const rel = displayPath ?? relativeSlash(cwd, targetPath);
 
@@ -371,9 +436,22 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
 
     const explicit = isNumber(params?.offset) || isNumber(params?.limit);
     const budget = Math.max(1, Math.min(config.maxCallResultChars ?? 65536, config.maxReturnChars ?? 32000) - (params.resolve ? 1024 : 256));
-    const offset = params?.offset ?? (sourceLine && text.length > budget ? Math.max(1, sourceLine - 2) : 1);
+    let offset = params?.offset;
+    let limit = params?.limit;
+
+    if (!explicit && params.resolve) {
+      const spans = WorkspaceIndex.spansOf(WorkspaceIndex.fromText(targetPath, text));
+      const span = pickSpan(spans, { line: sourceLine, name: query });
+
+      if (span) {
+        offset = span.start;
+        limit = span.end - span.start + 1;
+      }
+    }
+
+    offset ??= sourceLine && text.length > budget ? Math.max(1, sourceLine - 2) : 1;
     const firstLine = isNumber(offset) ? Math.max(1, Math.floor(offset)) : 1;
-    const sliced = sliceLines(text, offset, params?.limit);
+    const sliced = sliceLines(text, offset, limit);
 
     if (params.complete === true && (sliced !== text || sliced.length > budget || (params.resolve && JSON.stringify(sliced).length > budget))) {
       throw new Error(`incomplete read of ${rel}: complete:true requires the entire file within the read budget; use json:".field" for JSON reports, about for text selection, edit() for replacements, or reconstruct resolve:true source windows`);
@@ -416,19 +494,23 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
    * lines with numbers, a quick structural check, and bounded lexical reference hints.
    * These do not replace tests or semantic caller resolution.
    */
-  async function editSummary(cwd, target, original, updated, diff, signal) {
+  async function editSummary(cwd, target, original, updated, diff, signal, span) {
     const rel = relativeSlash(cwd, target);
     const newLines = updated.split("\n");
     const ranges = [];
 
-    const positions = diff.lines.filter(row => row.type !== "context")
-      .map(row => Math.min(newLines.length, row.newLineNum ?? row.lineNum)).sort((a, b) => a - b);
+    if (span && Number.isInteger(span.start) && Number.isInteger(span.end) && span.start >= 1 && span.end >= span.start) {
+      ranges.push({ start: span.start, end: Math.min(newLines.length, span.end) });
+    } else {
+      const positions = diff.lines.filter(row => row.type !== "context")
+        .map(row => Math.min(newLines.length, row.newLineNum ?? row.lineNum)).sort((a, b) => a - b);
 
-    for (const line of positions) {
-      const start = Math.max(1, line - 2), end = Math.min(newLines.length, line + 2);
+      for (const line of positions) {
+        const start = Math.max(1, line - 2), end = Math.min(newLines.length, line + 2);
 
-      if (ranges.length && start <= ranges.at(-1).end + 1) ranges.at(-1).end = Math.max(ranges.at(-1).end, end);
-      else ranges.push({ start, end });
+        if (ranges.length && start <= ranges.at(-1).end + 1) ranges.at(-1).end = Math.max(ranges.at(-1).end, end);
+        else ranges.push({ start, end });
+      }
     }
 
     const blocks = [];
@@ -625,11 +707,28 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
 
       if (signal?.aborted) throw new Error("aborted");
 
+      const content = await vfs.read(target);
+
+      if (isNumber(params?.viewStart) && isNumber(params?.viewEnd) && isString(params?.viewText) && isString(params?.newText)) {
+        const windowNext = isString(params.oldText)
+          ? applyReplacements(target, params.viewText, [{ oldText: params.oldText, newText: params.newText }]).updated
+          : params.newText;
+        const { updated } = applyViewReplace(target, content, params.viewStart, params.viewEnd, params.viewText, windowNext);
+        const { speculative } = await vfs.write(target, updated);
+        index.touch(relativeSlash(cwd, target));
+        const diffFrom = isString(params.oldText) ? params.oldText : params.viewText;
+        const diffTo = isString(params.oldText) ? params.newText : windowNext;
+        const diff = buildEditDiff(target, content, diffFrom, diffTo);
+        const inserted = sourceLines(windowNext);
+        const spanEnd = params.viewStart + Math.max(inserted.length, 1) - 1;
+        const summary = await editSummary(cwd, target, content, updated, diff, signal, { start: params.viewStart, end: spanEnd });
+
+        return textResult(summary, { path: target, speculative, diff });
+      }
+
       const requestedEdits = Array.isArray(params?.edits)
         ? params.edits
         : [{ oldText: params?.oldText, newText: params?.newText }];
-
-      const content = await vfs.read(target);
       const { updated, matches } = applyReplacements(target, content, requestedEdits);
       const { speculative } = await vfs.write(target, updated);
       index.touch(relativeSlash(cwd, target));
@@ -733,7 +832,7 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
     },
     async bash(params, signal) {
       const cwd = getCwd();
-      const literal = params?._directArgv === true;
+      const literal = Array.isArray(params?.args) && process.platform !== "win32" && params.args.length === Object.keys(params.args).length && params.args.every(isString);
 
       if (literal && (!isString(params.command) || !Array.isArray(params.args) || params.args.some(arg => !isString(arg)))) throw new Error("bash argv requires a command string and an array of string args");
       const command = literal ? String(params.command) : unwrapIfFullyQuoted(String(params?.command ?? "").trim());
@@ -850,6 +949,11 @@ function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) {
   };
 }
 
+/**
+ * Fused INVOKE kernel. Guest RPC is the only caller; fuel is cwd + vfs + signal.
+ * BIND stays downward (see tests/contracts/layers.test.mjs). Do not split this
+ * closure into pass-through files that re-import each other.
+ */
 export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedger, budget }) {
   const index = registry?.index ?? new WorkspaceIndex((argv, opts) => runCommand(argv, opts));
   const ledger = runLedger ?? new SeenLedger({ window: config.seenWindow ?? 0 });
@@ -1018,20 +1122,6 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     return vfs.rollback();
   }
 
-  function resultDiff(response) {
-    let details = response?.details;
-
-    if (isString(details)) {
-      try {
-        details = JSON.parse(details);
-      } catch {
-        return undefined;
-      }
-    }
-
-    return isObject(details) ? details.diff : undefined;
-  }
-
   function notifyCall(record) {
     if (!callListener) return;
 
@@ -1106,8 +1196,9 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     try {
       const delegated = hostTool(name);
       const exec = delegated ? delegated.execute.bind(delegated) : hostSession ? undefined : executors.get(name);
+      const argvOwned = name === "bash" && Array.isArray(args?.args) && process.platform !== "win32" && args.args.length === Object.keys(args.args).length && args.args.every(isString);
 
-      if (exec) {
+      if (exec && !argvOwned) {
         if (name === "read" && (args?.json !== undefined || /^(agent|artifact):\/\/.*\?/i.test(String(args?.path)))) throw new Error("JSON projection requires the Supernova-owned read adapter, not an external override");
 
         if (name === "write" && args?.append === true) throw new Error("append requires the Supernova-owned write adapter, not an external override");
@@ -1158,6 +1249,11 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     const exitCode = isObject(res?.details) ? res.details.exitCode : undefined;
 
     if (Number.isInteger(exitCode) && exitCode !== 0) record.exitCode = exitCode;
+    const text = isObject(res) && Array.isArray(res.content)
+      ? res.content.filter(part => part?.type === "text" && isString(part.text)).map(part => part.text).join("\n")
+      : undefined;
+
+    if (text) record.resultText = text;
   }
 
   async function call(name, args) {

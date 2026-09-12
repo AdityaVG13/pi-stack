@@ -71,6 +71,25 @@ function hasWellFormedStrings(values) {
   return true;
 }
 
+/** Keep every array item in an oversized return by giving each a fair truncated share. */
+export function formatBoundedStringArray(values, budget) {
+  const n = values.length;
+  const header = "strings[" + n + "]\n";
+  let remaining = Math.max(0, budget - header.length);
+  let out = header;
+
+  for (let i = 0; i < n; i++) {
+    const itemHeader = "[" + i + "] " + values[i].length + " UTF-16 units\n";
+    const per = Math.max(32, Math.floor(remaining / (n - i)) - itemHeader.length - 1);
+    const bounded = truncateChars(values[i], per, "return");
+    const chunk = itemHeader + bounded.text + "\n";
+    remaining = Math.max(0, remaining - chunk.length);
+    out += chunk;
+  }
+
+  return out;
+}
+
 /** Lossless framing for source arrays, not string escaping or source compression. */
 export function formatReturn(value) {
   if (isString(value)) return value;

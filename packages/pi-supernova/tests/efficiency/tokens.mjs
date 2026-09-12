@@ -124,7 +124,7 @@ for (const name of ["o200k_base","cl100k_base"]) {
   const savedFraction = 1 - afterTraffic.total / beforeTraffic.total;
   const prior = priorBatchTraffic[name];
 
-  if(afterTraffic.total>Math.floor(prior*.95)) failures.push(name+": current-pass traffic "+afterTraffic.total+" > "+Math.floor(prior*.95)+"; require another 5% on unchanged programs/results");
+  if(afterTraffic.total>Math.floor(prior*.81)) failures.push(name+": current-pass traffic "+afterTraffic.total+" > "+Math.floor(prior*.81)+"; require another 19% on unchanged programs/results");
 
   if (savedFraction < .40) failures.push(name + ": " + afterTraffic.total + " > " + Math.floor(beforeTraffic.total * .60) + " (" + (savedFraction*100).toFixed(2) + "% savings; require >=40%)");
   reports.push({encoding:name,currentPass:{baselineRevision:"d444eb7",before:prior,after:afterTraffic.total,savedPercent:Number(((1-afterTraffic.total/prior)*100).toFixed(2))},traffic:{before:beforeTraffic,after:afterTraffic,savedPercent:Number((savedFraction*100).toFixed(2)),maximumTokens:Math.floor(beforeTraffic.total*.60)},observed:{experimental:true,enabledByDefault:false,total:observedTraffic.total,unobservedSameSchedule:beforeTraffic.total,saved:beforeTraffic.total-observedTraffic.total,savedPercent:Number(((1-observedTraffic.total/beforeTraffic.total)*100).toFixed(2)),ceiling:Number.isInteger(observedCeiling)?observedCeiling:null},outputs,definition:{before:count(JSON.stringify(beforeDefinition)),after:count(JSON.stringify(definition)),addedTokens:schemaDelta},

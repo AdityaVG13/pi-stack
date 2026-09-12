@@ -8,6 +8,17 @@ export const isFunction = (v) => toStr.call(v) === "[object Function]" || v inst
 
 export const isNumber = (v) => toStr.call(v) === "[object Number]" && Number.isFinite(v);
 
+/** Path-shaped if it has a slash, is relative, or has a file extension. Identifiers are not paths. */
+export function looksLikePath(target) {
+  return (
+    isString(target) &&
+    (target.includes("/") ||
+      target.includes("\\") ||
+      target.startsWith(".") ||
+      (!/\s/.test(target) && /\.[A-Za-z0-9]+$/.test(target)))
+  );
+}
+
 const MAX_DEPTH = 64;
 
 const MAX_TYPED_ARRAY = 4096;

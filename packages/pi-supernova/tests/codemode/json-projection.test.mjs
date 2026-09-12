@@ -9,13 +9,14 @@ import { engineFixture } from "../helpers/engine.mjs";
 
 it("unsupported edit overloads fail before dispatch with usable signatures", async t => {
   const f = await engineFixture(t);
+  const usage = /invalid edit signature; use edit\(path,oldText,newText\)/;
 
   for (const call of ['edit("missing.txt", {oldText:"a",newText:"b"})', 'edit({path:"missing.txt",edits:[]})', 'edit({path:"missing.txt",patch:"",oldText:"a",newText:"b"})']) {
-    await assert.rejects(f.execute('await ' + call), /edit.*(?:signature|use|requires)/i);
+    await assert.rejects(f.execute("await " + call), usage);
   }
 
   await f.write("edit.txt", "retained");
-  await assert.rejects(f.execute('await edit("edit.txt", "");'), /edit.*(?:signature|use|requires)/i);
+  await assert.rejects(f.execute('await edit("edit.txt", "");'), usage);
   assert.equal(await fs.readFile(path.join(f.root,"edit.txt"),"utf8"), "retained");
 });
 
@@ -34,8 +35,25 @@ it("JSON projection parses the full report before selecting fields and array sli
   await assert.rejects(f.execute('return await read({path:"report.json",json:".padding"});'), /JSON selection exceeds.*budget/);
   await assert.rejects(f.execute('return await read({path:"report.json",json:true});'), /JSON selection exceeds.*budget/);
 
-  for (const json of [".missing", ".toString", ".values[99]", ".verdict.length", ".values | length", "", "..verdict", ".values[-1]", ".values[1:9007199254740992]"]) {
-    await assert.rejects(f.execute('return await read({path:"report.json",json:' + JSON.stringify(json) + '});'), /JSON (?:selector|field|index)/);
+  const keys = "\"padding\", \"verdict\", \"values\", \"a.b\"";
+  const rejected = {
+    ".missing": "JSON field not found: \"missing\"; available keys: " + keys,
+    ".toString": "JSON field not found: \"toString\"; available keys: " + keys,
+    ".values[99]": "JSON index out of range: 99",
+    ".verdict.length": "JSON field not found: \"length\"",
+    ".values | length": "JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq",
+    "": "JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq",
+    "..verdict": "JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq",
+    ".values[-1]": "JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq",
+    ".values[1:9007199254740992]": "JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq",
+  };
+
+  for (const [json, message] of Object.entries(rejected)) {
+    await assert.rejects(f.execute("return await read({path:\"report.json\",json:" + JSON.stringify(json) + "});"), error => {
+      assert.match(error.message, new RegExp(message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+      return true;
+    });
   }
 
   await assert.rejects(f.execute('return await read({path:"report.json",json:".verdict",limit:1});'), /JSON.*cannot combine/);

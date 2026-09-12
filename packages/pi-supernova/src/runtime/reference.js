@@ -1,25 +1,18 @@
 // Complete model-facing API reference; kept in every request, not moved into history.
-export const REFERENCE = `Run a JavaScript async body or arrow with read, write, edit and bash. Strings stay raw. Single program: exactly one of code or file; file rereads a workspace program with the same limits, bindings, calling-workspace cwd and fresh guest. Code and data character caps use UTF-16 units. Split large writes using append.
+export const REFERENCE = `JavaScript async body or arrow with read, write, edit, bash. Strings stay raw. Exactly one of code or file; file rereads that program (same limits, cwd, fresh guest). Caps are UTF-16. Put Markdown/scripts/argv in data.
 
-Native commands (async):
-read(path|paths, offset?, limit?) → file text or text[]; read(directory) → directory entries
-read(imagePath) → image attachment when returned (PNG/JPEG/GIF/WebP/BMP); no browser needed
-read({path,json:".field"}) → parsed JSON field; supports .items[0:3], quoted keys, selector arrays, or true for the whole JSON value
-read("agent://id?q=.answer") → JSON field from a calling-session resource (when host artifacts are available)
-read("symbol or question") → locate and open source in one call, without an index; selected file text stays raw
-read({query, resolve:true}) → {status,path,line,lines,text,complete,nextOffset?} for a direct resolve→edit handoff
-read(path, {about: question}) → relevant file bodies, or source selection inside a directory
-read({query, evidence:true}) → ranked evidence; read({path, outline:true}) → structural declarations
-write(path, text) → write a file; write({path,content,append:true}) appends a chunk without a bounded read
-edit(path, oldText, newText) → post-edit lines, checks, and references
-edit(async () => {...}) → filesystem checkpoint: commit on success, rollback on throw; no shell commands, nesting, or concurrent outside commands
-bash(command, {cwd?, timeoutMs?}) → bounded output; throws on non-zero exit
-bash({command, args:[...]}) → literal argv without shell expansion of arguments
+read(path|paths, offset?, limit?) → raw text or text[]; read(directory) → entries
+read(imagePath) → image (PNG/JPEG/GIF/WebP/BMP)
+read({path,json:".field"}) → parsed JSON; .items[0:3], quoted keys, selector arrays, or true; 16 MiB cap; no jq
+read("agent://id?q=.answer") → JSON field from session artifacts
+read("symbol or question") → same view as resolve:true
+read({query,resolve:true}) → {status,path,line,lines,text,complete,nextOffset?}
+read(path,{about}) → matching windows; read({query,evidence:true}) → ranked evidence; read({path,outline:true}) → declarations
+write(path, text) → replace; write({path,content,append:true}) → append without a prior read
+edit(path,oldText,newText) | edit({path,edits}) | edit({path,patch}) → numbered post-edit lines, checks, references
+edit(async () => {...}) → checkpoint: commit on success, rollback on throw; no shell, nesting, or outside commands
+bash(command,{cwd?,timeoutMs?}) → bounded output; nonzero throws
+bash({command,args}) → literal argv, no shell expansion of args
 
-Start with a source question or scoped about read; do not redundantly reopen selected source. Only found selects and opens a file. Uncertain reads return ambiguous, not_found, or incomplete with no selected path. Use resolve:true to check status before editing its path; narrow the directory with path+about when uncertain.
-For read-modify-write, use read({path,complete:true}); it rejects partial output. JSON selectors parse the full document (16 MiB cap); selections must fit the read budget. No full jq; do not JSON.parse line windows. For large text audits use about or offset/limit, not complete:true. Prefer edit for large files. Array reads reject failures; use Promise.allSettled for per-path outcomes.
-Object arguments also work: read({path, offset?, limit?, about?, outline?, evidence?, resolve?, complete?}), edit({path, edits:[{oldText,newText}]}), edit({path,patch}), write({path,content}), bash({command,timeoutMs?}).
-File changes stage until program success; later errors roll them back. Shell calls commit preceding writes and cannot be rolled back. Outcomes report committed/rolledBack file versions and external-call attempts.
-Independent read starts batch automatically. Mutations preserve submission order. Plain reads remain self-contained; oversized reads provide continuation offsets. Return only what the model needs. console.log is captured.
-
-For known continuations use programs:[{code|file,data?},...]. Entries run sequentially in fresh guests with separate commits. The batch stops on failure and returns all attempted results, including a typed stop report; earlier commits remain. Deadlines, host calls, logs and output are shared across the batch. Use separate calls when the next action needs model reasoning.`;
+edit oldText is an exact substring of read(); a miss includes a numbered window. Found is a span, not the file; uncertain returns ambiguous, not_found, or incomplete. Check resolve:true status; edit(view,text) replaces that window; edit(view,old,new) is unique inside it. complete:true rejects partial files; use about or offset/limit for large audits. Array reads reject failures; Promise.allSettled for per-path outcomes. Edits stage until success; bash commits preceding writes.
+programs:[{code|file,data?},...] sequential fresh guests, separate commits; stop on failure keeps earlier commits. Separate calls when the next step needs a model decision.`;

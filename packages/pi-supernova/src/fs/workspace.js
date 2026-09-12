@@ -64,14 +64,38 @@ export function isTestPath(filePath) {
   return segments.some((s) => TEST_SEGMENTS.has(s)) || /\.(test|spec)\./.test(base);
 }
 
-export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = false, fresh = false) {
+/** Reject scheme:// and scheme:/ paths. A single-letter drive (C:/) stays a filesystem path. */
+export function assertFilesystemPath(inputPath, opName, allowSessionRead = false) {
   if (inputPath == null || !isString(inputPath) || !inputPath.trim()) {
     throw new Error(`${opName} requires path`);
   }
 
-  if (/^(?:agent|artifact):\/\//i.test(inputPath.trim())) throw new Error(`${opName} requires a filesystem path; session resource URIs are read-only`);
+  const trimmed = inputPath.trim();
+
+  if (/^(?:agent|artifact):\/\//i.test(trimmed)) {
+    if (allowSessionRead) return trimmed;
+    throw new Error(`${opName} requires a filesystem path; session resource URIs are read-only`);
+  }
+
+  const uri = /^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$/.exec(trimmed);
+
+  if (uri) {
+    const scheme = uri[1];
+    const rest = uri[2];
+    const windowsDrive = scheme.length === 1 && (rest.startsWith("/") || rest.startsWith("\\"));
+
+    if (!windowsDrive && (rest.startsWith("//") || rest.startsWith("/"))) {
+      throw new Error(`${opName} does not accept ${scheme}: URI paths; use a workspace filesystem path`);
+    }
+  }
+
+  return trimmed;
+}
+
+export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = false, fresh = false) {
+  const trimmed = assertFilesystemPath(inputPath, opName);
   const resolvedCwd = getResolvedCwd(cwd);
-  const target = path.resolve(resolvedCwd, inputPath.trim());
+  const target = path.resolve(resolvedCwd, trimmed);
   assertInside(path.relative(resolvedCwd, target), `${opName} path escapes workspace: paths resolve relative to ${resolvedCwd}`);
 
   if (!allowRoot && target === resolvedCwd) {

@@ -27,7 +27,7 @@ it("ordinary source questions automatically offer bounded fuzzy paths without se
   const f = await engineFixture(t);
   await f.write("refresh-token.js", "export const sentinel = 1;\n");
   const result = await f.execute('return await read("refreshtokn");');
-  const selection = JSON.parse(result.details.result);
+  const selection = result.details.result;
   assert.equal(selection.status,"ambiguous");
   assert.equal(selection.path,null);
   assert.ok(selection.candidates.some(candidate=>candidate.path==="refresh-token.js"));

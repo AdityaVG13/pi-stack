@@ -4,7 +4,7 @@ import { REFERENCE } from "./src/runtime/reference.js";
 import { isString, isFunction } from "./src/shared/decode.js";
 import { loadConfig } from "./src/config/config.js";
 import { createHostBridge } from "./src/bridge/host-bridge.js";
-import { truncateChars } from "./src/output/format.js";
+import { truncateChars, formatBoundedStringArray } from "./src/output/format.js";
 import { runGuestProgram, warmGuestWorker, stopWarmGuestWorker } from "./src/runtime/runtime.js";
 import { renderSupernovaCall, renderSupernovaResult } from "./src/ui/render.js";
 
@@ -99,6 +99,15 @@ function mutationText(outcome) {
   return "\nmutations: committed=" + m.committed + " rolledBack=" + m.rolledBack + " (file versions)" + external + uncertain;
 }
 
+function mutationReceipts(trace) {
+  if (!Array.isArray(trace)) return "";
+
+  return trace
+    .filter(row => row?.ok && (row.name === "write" || row.name === "edit") && isString(row.resultText) && row.resultText)
+    .map(row => row.resultText)
+    .join("\n");
+}
+
 // Corrective hint, emitted only when a turn actually split. Independent work
 // belongs in one program: a split cannot use the single prewarmed worker and pays
 // one extra spawn per sibling. Costs nothing until it fires, so it needs no room in
@@ -117,6 +126,25 @@ function successText(outcome, call) {
   const hint = outcome.undefinedReturn ? " (no return statement; add `return` to get a value)" : "";
 
   return `ok #${call} ${outcome.wallMs}ms${truncated}${outcome.mutations?.committed || outcome.mutations?.rolledBack || outcome.mutations?.external ? mutationText(outcome) : ""}${splitTurnHint(outcome)}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
+}
+
+function fitOutput(outcome, call, limit, format) {
+  let text = format(outcome, call);
+
+  if (text.length <= limit) return text;
+  outcome.returnTruncated = true;
+  const wrapper = format({ ...outcome, resultText: "", logs: [] }, call);
+  const room = Math.max(256, limit - wrapper.length);
+
+  if (Array.isArray(outcome.result) && outcome.result.length && outcome.result.every(isString)) {
+    outcome.resultText = formatBoundedStringArray(outcome.result, room);
+  } else if (isString(outcome.resultText) && outcome.resultText.length > room) {
+    outcome.resultText = truncateChars(outcome.resultText, room, "output").text;
+  }
+
+  text = format(outcome, call);
+
+  return text.length <= limit ? text : truncateChars(text, limit, "output").text;
 }
 
 const TOOL_DESCRIPTION = REFERENCE;
@@ -140,6 +168,9 @@ export function registerCodeMode(pi) {
   // Counting them lets a result say so without adding standing guidance to the
   // tool definition, which is resent on every request.
   let inFlight = 0;
+  // Peak concurrent execute() bodies in the current wave. Start-order or
+  // finish-order alone cannot see a first-started call that finishes last.
+  let overlapPeak = 0;
 
   function cancelWarmTimer() {
     if (warmTimer !== undefined) clearImmediate(warmTimer);
@@ -176,17 +207,17 @@ export function registerCodeMode(pi) {
     name: "supernova",
     label: "Supernova",
     description: TOOL_DESCRIPTION,
-    promptSnippet: "JavaScript with read, write, edit, and bash",
+    promptSnippet: "read, write, edit, bash",
     parameters: Type.Object({
       code: Type.Optional(Type.String({ maxLength: config.maxCodeChars ?? 48000 })),
       file: Type.Optional(Type.String({ minLength: 1 })),
-      data: Type.Optional(Type.Unknown({ description: "Literal JSON input available as data in the program; put Markdown, scripts or argv here instead of nesting JavaScript quoting. JSON-encoded size is limited to the code character budget." })),
-      timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, description: "Hard timeout in ms." })),
+      data: Type.Optional(Type.Unknown()),
+      timeoutMs: Type.Optional(Type.Integer({ minimum: 1000 })),
       programs: Type.Optional(Type.Array(Type.Object({
         code: Type.Optional(Type.String({ maxLength: config.maxCodeChars ?? 48000 })),
         file: Type.Optional(Type.String({ minLength: 1 })),
         data: Type.Optional(Type.Unknown()),
-      }, {additionalProperties:false}), {minItems:1,maxItems:32,description:"Instead of top-level code/file/data. JSON-encoded array shares the code character cap."})),
+      }, {additionalProperties:false}), {minItems:1,maxItems:32})),
     }),
     // One self-owned result frame is shared by Pi and OMP; renderCall stays empty
     // so separate call/result slots cannot duplicate the lifecycle card.
@@ -214,8 +245,9 @@ export function registerCodeMode(pi) {
       emitProgress([]);
       const started = performance.now();
       let outcome;
-      const overlappedTurn = inFlight > 0 ? inFlight + 1 : 0;
       inFlight += 1;
+      overlapPeak = Math.max(overlapPeak, inFlight);
+      let peakSeen = overlapPeak;
 
       try {
         refreshCatalog(runBridge);
@@ -244,7 +276,9 @@ export function registerCodeMode(pi) {
         while (runBridge.getOverlayDepth()) runBridge.rollbackSpeculation();
         outcome = { ok: false, error: error instanceof Error ? error.message : String(error), logs: outcome?.logs ?? [], wallMs: Math.round(performance.now() - started) };
       } finally {
+        peakSeen = Math.max(peakSeen, overlapPeak);
         inFlight -= 1;
+        if (inFlight === 0) overlapPeak = 0;
         runBridge.setCallListener(null);
         emitProgress.flush();
         signal?.removeEventListener("abort", abortRun);
@@ -264,21 +298,20 @@ export function registerCodeMode(pi) {
       }
 
       if (budget) budget.logLines += outcome.logs?.length ?? 0;
-      // inFlight has dropped by now, so a non-zero value means a sibling is still
-      // running: report the overlap from either side so the hint does not depend on
-      // which invocation happened to start first.
-      outcome.overlappedTurn = overlappedTurn || (inFlight > 0 ? inFlight + 1 : 0);
+      outcome.overlappedTurn = peakSeen > 1 ? peakSeen : 0;
       outcome.mutations = runBridge.getMutations();
       const trace = runBridge.getTrace();
-      const format = outcome.ok ? successText : errorText;
-      let text = format(outcome, call);
 
-      if (text.length > config.maxReturnChars) {
-        outcome.returnTruncated = true;
-        text = format(outcome, call);
+      if (outcome.ok && outcome.result === undefined) {
+        const receipts = mutationReceipts(trace);
+
+        if (receipts) {
+          outcome.resultText = receipts;
+          outcome.undefinedReturn = false;
+        }
       }
-
-      const bounded = truncateChars(text, config.maxReturnChars, "output").text;
+      const format = outcome.ok ? successText : errorText;
+      const bounded = fitOutput(outcome, call, config.maxReturnChars, format);
       const visible = runBridge.ledger.dedupe(bounded, call);
 
       const response = result(visible, {
@@ -300,10 +333,13 @@ export function registerCodeMode(pi) {
   });
 
   // This is a pre-conversion observation, not a final-payload retention proof.
-  // With the shipping seenWindow:0 default, observe is a no-op.
-  pi.on("context", event => {
-    try { bridge.ledger.observe(event?.messages); } catch {}
-  });
+  // Shipping seenWindow:0 must not subscribe: a no-op listener still runs on every
+  // provider context event. Opt-in windows register here.
+  if ((config.seenWindow ?? 0) > 0) {
+    pi.on("context", event => {
+      try { bridge.ledger.observe(event?.messages); } catch {}
+    });
+  }
 
   pi.on("session_shutdown", () => { stopped = true; cancelWarmTimer();
 

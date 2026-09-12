@@ -6,7 +6,7 @@ import { runGuestProgram } from "../../src/runtime/runtime.js";
 import { engineFixture, limits } from "../helpers/engine.mjs";
 
 it("the guest exposes exactly four command bindings, without legacy helpers or dispatch escape hatches", async () => {
-  const names = ["read", "edit", "write", "bash", "nova", "exec", "patch", "snap", "surface", "evidence", "speculate", "parallel", "pipeline"];
+  const names = ["read", "edit", "write", "bash", "nova", "exec", "patch", "snap", "surface", "evidence", "speculate", "parallel", "pipeline", "search", "describe", "call", "callMany"];
   const code = `return {${names.map(name => `${name}: typeof ${name}`).join(",")}};`;
   const result = await runGuestProgram({ code, nova: {}, config: limits });
   assert.equal(result.ok, true, result.error);
@@ -18,8 +18,7 @@ it("read accepts familiar object arguments inside CodeMode and honors the reques
   await fixture.write("lines.txt", "one\ntwo\nthree\nfour\n");
   const result = await fixture.execute('return await read({path: "lines.txt", offset: 2, limit: 2});');
   assert.equal(result.details.ok, true, result.details.error);
-  assert.match(result.details.result, /two\nthree/);
-  assert.doesNotMatch(result.details.result, /one|four/);
+  assert.equal(result.details.result, "two\nthree");
 });
 
 it("one edit command applies a related edit set and returns only after all replacements are visible", async t => {

@@ -1,6 +1,6 @@
 import { parentPort } from "node:worker_threads";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { isString, isObject, isFunction, toPlain } from "../shared/decode.js";
+import { isString, isObject, isFunction, isNumber, toPlain, looksLikePath } from "../shared/decode.js";
 import { truncateChars } from "../output/format.js";
 import { sessionJsonArgs, validateJsonRead } from "../fs/json-read.js";
 
@@ -94,7 +94,11 @@ function leanEnvelope(res) {
   return res;
 }
 
-function buildGuestApi(available, batchRead, runId, nativeArgv) {
+function quoteShellArg(value) {
+  return "'" + String(value).replaceAll("'", "'\\''") + "'";
+}
+
+function buildGuestApi(available, batchRead, runId, _nativeArgv) {
   const rpc = (method, args) => callRpc(runId, method, args);
   const availableSet = new Set(available);
   const checkpointScope = new AsyncLocalStorage();
@@ -107,8 +111,6 @@ function buildGuestApi(available, batchRead, runId, nativeArgv) {
   };
 
   const nova = {
-    search: (query, limit) => rpc("search", [query, limit]),
-    describe: (name) => rpc("describe", [name]),
     call: async (name, args) => leanEnvelope(await rpc("call", [name, args])),
     async callMany(calls) {
       const wave = await rpc("callMany", [calls]);
@@ -191,6 +193,9 @@ function buildGuestApi(available, batchRead, runId, nativeArgv) {
   const read = async (p, a, b) => {
     assertScope();
     const args = sessionJsonArgs(readArgs(p, a, b));
+    if (isString(args.path) && args.resolve === undefined && args.json === undefined && !looksLikePath(args.path) && !/^(?:agent|artifact):\/\//i.test(args.path)) {
+      args.resolve = true;
+    }
     validateJsonRead(args);
     const decode = value => args.resolve || args.json !== undefined ? JSON.parse(value) : value;
 
@@ -241,9 +246,30 @@ function buildGuestApi(available, batchRead, runId, nativeArgv) {
 
   const write = async (p, content) => unwrapValue(await invoke("write", isObject(p) ? p : { path: p, content }));
 
+  const viewSpan = (value) => {
+    const start = isNumber(value.start) ? value.start : Array.isArray(value.lines) ? value.lines[0] : value.line;
+    const end = isNumber(value.end) ? value.end : Array.isArray(value.lines) && value.lines.length > 1 ? value.lines[1] : start;
+
+    if (!isNumber(start) || !isNumber(end) || start < 1 || end < start) return null;
+
+    return { start: Math.floor(start), end: Math.floor(end) };
+  };
+
+  const isView = (value) => isObject(value) && !Array.isArray(value) && isString(value.path) && value.path.trim() && isString(value.text) && (value.status === undefined || value.status === "found") && viewSpan(value);
+
   const edit = async (p, oldText, newText) => {
     if (isFunction(p)) return nova.speculate(p);
     const usage = 'invalid edit signature; use edit(path,oldText,newText), edit({path,edits:[{oldText,newText}]}), or edit({path,patch:"@@ -1 +1 @@\n-old\n+new\n"})';
+
+    if (isView(p) && isString(oldText) && (newText === undefined || isString(newText))) {
+      if (isNumber(p.nextOffset)) throw new Error("edit view is incomplete");
+      const span = viewSpan(p);
+      const args = { path: p.path, viewStart: span.start, viewEnd: span.end, viewText: p.text, newText: newText === undefined ? oldText : newText };
+
+      if (newText !== undefined) args.oldText = oldText;
+
+      return unwrapValue(await invoke("edit", args));
+    }
 
     if (isObject(p) && (Array.isArray(p) || oldText !== undefined || newText !== undefined)) throw new Error(usage);
 
@@ -268,19 +294,21 @@ function buildGuestApi(available, batchRead, runId, nativeArgv) {
     return unwrapValue(await invoke(args.patch === undefined ? "edit" : "apply_patch", args));
   };
 
-  const patch = async (p, diff) => unwrapValue(await nova.call("apply_patch", { path: p, patch: diff }));
-
   const bash = async (command, opts) => {
     const args = isObject(command) ? { ...command } : { command, ...opts };
 
     if (args.args !== undefined) {
-      if (!isString(args.command) || !Array.isArray(args.args) || args.args.some(arg => !isString(arg))) throw new Error("bash argv requires a command string and an array of string args");
+      if (!isString(args.command) || !Array.isArray(args.args)) throw new Error("bash argv requires a command string and an array of string args");
 
-      if (nativeArgv) args._directArgv = true;
-      else {
+      for (let i = 0; i < args.args.length; i++) if (!isString(args.args[i])) throw new Error("bash argv requires a command string and an array of string args");
+
+      // Literal argv is a Supernova-owned contract. Host bash tools often ignore
+      // `args` and would run only `command` (bare `ssh`). Windows still needs a shell.
+      if (process.platform === "win32") {
         delete args._directArgv;
         args.command = [args.command, ...args.args].map(quoteShellArg).join(" ");
-      }
+        delete args.args;
+      } else args._directArgv = true;
     }
 
     command = args.command;
@@ -307,20 +335,7 @@ function buildGuestApi(available, batchRead, runId, nativeArgv) {
     return text;
   };
 
-  const quoteShellArg = (value) => "'" + String(value).replaceAll("'", "'\\''") + "'";
-
-  const exec = async (cmd, args, opts) => {
-    const command = String(cmd ?? "").trim();
-
-    if (!command) throw new Error("exec requires command");
-
-    // exec("git status") is a shell line; exec("git", ["status"]) is argv.
-    if (!Array.isArray(args) || args.length === 0) return bash(command, opts);
-
-    return bash([command, ...args].map(quoteShellArg).join(" "), opts);
-  };
-
-  return { nova, read, write, edit, patch, surface: nova.surface, snap: nova.snap, evidence: nova.evidence, bash, exec, speculate: nova.speculate };
+  return { read, write, edit, bash };
 }
 
 function makeConsole(runId, limits) {

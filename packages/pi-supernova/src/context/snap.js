@@ -3,6 +3,8 @@ import { isString } from "../shared/decode.js";
 import { truncateChars } from "../output/format.js";
 import * as fs from "node:fs/promises";
 import { extractStructuralSurface } from "./surface.js";
+import { WorkspaceIndex } from "./repo-index.js";
+import { pickSpan, spanCandidate, spanWindow } from "./spans.js";
 import { rankPaths } from "./fuzzy.js";
 import { isTestPath, runCommand, relativeSlash } from "../fs/workspace.js";
 
@@ -86,7 +88,7 @@ function makeCandidate(filePath, dir, query, tokens, flags) {
   return { path: filePath, pathScore: scorePathTopology(relative, tokens, flags), exactPath,
     pathCoverage: tokens.filter(token => lower.includes(token)).length,
     matched: new Set(), exactDefinition: false, definitionCoverage: 0, lineCoverage: 0,
-    line: 1, signature: "", context: new Map(), recent: [], anchorScore: -1 };
+    line: 1, signature: "", context: new Map(), recent: [], anchorScore: -1, exactLines: new Set() };
 }
 
 function inspectLine(candidate, lineNumber, raw, query, tokens, isMatch) {
@@ -114,6 +116,8 @@ function inspectLine(candidate, lineNumber, raw, query, tokens, isMatch) {
     }
 
     const score = (exact ? 10000 : 0) + definitionCoverage * 40 + matches.length;
+
+    if (exact) candidate.exactLines.add(lineNumber);
 
     if (score > candidate.anchorScore) {
       candidate.anchorScore = score;
@@ -220,6 +224,31 @@ function location(candidate, root) {
     context: [...context].sort((a, b) => a[0] - b[0]).map(([line, text]) => (line === candidate.line ? "►" : " ") + line + " " + text) };
 }
 
+async function spanCandidates(filePath, lines, root, overlayText) {
+  const staged = overlayText(filePath);
+  const text = staged !== undefined ? staged : await fs.readFile(filePath, "utf8");
+  const spans = WorkspaceIndex.spansOf(WorkspaceIndex.fromText(filePath, text));
+  const rel = path.relative(root, filePath);
+
+  return lines.map(line => {
+    const span = pickSpan(spans, { line }) ?? { start: line, end: line };
+
+    return spanCandidate(rel, line, spanWindow(text, span.start, span.end));
+  });
+}
+
+async function rankedSpanCandidates(ranked, root, overlayText) {
+  const out = [];
+
+  for (const candidate of ranked) {
+    const lines = candidate.exactLines?.size ? [...candidate.exactLines].sort((a, b) => a - b) : [candidate.line];
+    out.push(...await spanCandidates(candidate.path, lines, root, overlayText));
+    if (out.length >= MAX_ALTERNATIVES) break;
+  }
+
+  return out.slice(0, MAX_ALTERNATIVES);
+}
+
 export async function executeSnap({ query, searchDir, root, includeHidden = false, run = runCommand, overlayText = () => undefined, pendingPaths = [], pathContext = {}, signal }) {
   const flags = tokenizeQuery(query);
   const tokens = [...new Set(flags.tokens.map(stem))];
@@ -306,7 +335,14 @@ export async function executeSnap({ query, searchDir, root, includeHidden = fals
   const coverage = Math.max(best.matched.size, best.pathCoverage) / tokens.length;
   const uniqueExact = best.exactDefinition && !second?.exactDefinition || best.exactPath && !second?.exactPath && !second?.exactDefinition;
 
-  if (!uniqueExact && (coverage < 0.6 || margin < 0.15 || best.definitionCoverage / tokens.length < 0.5)) return { ...empty, status: "ambiguous", candidates };
+  if (!uniqueExact && (coverage < 0.6 || margin < 0.15 || best.definitionCoverage / tokens.length < 0.5)) {
+    return { ...empty, status: "ambiguous", candidates: await rankedSpanCandidates(ranked, relativeRoot, overlayText) };
+  }
+
+  if (best.exactLines.size > 1) {
+    return { ...empty, status: "ambiguous", candidates: await rankedSpanCandidates([best], relativeRoot, overlayText) };
+  }
+
   const confidence = uniqueExact ? 0.95 : Math.min(0.85, 0.5 + coverage * 0.2 + margin * 0.15);
 
   return { ...candidates[0], status: "found", confidence: Number(confidence.toFixed(2)) };

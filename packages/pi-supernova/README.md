@@ -50,12 +50,13 @@ settings. The runtime does not silently rewrite your tool policy.
 | `read` | `read(path, offset?, limit?)`, `read({path,offset,limit})`; one-based line windows |
 | `read` | `return await read("plot.png")`; displays images directly, without a browser |
 | `read` | `read({path,json:".verdict"})`; parse full JSON before bounded field selection |
-| `read` | `read(directory)`, `read("symbol or question")`, `read(path,{about:question})`; questions locate and open source directly |
-| `read` | `read({query,resolve:true})`; structured source and status for a resolve-to-edit handoff |
+| `read` | `read(directory)`, `read("symbol or question")`, `read(path,{about:question})`; a path is raw text, a symbol is a view |
+| `read` | `read({query,resolve:true})`; same view as `read("symbol")`: status, path, line, lines, text, complete |
 | `read` | `read({query,evidence:true})`; ranked evidence with provenance; optional `path` scopes discovery |
 | `read` | `read({path,outline:true})`; structural declarations |
 | `read` | `read([path1,path2])`; up to 64 paths, ordered values with labelled individual failures |
-| `edit` | `edit(path,oldText,newText)`, `edit({path,edits:[{oldText,newText}]})`; related edits validated against one original file |
+| `edit` | `edit(path,oldText,newText)`, `edit({path,edits:[{oldText,newText}]})`; unique in the file |
+| `edit` | `edit(view,text)` CAS-replaces that span; `edit(view,old,new)` is unique inside it |
 | `edit` | `edit({path,patch})`; unified patch application |
 | `edit` | `edit(async () => {...})`; filesystem-only checkpoint, described below |
 | `write` | `write(path,text)`, `write({path,content})`; atomic replacement |
@@ -70,27 +71,26 @@ payloads are not repeated in owned direct-execution errors;
 stdout/stderr, exit status and source context remain. Session environment variables are taken
 from the current execution context, not inherited from a different parent session.
 
-Source questions resolve and open the selected file in one command. An exact
+Source questions locate a declaration in one command. An exact
 declaration match uses one bounded direct ripgrep search, without a prerequisite
 file listing, persistent index, embeddings or summarization. A transient filename
 listing is a fallback for unmatched content or unresolved bare filenames. Natural-language
 questions reuse lexical stemming. Ripgrep must be available on PATH.
 
-Successful question reads return raw source with a path/range header, not the old
-JSON location preview. Use the structured form when code needs the path:
+`read(path)` stays raw text. `read("symbol")` is the same view as
+`read({query, resolve:true})` — not the file, not a path/range header:
 
 ```javascript
-const source = await read({query: "validateRefreshToken", resolve: true});
-if (source.status !== "found") return source;
-return await edit(source.path, "token.length > 3", "token.length > 5");
+const v = await read("validateRefreshToken");
+if (v.status !== "found") return v;
+await edit(v, v.text.replace("token.length > 3", "token.length > 5"));
 ```
 
-The structured result contains `status`, `path`, the matching `line`, delivered
-`lines`, unchanged `text`, `complete`, and `nextOffset` when more source follows.
-Files that fit the output budget are returned in full. Oversized files open near
-the matching line and give a continuation; they are not summarized. Uncertain
+The view contains `status`, `path`, the matching `line`, span `lines`, unchanged
+`text`, `complete`, and `nextOffset` when a budget clip continues. A declaration
+snap is that span (`complete` is false unless the span is the whole file). Uncertain
 results report `ambiguous`, `not_found` or `incomplete` with no selected path.
-Use `{path: directory, about: question, resolve: true}` to narrow the scope.
+Use `{path: directory, about: question}` to narrow the scope.
 
 Ordinary reads stay self-contained. Outlines and graph evidence remain explicit
 options, not mandatory stages of source resolution. Ordinary calls also get:

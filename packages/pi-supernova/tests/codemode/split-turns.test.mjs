@@ -15,15 +15,23 @@ it("overlapping invocations disclose the split from both sides", async t => {
   const f = await engineFixture(t);
   await f.write("a.txt", "alpha\n");
   await f.write("b.txt", "bravo\n");
-  const results = await Promise.all([f.execute('return await read("a.txt");'), f.execute('return await read("b.txt");')]);
+  // Start-order capture misses the first call when it finishes last; finish-order
+  // capture misses it too once the sibling has already decremented. The slower
+  // first program is that case on every trial.
+  const slow = 'await new Promise(r => setTimeout(r, 120)); return await read("a.txt");';
+  const fast = 'await new Promise(r => setTimeout(r, 30)); return await read("b.txt");';
 
-  for (const [i, result] of results.entries()) {
-    assert.match(modelText(result), SPLIT_HINT, `overlapping result ${i} must disclose the split`);
-    assert.match(modelText(result), /2 supernova calls ran at once/, `overlapping result ${i} must report the concurrency`);
+  for (let n = 0; n < 8; n++) {
+    const results = await Promise.all([f.execute(slow), f.execute(fast)]);
+
+    for (const [i, result] of results.entries()) {
+      assert.match(modelText(result), SPLIT_HINT, `trial ${n} result ${i} must disclose the split`);
+      assert.match(modelText(result), /2 supernova calls ran at once/, `trial ${n} result ${i} must report the concurrency`);
+    }
+
+    assert.match(modelText(results[0]), /alpha/);
+    assert.match(modelText(results[1]), /bravo/);
   }
-
-  assert.match(modelText(results[0]), /alpha/);
-  assert.match(modelText(results[1]), /bravo/);
 });
 
 it("sequential invocations are never accused of splitting", async t => {

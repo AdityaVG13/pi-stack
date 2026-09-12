@@ -11,6 +11,9 @@ let commitTail = Promise.resolve();
 export class CausalVfs {
   constructor(onNewFile, validateWrite) {
     this.validateWrite = validateWrite;
+    // Last-seen original bytes for write CAS, not a read cache. read() always
+    // hits disk unless an overlay is staged. Serving cache on read would be a
+    // false-valid against editors/git between two reads.
     this.cache = new Map();
     this.overlays = [];
     this.expected = new Map();

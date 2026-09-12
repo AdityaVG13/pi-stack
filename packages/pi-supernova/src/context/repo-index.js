@@ -96,6 +96,42 @@ export function globToRegExp(glob) {
   return new RegExp(glob.includes("/") ? "^" + body + "$" : "(?:^|/)" + body + "$");
 }
 
+function declarationEnd(raw, lower, start, lineCount, ext) {
+  if (ext === ".py") {
+    const indentOf = (i) => raw[i].length - raw[i].trimStart().length;
+    const base = indentOf(start - 1);
+    let end = start;
+
+    for (let i = start; i < lineCount; i++) {
+      if (lower[i] === "") { end = i + 1; continue; }
+      if (indentOf(i) <= base) break;
+      end = i + 1;
+    }
+
+    return Math.min(end, lineCount);
+  }
+
+  let depth = 0;
+
+  for (const ch of raw[start - 1] ?? "") {
+    if (ch === "{") depth++;
+    else if (ch === "}") depth--;
+  }
+
+  if (depth <= 0) return start;
+
+  for (let i = start; i < raw.length; i++) {
+    for (const ch of raw[i]) {
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+    }
+
+    if (depth <= 0) return i + 1;
+  }
+
+  return lineCount;
+}
+
 export class WorkspaceIndex {
   constructor(runCommand) {
     this.runCommand = runCommand;
@@ -274,18 +310,18 @@ export class WorkspaceIndex {
   }
 
   /**
-   * Declaration spans [start, end] (1-based, inclusive) in file order, trailing blank lines trimmed.
-   * A span runs to the line before the next declaration; the file's leading header is not a span.
+   * Declaration spans [start, end] (1-based, inclusive). Nested bodies stay inside the parent
+   * (brace-matched for JS-like, indent for Python). The file's leading header is not a span.
    */
   static spansOf(entry) {
     if (entry.spans) return entry.spans;
     const { items, lineCount } = WorkspaceIndex.surfaceOf(entry);
-    const { lower } = WorkspaceIndex.linesOf(entry);
+    const { lower, raw } = WorkspaceIndex.linesOf(entry);
     const spans = [];
 
     for (let i = 0; i < items.length; i++) {
       const start = items[i].line;
-      let end = Math.min(i + 1 < items.length ? items[i + 1].line - 1 : lineCount, lineCount);
+      let end = declarationEnd(raw, lower, start, lineCount, entry.ext);
 
       while (end > start && lower[end - 1] === "") end--;
       spans.push({ start, end, name: items[i].name, kind: items[i].kind, isExport: items[i].isExport === true });
