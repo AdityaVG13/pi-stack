@@ -1,7 +1,7 @@
 {
   "name": "pi-supernova",
-  "version": "0.5.0",
-  "description": "One CodeMode invocation for Pi and OMP, with four guest commands, automatic read batching and source context.",
+  "version": "0.6.0",
+  "description": "CodeMode for Pi and OMP: read, edit, write and bash, with transactional files, source views and shared-input program batches.",
   "type": "module",
   "author": "AdityaVG13",
   "license": "MIT",

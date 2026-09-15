@@ -12,6 +12,20 @@ Ordinary JavaScript control flow remains available; the guest command bindings
 are only `read`, `edit`, `write`, and `bash`. Supernova supplies retrieval,
 transactional file operations, batching, bounded results and the grouped nova UI.
 
+## What is new in 0.6.0
+
+- **Shared batch input:** supply top-level `data` once; each program gets an
+  independent copy unless it supplies its own replacement data.
+- **Conflict protection:** byte snapshots survive partial reads and body-cache
+  eviction; receipt generation cannot silently rebase a pending write.
+- **Read fidelity:** staged declarations remain discoverable in large/new files,
+  line windows preserve source endings, and `complete` always means the whole file.
+- **Explicit failures:** incompatible read modes, budget-limited matches, captured
+  overrides and conflicting new-file aliases no longer silently change outcomes.
+
+See the [changelog](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/CHANGELOG.md)
+and [token measurements](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/TOKEN_COSTS.md).
+
 ## Install and update
 
 Install the published package in your host:
@@ -29,9 +43,19 @@ pi install /path/to/pi-stack/packages/pi-supernova
 
 Git pushes do not update npm installations. Publish the new npm version first;
 then reinstall it in the host. Reinstall explicitly when an existing version
-range excludes the new minor version (for example, `^0.2.0` excludes `0.3.0`).
+range excludes the new minor version (`^0.5.0` excludes `0.6.0`). After 0.6.0 is
+published, pin that release with:
 
-Both package manifests use `index.js`. The old `src/bridge/pi-extension.ts` path
+```bash
+pi install npm:pi-supernova@0.6.0
+omp install npm:pi-supernova@0.6.0
+```
+
+In Pi, `pi list` shows the configured package sources. A local path uses that
+checkout directly; an npm source uses the installed npm copy. Do not assume that
+pushing a checkout or running `/reload` updates the copy executing in your host.
+
+Both host manifests use `index.js`. The old `src/bridge/pi-extension.ts` path
 remains a compatibility entrypoint but no longer imports Pi tool factories.
 After updating JavaScript sources, fully exit Pi and resume in a new process.
 Pi 0.85.1 can retain native ESM modules across `/reload`, even after its extension
@@ -54,7 +78,7 @@ settings. The runtime does not silently rewrite your tool policy.
 | `read` | `read({query,resolve:true})`; same view as `read("symbol")`: status, path, line, lines, text, complete |
 | `read` | `read({query,evidence:true})`; ranked evidence with provenance; optional `path` scopes discovery |
 | `read` | `read({path,outline:true})`; structural declarations |
-| `read` | `read([path1,path2])`; up to 64 paths, ordered values with labelled individual failures |
+| `read` | `read([path1,path2])`; up to 64 paths, ordered values; rejects if any path fails |
 | `edit` | `edit(path,oldText,newText)`, `edit({path,edits:[{oldText,newText}]})`; unique in the file |
 | `edit` | `edit(view,text)` CAS-replaces that span; `edit(view,old,new)` is unique inside it |
 | `edit` | `edit({path,patch})`; unified patch application |
@@ -75,7 +99,8 @@ Source questions locate a declaration in one command. An exact
 declaration match uses one bounded direct ripgrep search, without a prerequisite
 file listing, persistent index, embeddings or summarization. A transient filename
 listing is a fallback for unmatched content or unresolved bare filenames. Natural-language
-questions reuse lexical stemming. Ripgrep must be available on PATH.
+questions reuse lexical stemming. Source questions and focused `about` reads
+accept at most 16 keywords. Ripgrep must be available on PATH.
 
 `read(path)` stays raw text. `read("symbol")` is the same view as
 `read({query, resolve:true})` — not the file, not a path/range header:
@@ -90,7 +115,13 @@ The view contains `status`, `path`, the matching `line`, span `lines`, unchanged
 `text`, `complete`, and `nextOffset` when a budget clip continues. A declaration
 snap is that span (`complete` is false unless the span is the whole file). Uncertain
 results report `ambiguous`, `not_found` or `incomplete` with no selected path.
-Use `{path: directory, about: question}` to narrow the scope.
+Use `{path: directory, about: question}` to narrow the scope. Scoping a query
+does not relabel a selected span as a complete file. Newly staged files and large
+staged source participate in discovery before commit. Raw offset/limit windows
+preserve LF/CRLF endings and the final newline; focused views add line labels.
+A matching window too large for the output budget is reported as budget-limited,
+not as an absent match. Do not combine incompatible modes such as `outline:true`
+and `evidence:true`.
 
 Ordinary reads stay self-contained. Outlines and graph evidence remain explicit
 options, not mandatory stages of source resolution. Ordinary calls also get:
@@ -122,6 +153,14 @@ For intentionally writing literal marker documentation only, opt in with
 `write({path,content,allowReadArtifacts:true})`. This is a data-loss guard, not
 full dataflow tracking or a security sandbox.
 
+Read/modify/write conflict checks retain a signature of the actual disk bytes,
+including for partial and large-file reads. A fresh explicit text read refreshes
+that observation; internal receipt reads and body-cache eviction do not. Commits
+reject changed content and conflicting symlink aliases, including new file paths.
+These checks do not provide a cross-process lock or make shell/import mutations
+transactional. Extensionless filenames also support `complete:true`, for example
+`read({path:"LICENSE",complete:true})`.
+
 Explicit read arrays reject missing/failed paths. For typed partial outcomes use
 `Promise.allSettled(paths.map(path => read(path)))`. Successful arrays remain arrays.
 For literal file content or scripts, prefer the optional tool-level `data` parameter:
@@ -136,8 +175,9 @@ For literal file content or scripts, prefer the optional tool-level `data` param
 }
 ```
 
-`data` crosses the worker boundary as JSON, never as JavaScript source. Its
-JSON-encoded length is capped separately at `maxCodeChars`; split larger inputs.
+`data` crosses the worker boundary as JSON, never as JavaScript source. For a
+single program its JSON-encoded length is capped separately at `maxCodeChars`;
+batches use the combined admission budget described below. Split larger inputs.
 The binding exists only when supplied, so older programs declaring their own `data`
 remain valid. Syntax errors run no commands and give quoting guidance. For inline
 source, use `String.raw` (escaping backtick delimiters) or JSON-quoted strings.
@@ -179,7 +219,7 @@ no truncated prefix is executed. Review untrusted source before running it.
 Use ordinary `edit` to revise saved programs. This is explicit source reuse, not
 conversation compression: prior calls and read results remain intact. Creation
 costs an additional call unless combined with other work, so prefer inline code
-for short one-off operations. See [token measurements](docs/TOKEN_COSTS.md).
+for short one-off operations. See [token measurements](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/TOKEN_COSTS.md).
 
 ### Batch already-known continuations
 
@@ -199,10 +239,26 @@ code OR file and optional data. Top-level data supplies an optional default for
 each entry; explicit entry data replaces it entirely, including null, false, 0
 and empty strings. Every guest receives its own copy, not a shared mutable heap.
 The JSON-encoded array (or `{programs,data}` when defaults are supplied) must fit
-maxCodeChars. Common input counts once; results remain complete and unchanged.
+maxCodeChars. Common input counts once; result representations and output limits are unchanged.
 Entries run sequentially in fresh guests and commit separately. A successful
 entry can create the file executed by a later entry. No implicit retries,
 reordering, shared heap or nested batches are introduced.
+
+For independent audits that use the same inputs, send them once:
+
+```json
+{
+  "data": {"paths": ["src/a.js", "src/b.js"]},
+  "programs": [
+    {"code": "return await read(data.paths);"},
+    {"code": "return await Promise.all(data.paths.map(path => read({path, outline:true})));"}
+  ]
+}
+```
+
+This avoids repeating literal arguments, without a compression codec or result elision.
+Mutating `data` in one guest cannot affect the next. An entry with `data:null`
+receives null, not the shared object; there is no implicit object merge.
 
 The batch stops on the first failed entry, cancellation/deadline, or exhausted
 output/log/image budget. Earlier successful commits remain; only the active
@@ -270,6 +326,8 @@ plain .json reads also fail with a projection hint. Explicit offset/limit or
 resolve:true still allow raw inspection, but line windows are not JSON documents.
 Do not combine json with complete, line windows, or source views. External read
 overrides reject JSON projection rather than silently ignoring the option.
+Other read options, even false-valued flags, do not bypass a captured external
+read executor; its policy, transforms and failures remain authoritative.
 
 For large Markdown/log path audits, use read(path,{about:"document path"}) or
 explicit offset/limit, not complete:true. Larger JSON needs a streaming parser via
@@ -428,7 +486,7 @@ not hard real-time guarantees.
 It excludes model latency, provider tokens and prewarm time; it is not a universal
 comparison against every CodeMode implementation.
 
-See [the changelog](docs/CHANGELOG.md) for changes and compatibility notes.
+See [the changelog](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/CHANGELOG.md) for changes and compatibility notes.
 
 ## Research and prior art
 

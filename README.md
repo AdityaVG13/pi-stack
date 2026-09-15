@@ -8,7 +8,7 @@ Pi / OMP packages for [pi.dev](https://pi.dev) and [omp.sh](https://omp.sh). Eac
 | [pi-deferred-context-engine](./packages/pi-deferred-context-engine) | Hides inactive tool/skill noise; promotes matches for one run via `search_tools` | `pi install npm:pi-deferred-context-engine` · `omp install npm:pi-deferred-context-engine` |
 | [pi-supernova](./packages/pi-supernova) | One CodeMode invocation with `read`, `edit`, `write`, and `bash` inside; automatic read batching and ordered mutations | `pi install npm:pi-supernova` · `omp install npm:pi-supernova` |
 
-If you use deferred-context-engine, install it **last** so it sees tools other extensions registered. **pi-supernova** exposes one `supernova({code})` tool on Pi and OMP. The four commands live inside CodeMode, not as native-tool replacements. See its README for context, security, and host-verification boundaries.
+If you use deferred-context-engine, install it **last** so it sees tools other extensions registered. **pi-supernova** exposes one `supernova` tool on Pi and OMP: inline `code`, a saved `file`, or sequential `programs`, with optional literal `data`. The four commands live inside CodeMode, not as native-tool replacements. See its README for context, security, and host-verification boundaries.
 
 the UI in the TUI for pi-supernova does NOT look good, i'll try and fix it with Astra
 
@@ -24,7 +24,22 @@ omp install npm:pi-papercuts
 omp install npm:pi-deferred-context-engine
 ```
 
-Needs Pi or OMP and Node 22+. Package details live in each folder's README.
+Needs Pi or OMP and Node 22+. Supernova source lookups also require `rg` on PATH. Package details live in each folder's README.
+
+## Supernova 0.6.0
+
+- Shared batch `data` defaults avoid resending identical input. Each entry gets a
+  fresh guest and its own data copy; explicit entry data replaces the default.
+- Read/modify/write conflict checks retain byte snapshots across partial reads
+  and cache eviction. Staged source discovery and line-window fidelity are fixed.
+- Batches keep separate commits and stop on failure. They do not infer plans,
+  remove model decision points, compress source, or hide attempted results.
+
+See the [API and examples](./packages/pi-supernova/README.md),
+[0.6.0 changes](./packages/pi-supernova/docs/CHANGELOG.md), and
+[workload-specific token measurements](./packages/pi-supernova/docs/TOKEN_COSTS.md).
+Publishing and installing the npm release are separate from pushing this repo.
+After updating, fully restart Pi/OMP; `/reload` can retain older JavaScript modules.
 
 ## Clone install
 
@@ -95,7 +110,7 @@ cd packages/pi-supernova && npm test && npm publish --access public
 
 - Deferred-context-engine defaults pin stock Pi tools (`read`, `bash`, …) and `papercuts` when that package is installed. Empty `replaceAlwaysActive` leaves only `search_tools` active -- read its README before rewriting config.
 - Papercuts only logs when the agent calls it; it does not auto-detect failures. Outside a git repo the log goes to `~/.papercuts/log.jsonl` unless you set `PAPERCUTS_FILE`.
-- Longer caveats: [docs/RESIDUAL-RISKS.md](./docs/RESIDUAL-RISKS.md).
+- Papercuts/DCE release limits: [docs/RESIDUAL-RISKS.md](./docs/RESIDUAL-RISKS.md). Supernova has its own [security and host boundary](./packages/pi-supernova/README.md#security-and-host-boundary).
 
 Pi package shape follows [packages.md](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md) (`pi-package` keyword, `pi.extensions` / `omp.extensions`, host peers as `"*"`).
 

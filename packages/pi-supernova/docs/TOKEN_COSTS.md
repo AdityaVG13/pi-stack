@@ -1,11 +1,12 @@
 # Token usage and benchmarks
 
-Supernova reduces repeated tool traffic through explicit program reuse and batching.
+Supernova reduces repeated tool traffic through explicit program reuse, batching
+and shared batch input defaults.
 It can also reduce escaping in nested multiline results with lossless text framing.
 These mechanisms do not summarize results, rewrite conversation history, or change
 reasoning settings. Savings depend on the workload.
 
-See the [API guide](../README.md) for program-file and batch usage.
+See the [API guide](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/README.md) for program-file and batch usage.
 
 ## Reproduce
 
@@ -69,12 +70,12 @@ text contributes to totals through later history, not as a second charge.
 
 ## Measured results
 
-Observed on macOS with Node v26.7.0.
+Observed for 0.6.0 on 2026-09-15, on an Apple M5 Max running macOS and Node v26.7.0.
 
 | Tokenizer | Non-batched baseline | Batched baseline (d444eb7) | Current | Further reduction | Total reduction |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| o200k_base | 28,130 | 18,535 | 9,537 | **48.55%** | **66.10%** |
-| cl100k_base | 27,841 | 18,310 | 9,420 | **48.55%** | **66.17%** |
+| o200k_base | 28,130 | 18,535 | 9,843 | **46.90%** | **65.01%** |
+| cl100k_base | 27,841 | 18,310 | 9,726 | **46.88%** | **65.07%** |
 
 The gate requires at least 40% reduction on **each tokenizer for the complete
 workload**, not for every scenario individually. Token counts and reductions are
@@ -83,15 +84,12 @@ returned by the runtime. A second gate requires another 19% against the measured
 batched baseline from commit d444eb7. Its six-call argument hash is pinned as well
 as the original workload: removing a decision boundary cannot satisfy this gate.
 
-### What changed after the batched baseline
+### Definition and result accounting
 
-The serialized definition falls from 1,068 to 577 tokens with o200k_base and from
-1,057 to 572 with cl100k_base. Duplicate object-form restatements, parameter
-prose already covered by the command list, and discoverable operational asides
-were removed; command signatures and safety rules (`complete:true`, JSON 16 MiB /
-no jq, array-read rejection, transactions, `programs` batch, edit oldText as an
-exact substring, `edit(view,text)`) remain in the standing reference. No source
-text or independent result is removed or compressed.
+The current serialized definition is 631 tokens with o200k_base and 626 with
+cl100k_base, versus 908 and 901 in the frozen non-batched baseline. It retains
+command signatures, complete-read and JSON limits, array-read failure rules,
+transaction boundaries, batch defaults and edit/view guidance on every request.
 
 For the fixed six-call schedule, the accounting can also be written as:
 
@@ -99,17 +97,9 @@ For the fixed six-call schedule, the accounting can also be written as:
 Total = (N+1)*D + sum((N-i+2)*A_i + (N-i+1)*R_i, i = 1..N)
 ~~~
 
-Seven definition appearances still save 7*491 = 3,437 tokens with o200k_base versus
-d444eb7's 1,068-token definition. Snap-to-span then changed the first repair
-observation from a whole-file view to the `MAX_JSON_BYTES` declaration
-(`lines:[3,3]`, `complete:false`). That smaller result is replayed through later
-requests; no source or independent result is compressed or dropped. Frozen
-programs, arguments and decision boundaries are unchanged. Combined with
-batching, current o200k traffic is 9,558 vs d444eb7's 18,535 (48.43%).
-
-The current definition is now *below* the non-batched baseline (577 vs 908
-o200k_base). Batching still adds result framing. One-off calls should not be
-assumed to benefit from the batch API.
+The definition is counted seven times, including the final handoff. Batch result
+framing and every attempted program's text are counted too. One-off calls should
+not be assumed to benefit from batching.
 
 The report also includes separate source-framing and argument-reuse comparisons.
 Those component measurements are not total-session savings, and the reported
@@ -117,28 +107,70 @@ argument-only break-even excludes other request costs. Text framing is selected
 by character length, not a runtime tokenizer; it need not reduce tokens for every
 input or encoding.
 
+## Shared batch input: a separate 0.6.0 measurement
+
+Eight independent audit programs use the same list of 48 source paths. The before
+arm repeats the literal `data` in every entry; the after arm supplies it once at
+the top level. Both execute the same programs and return the same complete source
+strings and typed results. The before request fits the existing admission cap;
+this is not a comparison against a hypothetical request that could never run.
+
+| Tokenizer | Repeated-input traffic | Shared-input traffic | Reduction | Arguments before / after | Unchanged result tokens |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| o200k_base | 16,309 | 5,499 | **66.28%** | 6,461 / 1,043 | 2,151 |
+| cl100k_base | 14,649 | 5,197 | **64.52%** | 5,684 / 945 | 2,055 |
+
+Each arm has one tool invocation followed by the final answer request:
+
+~~~text
+Total = 2*D + 2*A + R
+~~~
+
+Arguments are charged when generated and when replayed; the complete result is
+charged on handoff. The new standing guidance adds 13 definition tokens per
+request (618 to 631 / 613 to 626), and that cost is included in the after totals.
+There is no source compression, result elision, hidden output or lost decision
+boundary. Programs receive fresh data copies, not a shared mutable heap.
+
+The gate requires at least 70% less argument traffic and 60% less replay-inclusive
+traffic in each encoding, plus equality of the complete normalized output. This
+workload deliberately exercises repeated input; it is not an average task-cost
+estimate. The original 13-program/six-call benchmark remains separate and intact.
+
 ## Benchmark integrity
 
-The [baseline fixture](../tests/efficiency/token-baseline.json) contains the source
+The [baseline fixture](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/tests/efficiency/token-baseline.json) contains the source
 inputs, definition, workload hash, arguments and complete outputs. The
-[runner](../tests/efficiency/workflow.mjs) executes the registered tool with real
+[runner](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/tests/efficiency/workflow.mjs) executes the registered tool with real
 workers and filesystem operations. It checks that:
 
 - The workload hash matches the frozen baseline, and the six-call argument hash
   matches the prior batched execution.
-- Every original argument, complete logical result and expected failure matches.
+- Every original argument and expected failure matches; complete logical results
+  match the explicit current newline contract described below.
 - Batched output contains every original result, with no unaccounted outer text.
 - No result is truncated, and final repaired source and JSON contents match.
 
 Only run IDs, elapsed times and temporary workspace prefixes in write receipts
 are normalized. Batch framing lengths are adjusted to match that normalized text.
 The workload, batch schedule, recorded comparison totals and acceptance thresholds
-are fixed test inputs, not production execution rules. The baseline is not regenerated by the benchmark.
+are fixed test inputs, not production execution rules. The baseline is not regenerated
+by the benchmark and is checked against its SHA-256 before execution.
+
+Contract v2 preserves the terminating newline of one selected source line. The
+runner derives that single expected-output correction from the frozen input, not
+from candidate output. The historical fixture and its traffic counts stay
+untouched; programs, arguments, failures and decision boundaries are unchanged.
+The shared-input comparison separately requires equal complete result text in
+both arms, after only run-metadata normalization.
+
+The README and these docs ship in the npm tarball. Benchmarks and test fixtures
+remain in the GitHub checkout, so their links above use GitHub URLs.
 
 Recorded baseline SHA-256:
 
 ~~~text
-79a819eca82c8a5ff381e96b7669d8a5bf04fabbc8c10cf02f3a7c8817171b62
+96964f990f481ac05afaefdd02001bd15f61835a8381349a61e38c06209d7508
 ~~~
 
 ## Limitations
@@ -150,6 +182,8 @@ Recorded baseline SHA-256:
   reasoning settings does not establish unchanged end-to-end task quality.
 - Batching is appropriate only for already-chosen continuations. Actions requiring
   a new model decision must remain separate calls.
+- The report also has an experimental citation-elision arm. It is disabled by
+  default and is not the source of the non-compressive savings reported here.
 - Existing read, output, log, image and execution limits still apply. The
   benchmark does not obtain savings by lowering them or hiding truncation.
 

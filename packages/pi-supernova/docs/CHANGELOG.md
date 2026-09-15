@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.6.0] - 2026-09-15
+
+### Added
+
+- Shared literal input for `programs`: top-level `data` defaults each entry, while
+  explicit entry data replaces it entirely, including falsy values. Every fresh
+  guest receives its own copy. The combined JSON admission budget counts common
+  input once; deadlines, host-call limits, separate commits and stop reports stay
+  unchanged. No implicit object merge, shared heap or inferred plan is introduced.
+
+### Hardened execution and reads
+
+- Keep byte-accurate conflict snapshots independent of receipt/body caches.
+  Explicit rereads refresh observations; internal diff reads and cache eviction do
+  not rebase pending writes. Partial and focused reads retain full-file signatures,
+  including above 16 MiB, and invalid UTF-8 no longer causes a false conflict.
+- Canonicalize new-file destinations before checking conflicting symlink aliases,
+  while preserving the existing logical paths in workspace-change notifications.
+- Preserve read/mutation/checkpoint ordering across coalesced read waves. Tighten
+  input validation, cancellation handling and bounded output without reusing an
+  executed worker or reducing individual independent-read budgets.
+- Keep captured read overrides authoritative when options are supplied. Align
+  native/guest evidence results and path-array aliases; reject incompatible modes
+  and enforce the same focused-query keyword cap for disk and staged content.
+- Discover newly staged declarations in file-scoped queries and large overlays.
+  Preserve line endings, EOF characters and post-edit line coordinates. Distinguish
+  absent matches from matches that exceed the view budget. `complete` consistently
+  means the whole file; extensionless paths support `complete:true`.
+
+### Documentation and verification
+
+- Document shared-input examples, commit/rollback and override boundaries, and the
+  need for a full host restart after JavaScript updates. `/reload` can retain old
+  native ESM modules; pushing GitHub does not update an npm installation.
+- Restore the historical token fixture and hash-lock it. Version the single
+  terminating-newline expectation separately, without changing historical traffic,
+  programs, decision boundaries or acceptance thresholds.
+- Add failure-first regressions for reviewed and newly found defects. Correct
+  oversized fixtures, non-finite timeout inputs and misleading test descriptions.
+- Measure shared-input audits with identical complete outputs: 16,309 to 5,499
+  tokens (o200k_base) and 14,649 to 5,197 (cl100k_base), including replay, result
+  framing and added standing guidance. These are workload-specific non-compressive
+  savings, not provider-billing or live-model quality claims. See
+  [token measurements](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/TOKEN_COSTS.md)
+  for the unchanged historical gates, accounting and reproduction commands.
+
 ## [0.5.0] - 2026-09-12
 
 - Report overlapping `supernova` calls from every participant in the wave, including the first-started call that finishes last. Start-order or finish-order counters missed that side; a peak concurrent count resets when the wave drains. Sequential calls, `programs` batches, and failed programs still do not leak a split hint. The regression forces the slower first program so the last-finisher case cannot flake under load.
