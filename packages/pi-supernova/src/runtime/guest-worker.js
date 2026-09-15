@@ -110,18 +110,41 @@ function buildGuestApi(available, batchRead, runId, _nativeArgv) {
     if (token ? token !== checkpoint : checkpoint !== null) throw new Error("await the active edit checkpoint before issuing other commands; completed checkpoints cannot issue commands");
   };
 
+  let operationTail = Promise.resolve();
+
+  const enqueueHost = operation => {
+    const next = operationTail.then(operation);
+    operationTail = next.then(() => {}, () => {});
+
+    return next;
+  };
+
   const nova = {
-    call: async (name, args) => leanEnvelope(await rpc("call", [name, args])),
-    async callMany(calls) {
-      const wave = await rpc("callMany", [calls]);
-      const results = Array.isArray(wave?.results) ? wave.results : Array.isArray(wave) ? wave : [];
-      Object.defineProperties(results, {
-        mode: { value: wave?.mode, enumerable: false },
-        reason: { value: wave?.reason, enumerable: false },
-        results: { value: results, enumerable: false },
+    call(name, args) {
+      assertScope(); flushReads();
+      const promise = enqueueHost(() => rpc("call", [name, args]).then(leanEnvelope));
+
+      promise.catch(() => {});
+
+      return promise;
+    },
+    callMany(calls) {
+      assertScope(); flushReads();
+      const promise = enqueueHost(async () => {
+        const wave = await rpc("callMany", [calls]);
+        const results = Array.isArray(wave?.results) ? wave.results : Array.isArray(wave) ? wave : [];
+        Object.defineProperties(results, {
+          mode: { value: wave?.mode, enumerable: false },
+          reason: { value: wave?.reason, enumerable: false },
+          results: { value: results, enumerable: false },
+        });
+
+        return results;
       });
 
-      return results;
+      promise.catch(() => {});
+
+      return promise;
     },
     async speculate(fn) {
       if (checkpoint) throw new Error("edit checkpoints cannot overlap or nest; await the current checkpoint");
@@ -130,30 +153,31 @@ function buildGuestApi(available, batchRead, runId, _nativeArgv) {
       let began = false;
 
       try {
-        flushReads();
-        await rpc("speculateBegin", []);
+        await drainReads();
+        await enqueueHost(() => rpc("speculateBegin", []));
         began = true;
         const value = await checkpointScope.run(token, fn);
-        flushReads();
-        await rpc("speculateCommit", []);
+        await drainReads();
+        await enqueueHost(() => rpc("speculateCommit", []));
 
         return { ok: true, committed: true, value };
       } catch (err) {
-        flushReads();
+        await drainReads();
 
-        if (began) await rpc("speculateRollback", []);
+        if (began) await enqueueHost(() => rpc("speculateRollback", []));
 
         return { ok: false, committed: false, error: err instanceof Error ? err.message : String(err) };
       } finally { checkpoint = null; }
     },
-    surface: async (filePath) => unwrapJsonValue(await rpc("call", ["surface", { path: filePath }])),
-    evidence: async (query, opts) => unwrapJsonValue(await rpc("call", ["evidence", { query, ...opts }])),
-    snap: async (query, targetPath) => unwrapJsonValue(await rpc("call", ["snap", { query, path: targetPath }])),
+    surface(filePath) { assertScope(); flushReads(); const promise = enqueueHost(() => rpc("call", ["surface", { path: filePath }]).then(unwrapJsonValue)); promise.catch(() => {}); return promise; },
+    evidence(query, opts) { assertScope(); flushReads(); const promise = enqueueHost(() => rpc("call", ["evidence", { query, ...opts }]).then(unwrapJsonValue)); promise.catch(() => {}); return promise; },
+    snap(query, targetPath) { assertScope(); flushReads(); const promise = enqueueHost(() => rpc("call", ["snap", { query, path: targetPath }]).then(unwrapJsonValue)); promise.catch(() => {}); return promise; },
     has: (name) => availableSet.has(name),
   };
 
   // Coalesce already-started compatible reads without rewriting JS control flow.
   let queuedReads = [];
+  const pendingReadWaves = new Set();
 
   function flushReads() {
     const pending = queuedReads;
@@ -163,13 +187,13 @@ function buildGuestApi(available, batchRead, runId, _nativeArgv) {
       const wave = pending.slice(start, start + 64);
       const args = { ...wave[0].args, path: wave.map(job => job.args.path), _independent: true };
 
-      const run = wave.length === 1
-        ? nova.call("read", wave[0].args).then(res => ({ values: [unwrapRead(res, wave[0].args)], errors: [] }))
-        : nova.call("read", args).then(res => { unwrapRead(res, args);
+      const run = enqueueHost(() => wave.length === 1
+        ? rpc("call", ["read", wave[0].args]).then(leanEnvelope).then(res => ({ values: [unwrapRead(res, wave[0].args)], errors: [] }))
+        : rpc("call", ["read", args]).then(leanEnvelope).then(res => { unwrapRead(res, args);
 
- return { values: res.items, errors: res.itemErrors ?? [] }; });
+ return { values: res.items, errors: res.itemErrors ?? [] }; }));
 
-      void run.then(({ values, errors }) => {
+      const delivery = run.then(({ values, errors }) => {
         if (!Array.isArray(values) || values.length !== wave.length) throw new Error("invalid batch read response");
 
         for (let i = 0; i < wave.length; i++) {
@@ -179,31 +203,80 @@ function buildGuestApi(available, batchRead, runId, _nativeArgv) {
           else wave[i].resolve(value);
         }
       }).catch(error => { for (const job of wave) job.reject(error); });
+
+      pendingReadWaves.add(delivery);
+      void delivery.finally(() => pendingReadWaves.delete(delivery));
     }
   }
 
-  const invoke = (name, args) => { assertScope(); flushReads();
+  async function drainReads() {
+    for (;;) {
+      flushReads();
+      const waves = [...pendingReadWaves];
 
- return nova.call(name, args); };
+      if (!waves.length) return;
+      await Promise.allSettled(waves);
+    }
+  }
 
-  const readArgs = (p, a, b) => isObject(p) && !Array.isArray(p)
-    ? { ...p, path: p.path ?? p.query }
-    : isObject(a) && !Array.isArray(a) ? { path: p, ...a } : { path: p, offset: a, limit: b };
+  const invoke = (name, args) => {
+    assertScope(); flushReads();
+    const promise = nova.call(name, args);
+
+    promise.catch(() => {});
+
+    return promise;
+  };
+
+  const readArgs = (p, a, b) => {
+    if (isObject(p) && !Array.isArray(p)) {
+      const args = { ...p, path: p.path ?? p.target ?? p.query };
+
+      if (p.path === undefined && p.target !== undefined) delete args.target;
+
+      return args;
+    }
+
+    return isObject(a) && !Array.isArray(a) ? { path: p, ...a } : { path: p, offset: a, limit: b };
+  };
 
   const read = async (p, a, b) => {
     assertScope();
     const args = sessionJsonArgs(readArgs(p, a, b));
-    if (isString(args.path) && args.resolve === undefined && args.json === undefined && !looksLikePath(args.path) && !/^(?:agent|artifact):\/\//i.test(args.path)) {
+    if (isString(args.path) && args.resolve === undefined && args.complete !== true && args.json === undefined && args.about === undefined && args.query === undefined && !looksLikePath(args.path) && !/^(?:agent|artifact):\/\//i.test(args.path)) {
       args.resolve = true;
     }
     validateJsonRead(args);
-    const decode = value => args.resolve || args.json !== undefined ? JSON.parse(value) : value;
 
-    if (args.complete === true && (args.outline || args.evidence || args.about)) throw new Error("complete:true requires a raw file read, not an outline or evidence view");
-    const evidencePath = isObject(p) && !Array.isArray(p) ? p.path : args.about ? p : undefined;
+    for (const [key, value] of [["resolve", args.resolve], ["complete", args.complete], ["outline", args.outline], ["evidence", args.evidence]]) {
+      if (value !== undefined && typeof value !== "boolean") throw new Error("read " + key + " must be a boolean");
+    }
+
+    if (args.about !== undefined && !isString(args.about)) throw new Error("read about must be a string");
+    if (args.query !== undefined && !isString(args.query)) throw new Error("read query must be a string");
+    const focusModes = [args.about !== undefined, args.query !== undefined, args.outline === true].filter(Boolean).length;
+
+    if (focusModes > 1 || (args.outline === true && args.evidence === true)) throw new Error("read accepts only one of about, query, outline, or evidence");
+    if (args.resolve === true && args.complete === true) throw new Error("read accepts either resolve or complete, not both");
+    const decode = value => {
+      if ((!args.resolve && args.json === undefined) || !isString(value)) return value;
+
+      try {
+        return JSON.parse(value);
+      } catch (error) {
+        const selector = args.json === undefined ? "" : " (" + (Array.isArray(args.json) ? args.json.join(", ") : String(args.json)) + ")";
+        throw new Error("JSON read failed for " + String(args.path ?? args.target ?? "resource") + selector + ": " + (error instanceof Error ? error.message : String(error)));
+      }
+    };
+
+    if (args.complete === true && (args.outline || args.evidence || args.about || args.query)) throw new Error("complete:true requires a raw file read, not a source view");
+    const evidencePath = isObject(p) && !Array.isArray(p) ? p.path : (isString(p) && looksLikePath(p) ? p : undefined);
     p = args.path;
 
-    if (args.evidence) return unwrapJsonValue(await invoke("evidence", { ...args, path: evidencePath, query: args.about ?? args.query ?? p }));
+    if (args.evidence) {
+      const query = args.about ?? args.query ?? (isString(p) ? p : undefined);
+      return unwrapJsonValue(await invoke("evidence", { ...args, path: evidencePath, query }));
+    }
 
     if (args.outline) return unwrapJsonValue(await invoke("surface", args));
 
@@ -211,9 +284,24 @@ function buildGuestApi(available, batchRead, runId, _nativeArgv) {
       if (p.length > 64) throw new Error("read accepts at most 64 paths per batch");
 
       for (const item of p) if (!isString(item) || !item.trim()) throw new Error("read paths must be non-empty strings");
-      const readEach = () => Promise.all(p.map(item => read({ ...args, path: item })));
+      const readEach = async () => {
+        const values = await Promise.all(p.map(item => read({ ...args, path: item })));
+        const missing = args.resolve ? values.findIndex((value, index) => value?.status === "not_found" && looksLikePath(p[index])) : -1;
 
-      if (!batchRead || args.resolve || p.some(item => /^(agent|artifact):\/\/.*\?/i.test(item))) return readEach();
+        if (missing >= 0) throw new Error(`read failed for ${p[missing]}: not_found; use Promise.allSettled(paths.map(path => read(path))) for per-path outcomes`);
+
+        return values;
+      };
+
+      const guardedReadEach = () => {
+        const promise = readEach();
+
+        promise.catch(() => {});
+
+        return promise;
+      };
+
+      if (!batchRead || args.resolve || p.some(item => /^(agent|artifact):\/\/.*\?/i.test(item))) return guardedReadEach();
       const res = await invoke("read", args);
       const failed = res?.itemErrors?.findIndex(error => error != null) ?? -1;
 
@@ -223,7 +311,7 @@ function buildGuestApi(available, batchRead, runId, _nativeArgv) {
       if (Array.isArray(res?.items)) return res.items.map(decode);
 
       // Captured host executor without batch support: fan out.
-      return readEach();
+      return guardedReadEach();
     }
 
     if (!batchRead) {
@@ -237,11 +325,15 @@ function buildGuestApi(available, batchRead, runId, _nativeArgv) {
 
     if (queuedReads.length && queuedReads[0].key !== key) flushReads();
 
-    return new Promise((resolve, reject) => {
+    const promise = new Promise((resolve, reject) => {
       queuedReads.push({ args, key, resolve, reject });
 
       if (queuedReads.length === 1) queueMicrotask(flushReads);
     }).then(decode);
+
+    promise.catch(() => {});
+
+    return promise;
   };
 
   const write = async (p, content) => unwrapValue(await invoke("write", isObject(p) ? p : { path: p, content }));
@@ -301,6 +393,7 @@ function buildGuestApi(available, batchRead, runId, _nativeArgv) {
       if (!isString(args.command) || !Array.isArray(args.args)) throw new Error("bash argv requires a command string and an array of string args");
 
       for (let i = 0; i < args.args.length; i++) if (!isString(args.args[i])) throw new Error("bash argv requires a command string and an array of string args");
+      args.args = args.args.map(String);
 
       // Literal argv is a Supernova-owned contract. Host bash tools often ignore
       // `args` and would run only `command` (bare `ssh`). Windows still needs a shell.
@@ -335,7 +428,7 @@ function buildGuestApi(available, batchRead, runId, _nativeArgv) {
     return text;
   };
 
-  return { read, write, edit, bash };
+  return { read, write, edit, bash, nova };
 }
 
 function makeConsole(runId, limits) {
@@ -359,7 +452,10 @@ function makeConsole(runId, limits) {
         if (isString(a)) return a;
 
         try {
-          return JSON.stringify(toPlain(a));
+          const plain = toPlain(a);
+          const encoded = JSON.stringify(plain);
+
+          return encoded === undefined ? String(plain) : encoded;
         } catch {
           return String(a);
         }

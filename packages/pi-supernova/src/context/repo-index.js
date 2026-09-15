@@ -21,6 +21,7 @@ const WATCH_DEBOUNCE_MS = 150;
 const MAX_INDEXED_FILES = 4000;
 
 const MAX_FILE_BYTES = 512 * 1024;
+const MAX_ENTRY_CACHE_BYTES = 64 * 1024 * 1024;
 
 const BINARY_EXT = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".gz", ".tgz", ".tar", ".bz2", ".xz", ".7z",
@@ -34,11 +35,13 @@ const IDENT_TOKEN = /[A-Za-z_$][\w$]*/g;
 
 const EMPTY = Object.freeze([]);
 
-const DEF_PATTERN = /^(?:pub\s+)?(?:export\s+)?(?:async\s+)?(?:default\s+)?(function|class|def|fn|const|let|interface|type|struct|enum)\s+([a-zA-Z0-9_$]+)/;
+const DEF_PATTERN = /^(?:pub\s+)?(?:export\s+)?(?:async\s+)?(?:default\s+)?(?:(function|class|def|fn|const|let|interface|type|struct|enum)\s+([a-zA-Z0-9_$]+)|([A-Z][A-Z0-9_$]*)\s*(?::[^=\n]+)?=)/;
 
-/** Declared identifier on a line (function/class/const/…), or ""; the same rule snap and grep use. */
+/** Declared identifier on a line (function/class/UPPER_CASE constant/…), or ""; the same rule snap and grep use. */
 export function declaredName(line) {
-  return DEF_PATTERN.exec(String(line).trim())?.[2] ?? "";
+  const match = DEF_PATTERN.exec(String(line).trim());
+
+  return match?.[2] ?? match?.[3] ?? "";
 }
 
 function isTextCandidate(filePath) {
@@ -71,7 +74,9 @@ function globGroup(glob, i, open) {
 
   if (end < 0) throw new SyntaxError("unclosed " + open + " in glob");
   const inner = glob.slice(i + 1, end);
-  const source = open === "{" ? "(?:" + inner.split(",").map(globBody).join("|") + ")" : "[" + inner + "]";
+  const source = open === "{"
+    ? "(?:" + inner.split(",").map(globBody).join("|") + ")"
+    : "[" + (inner.startsWith("!") ? "^" + inner.slice(1) : inner) + "]";
 
   return [source, end + 1];
 }
@@ -137,6 +142,7 @@ export class WorkspaceIndex {
     this.runCommand = runCommand;
     this.lists = new Map();
     this.entries = new Map();
+    this.entryBytes = 0;
     this.watchers = new Map();
     this.frecency = new Frecency();
     this.gitModified = new Map(); // root → Set(relative "/"-joined paths)
@@ -145,6 +151,11 @@ export class WorkspaceIndex {
 
   invalidate() {
     this.lists.clear();
+    this.gitModified.clear();
+
+    for (const entry of this.entries.values()) this.entryBytes -= entry.weight ?? 0;
+    this.entries.clear();
+    this.entryBytes = 0;
   }
 
   /** fff frecency: every read/edit is an access; the newest one is the "current file" for distance penalties. */
@@ -166,12 +177,17 @@ export class WorkspaceIndex {
           timer = null;
           this.lists.clear();
           this.gitModified.delete(root);
+          this.entries.clear();
+          this.entryBytes = 0;
         }, WATCH_DEBOUNCE_MS);
+        timer.unref?.();
       });
 
       watcher.on("error", () => {
         this.watchers.set(root, false);
         this.lists.clear();
+        this.entries.clear();
+        this.entryBytes = 0;
       });
 
       if (isFunction(watcher.unref)) watcher.unref();
@@ -196,8 +212,21 @@ export class WorkspaceIndex {
       const res = await this.runCommand(["git", "status", "--porcelain", "-z", "--untracked-files=all"], { cwd: root, timeoutMs: 5_000 });
 
       if (res.exitCode === 0) {
-        for (const row of res.stdout.split("\0")) {
-          if (row.length > 3) set.add(row.slice(3));
+        const rows = res.stdout.split("\0");
+
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i];
+
+          if (row.length <= 3) continue;
+          const status = row.slice(0, 2);
+          const file = row.slice(3);
+
+          if (file) set.add(file);
+          if ((status.includes("R") || status.includes("C")) && i + 1 < rows.length) {
+            const target = rows[++i];
+
+            if (target) set.add(target);
+          }
         }
       }
     } catch {}
@@ -229,7 +258,7 @@ export class WorkspaceIndex {
     const args = ["rg", "--files"];
 
     if (includeHidden) args.push("--hidden");
-    args.push("-g", "!.git/**", "-g", "!**/.git/**", root);
+    args.push("-g", "!.git/**", "-g", "!**/.git/**", "--", root);
     let files = [];
     let error;
     let truncated = false;
@@ -261,26 +290,107 @@ export class WorkspaceIndex {
     try {
       stat = fs.statSync(filePath);
     } catch {
+      const previous = this.entries.get(filePath);
+
+      if (previous) this.entryBytes -= previous.weight ?? 0;
       this.entries.delete(filePath);
 
       return null;
     }
 
-    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return null;
+    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) {
+      const previous = this.entries.get(filePath);
+
+      if (previous) this.entryBytes -= previous.weight ?? 0;
+      this.entries.delete(filePath);
+
+      return null;
+    }
     const cached = this.entries.get(filePath);
 
-    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached;
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      this.entries.delete(filePath);
+      this.entries.set(filePath, cached);
+
+      return cached;
+    }
     let text;
+    let actual = stat;
 
     try {
-      text = fs.readFileSync(filePath, "utf8");
+      const fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+
+      try {
+        actual = fs.fstatSync(fd);
+        if (!actual.isFile() || actual.size > MAX_FILE_BYTES) {
+          const previous = this.entries.get(filePath);
+
+          if (previous) this.entryBytes -= previous.weight ?? 0;
+          this.entries.delete(filePath);
+
+          return null;
+        }
+        const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
+        let offset = 0;
+
+        while (offset < buffer.length) {
+          const read = fs.readSync(fd, buffer, offset, buffer.length - offset, offset);
+
+          if (read <= 0) break;
+          offset += read;
+        }
+
+        if (offset > MAX_FILE_BYTES) {
+          const previous = this.entries.get(filePath);
+
+          if (previous) this.entryBytes -= previous.weight ?? 0;
+          this.entries.delete(filePath);
+
+          return null;
+        }
+        actual = fs.fstatSync(fd);
+        if (!actual.isFile() || actual.size !== offset) {
+          const previous = this.entries.get(filePath);
+
+          if (previous) this.entryBytes -= previous.weight ?? 0;
+          this.entries.delete(filePath);
+
+          return null;
+        }
+        text = buffer.subarray(0, offset).toString("utf8");
+      } finally { fs.closeSync(fd); }
     } catch {
+      const previous = this.entries.get(filePath);
+
+      if (previous) this.entryBytes -= previous.weight ?? 0;
+      this.entries.delete(filePath);
+
       return null;
     }
 
-    if (text.includes("\0")) return null;
-    const created = { text, lower: text.toLowerCase(), mtimeMs: stat.mtimeMs, size: stat.size, ext: path.extname(filePath), surface: undefined, lines: undefined, spans: undefined };
+    if (text.includes("\0")) {
+      const previous = this.entries.get(filePath);
+
+      if (previous) this.entryBytes -= previous.weight ?? 0;
+      this.entries.delete(filePath);
+
+      return null;
+    }
+    const created = { text, lower: text.toLowerCase(), mtimeMs: actual.mtimeMs, size: actual.size, weight: Math.max(1, actual.size) * 2, ext: path.extname(filePath), surface: undefined, lines: undefined, spans: undefined };
+    const previous = this.entries.get(filePath);
+
+    if (previous) this.entryBytes -= previous.weight ?? 0;
+    this.entries.delete(filePath);
     this.entries.set(filePath, created);
+    this.entryBytes += created.weight;
+
+    while (this.entryBytes > MAX_ENTRY_CACHE_BYTES && this.entries.size > 1) {
+      const oldest = this.entries.keys().next().value;
+      const evicted = this.entries.get(oldest);
+
+      this.entries.delete(oldest);
+      this.entryBytes -= evicted?.weight ?? 0;
+    }
 
     return created;
   }
@@ -300,7 +410,8 @@ export class WorkspaceIndex {
     for (let i = 0; i < raw.length; i++) {
       const trimmed = raw[i].trim();
       lower[i] = trimmed.toLowerCase();
-      defNames[i] = DEF_PATTERN.exec(trimmed)?.[2].toLowerCase() ?? "";
+      const declared = DEF_PATTERN.exec(trimmed);
+      defNames[i] = (declared?.[2] ?? declared?.[3] ?? "").toLowerCase();
       idents[i] = trimmed.match(IDENT_TOKEN) || EMPTY;
     }
 
@@ -366,9 +477,33 @@ export class WorkspaceIndex {
 
     for (const filePath of files) {
       const pending = overlayText(filePath);
-      const e = pending === undefined ? this.entry(filePath) : WorkspaceIndex.fromText(filePath, pending);
+      let e = null;
 
-      if (!e || !regex.test(e.text)) continue;
+      if (pending === undefined) e = this.entry(filePath);
+      else if (Buffer.byteLength(pending, "utf8") <= MAX_FILE_BYTES) e = WorkspaceIndex.fromText(filePath, pending);
+      else {
+        const rel = relativeSlash(root, filePath);
+        let start = 0;
+        let line = 0;
+
+        while (start <= pending.length) {
+          const end = pending.indexOf("\n", start);
+          const stop = end === -1 ? pending.length : end;
+          const text = pending.slice(start, stop).replace(/\r$/, "");
+
+          line++;
+          if (regex.test(text)) out.push({ rel, line, text, def: false });
+          if (end === -1) break;
+          start = end + 1;
+        }
+
+        continue;
+      }
+
+      if (!e) continue;
+      const lineAnchored = /\^|\$/.test(regex.source.replace(/\\[\^$]|\[[^\]]*\]/g, ""));
+
+      if (!lineAnchored && !regex.test(e.text)) continue;
       const { raw, defNames } = WorkspaceIndex.linesOf(e);
       const rel = relativeSlash(root, filePath);
 

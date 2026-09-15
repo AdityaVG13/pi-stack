@@ -60,7 +60,7 @@ function skipComment(text, i) {
 
   const end = text.indexOf("*/", i + 2);
 
-  return end < 0 ? text.length : end + 2;
+  return end < 0 ? -1 : end + 2;
 }
 
 function skipRegex(text, i) {
@@ -126,7 +126,13 @@ function consumeLiteral(text, i, stack, prev) {
 
   if (c !== "/") return null;
 
-  if (text[i + 1] === "/" || text[i + 1] === "*") return { end: skipComment(text, i), prev };
+  if (text[i + 1] === "/" || text[i + 1] === "*") {
+    const end = skipComment(text, i);
+
+    if (end < 0) return { error: "unterminated comment", at: i };
+
+    return { end, prev };
+  }
 
   if (prev !== "" && !REGEX_PRECEDERS.has(prev)) return null;
   const end = skipRegex(text, i);
@@ -190,6 +196,8 @@ const CODE_EXT = new Set([".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", 
 
 /** { ok: true } | { ok: false, message }; message names the problem and line. */
 export function quickCheck(text, ext) {
+  ext = String(ext ?? "").toLowerCase();
+
   if (ext === ".json") {
     try {
       JSON.parse(text);

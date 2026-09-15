@@ -15,6 +15,7 @@ const AI_DECAY = Math.LN2 / 3;            // per day
 const AI_MAX_HISTORY_DAYS = 7;
 
 const MAX_TIMESTAMPS_PER_FILE = 128;
+const MAX_FRECENCY_FILES = 10000;
 
 const AI_MODIFICATION_THRESHOLDS = [[16, 30], [8, 300], [4, 900], [2, 3600], [1, 14400]]; // [boost, seconds]
 
@@ -26,7 +27,10 @@ export class Frecency {
   record(filePath, at = Date.now() / 1000) {
     let list = this.access.get(filePath);
 
-    if (!list) this.access.set(filePath, (list = []));
+    if (!list) {
+      if (this.access.size >= MAX_FRECENCY_FILES) this.access.delete(this.access.keys().next().value);
+      this.access.set(filePath, (list = []));
+    }
     list.push(at);
 
     if (list.length > MAX_TIMESTAMPS_PER_FILE) list.splice(0, list.length - MAX_TIMESTAMPS_PER_FILE);
@@ -124,20 +128,35 @@ export function fuzzyMatch(needle, hay, { maxTypos = 0, caseSensitive = false } 
 
   if (direct) return { ...direct, typos: 0, exact: hay.toLowerCase() === needle.toLowerCase() };
 
-  if (maxTypos <= 0 || needle.length < 3) return null;
-  let best = null;
+  if (maxTypos <= 0 || needle.length < 3 || needle.length > 128) return null;
+  const memo = new Map();
 
-  for (let i = 0; i < needle.length; i++) {
-    const shorter = needle.slice(0, i) + needle.slice(i + 1);
-    const m = fuzzyMatch(shorter, hay, { maxTypos: maxTypos - 1, caseSensitive });
+  const visit = (part, typosLeft) => {
+    const key = part + "\0" + typosLeft;
 
-    if (!m) continue;
-    const scored = { ...m, score: m.score - 12, typos: m.typos + 1, exact: false };
+    if (memo.has(key)) return memo.get(key);
+    let best = matchOnce(part, hay, caseSensitive);
 
-    if (!best || scored.score > best.score) best = scored;
-  }
+    if (best) best = { ...best, typos: 0, exact: hay.toLowerCase() === part.toLowerCase() };
 
-  return best;
+    if (typosLeft > 0) {
+      for (let i = 0; i < part.length; i++) {
+        const shorter = part.slice(0, i) + part.slice(i + 1);
+        const m = visit(shorter, typosLeft - 1);
+
+        if (!m) continue;
+        const scored = { ...m, score: m.score - 12, typos: m.typos + 1, exact: false };
+
+        if (!best || scored.score > best.score) best = scored;
+      }
+    }
+
+    memo.set(key, best);
+
+    return best;
+  };
+
+  return visit(needle, maxTypos);
 }
 
 export function smartCase(query) {
@@ -164,7 +183,7 @@ function distancePenalty(currentDir, candidateDir) {
 export function rankPaths(query, paths, ctx = {}) {
   const parts = query.trim().split(/\s+/).filter((p) => p.length >= 2);
 
-  if (parts.length === 0) return [];
+  if (parts.length === 0 || parts.length > 16) return [];
   const caseSensitive = smartCase(query);
   const maxTypos = ctx.maxTypos ?? (parts[0].length >= 6 ? 2 : parts[0].length >= 4 ? 1 : 0);
   const currentDir = ctx.currentFile ? ctx.currentFile.slice(0, ctx.currentFile.lastIndexOf("/") + 1) : "";
@@ -212,7 +231,9 @@ function filenameBonus(base, rel, filenameStart, first, needle) {
 
 /** fff: frecency boost base·f/100 and +15% for git-modified files. */
 function contextBoost(base, rel, ctx) {
-  const frecency = ctx.frecency ? ctx.frecency.score(rel, ctx.mtimeOf?.(rel)) : 0;
+  let frecency = 0;
+
+  try { frecency = ctx.frecency ? ctx.frecency.score(rel, ctx.mtimeOf?.(rel)) : 0; } catch {}
   const gitBoost = ctx.modified?.has(rel) ? Math.floor((base * 15) / 100) : 0;
 
   return Math.floor((base * frecency) / 100) + gitBoost;

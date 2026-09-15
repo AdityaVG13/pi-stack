@@ -70,6 +70,33 @@ it("write, edit, read and bash cwd reject URI paths and never create scheme dire
   assert.deepEqual(await listed(f.root), ["notes.md"]);
 });
 
+it("directory reads return typed entries to programs and text to hosts", async t => {
+  const f = await engineFixture(t);
+  await fs.mkdir(path.join(f.root, "assets", "sub"), { recursive: true });
+  await f.write("assets/a.txt", "x");
+  const result = await f.execute('return await read("assets");');
+  assert.deepEqual([...result.details.result].sort(), ["a.txt (file, 1 bytes)", "sub/ (dir)"]);
+  assert.equal(result.details.ok, true);
+  const resolved = await f.execute('return await read({path:"assets",resolve:true});');
+  assert.deepEqual([...resolved.details.result].sort(), ["a.txt (file, 1 bytes)", "sub/ (dir)"]);
+  const batch = await f.execute('return await read(["assets","assets/a.txt"],{resolve:true});');
+  assert.deepEqual([...batch.details.result[0]].sort(), ["a.txt (file, 1 bytes)", "sub/ (dir)"]);
+  assert.equal(batch.details.result[1].status, "found");
+  assert.equal(batch.details.result[1].text, "x");
+  const mixed = await f.execute('return await read(["assets","assets/a.txt"]);');
+  assert.deepEqual([...mixed.details.result[0]].sort(), ["a.txt (file, 1 bytes)", "sub/ (dir)"]);
+  assert.equal(mixed.details.result[1], "x");
+  const targetBatch = await f.execute('return await read({target:["assets/a.txt"]});');
+  assert.equal(targetBatch.details.result[0], "x");
+});
+
+it("explicit line windows stay bounded when the start line is beyond a read chunk", async t => {
+  const f = await engineFixture(t);
+  await f.write("wide.txt", "x".repeat(100000) + "\r\nTARGET\r\n" + "tail".repeat(10000));
+  const result = await f.execute('return await read({path:"wide.txt", offset:2, limit:1});');
+  assert.equal(result.details.result, "TARGET\r\n");
+});
+
 it("session resource writes stay read-only and do not look like generic URI rejection", async t => {
   const f = await engineFixture(t);
   const text = await rejection(f.execute('await write("agent://ResearchDigest","bad");'));
@@ -93,12 +120,12 @@ it("a missing JSON field isolates siblings, lists exact keys, and does not inven
       : {status:entry.status,error:String(entry.reason?.message ?? entry.reason)});
   `);
   assert.deepEqual(settled.details.result, [
-    { status: "rejected", error: "JSON field not found: \"method\"; available keys: \"pitch\", \"amplitude\"" },
+    { status: "rejected", error: "JSON selection failed for plots.json (.method): JSON field not found: \"method\"; available keys: \"pitch\", \"amplitude\"" },
     { status: "fulfilled", value: "acf" },
-    { status: "rejected", error: "JSON field not found: \"method\"" },
+    { status: "rejected", error: "JSON selection failed for empty.json (.method): JSON field not found: \"method\"" },
   ]);
   const all = await rejection(f.execute('return await Promise.all([read({path:"plots.json",json:".method"}),read({path:"ok.json",json:".method"})]);'));
-  assert.match(all, /JSON field not found: "method"; available keys: "pitch", "amplitude"/);
+  assert.ok(all.includes('JSON selection failed for plots.json (.method): JSON field not found: "method"; available keys: "pitch", "amplitude"'));
   assert.doesNotMatch(all, /"acf"/);
 });
 
@@ -107,7 +134,7 @@ it("a JSON miss after edits rolls the edits back; a settled miss does not", asyn
   await f.write("doc.md", "keep\n");
   await f.write("meta.json", JSON.stringify({ title: "ok" }));
   const thrown = await rejection(f.execute('await edit("doc.md","keep","gone"); return await read({path:"meta.json",json:".schema"});'));
-  assert.match(thrown, /JSON field not found: "schema"; available keys: "title"/);
+  assert.ok(thrown.includes('JSON selection failed for meta.json (.schema): JSON field not found: "schema"; available keys: "title"'));
   assert.equal(await fs.readFile(path.join(f.root, "doc.md"), "utf8"), "keep\n");
   const settled = await f.execute(`
     await edit("doc.md","keep","gone");
@@ -116,7 +143,7 @@ it("a JSON miss after edits rolls the edits back; a settled miss does not", asyn
   `);
   assert.equal(settled.details.ok, true);
   assert.equal(settled.details.result.status, "rejected");
-  assert.equal(settled.details.result.error, "JSON field not found: \"schema\"; available keys: \"title\"");
+  assert.equal(settled.details.result.error, "JSON selection failed for meta.json (.schema): JSON field not found: \"schema\"; available keys: \"title\"");
   assert.equal(await fs.readFile(path.join(f.root, "doc.md"), "utf8"), "gone\n");
 });
 

@@ -54,7 +54,11 @@ export function registerNativeTools(pi, host, config = loadConfig()) {
   };
 
   function settingsFor(ctx) {
-    return host.SettingsManager?.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted?.() === true });
+    try {
+      return host.SettingsManager?.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted?.() === true });
+    } catch {
+      return undefined;
+    }
   }
 
   async function readOne(args, signal, ctx, bridge, id) {
@@ -67,7 +71,7 @@ export function registerNativeTools(pi, host, config = loadConfig()) {
     signal?.throwIfAborted();
     const image = /\.(png|jpe?g|gif|webp|bmp)$/i.test(target);
 
-    if (stat?.isFile() && (args.about === undefined || image)) {
+    if (stat?.isFile() && args.about === undefined && args.query === undefined && args.resolve === undefined && args.outline === undefined && args.evidence === undefined && args.json === undefined && args.complete === undefined) {
       // Pi retains image handling, full text, line windows, truncation metadata,
       // and actionable continuation offsets. Do not summarize or dedupe these.
       return factories.read(ctx.cwd, { autoResizeImages: image ? settingsFor(ctx)?.getImageAutoResize() : undefined }).execute(id, { ...args, path: target }, signal, undefined, ctx);
@@ -77,7 +81,7 @@ export function registerNativeTools(pi, host, config = loadConfig()) {
   }
 
   async function execute(name, id, args, signal, onUpdate, context) {
-    const ctx = { ...context, cwd: context?.cwd || cwd };
+    const ctx = { ...context, cwd: isString(context?.cwd) && context.cwd ? context.cwd : cwd };
     const bridge = base.fork({ getCwd: () => ctx.cwd });
     bridge.bindCallContext(ctx, signal);
     signal?.throwIfAborted();
@@ -166,11 +170,17 @@ export function registerNativeTools(pi, host, config = loadConfig()) {
     };
 
     if (name === "read") {
-      tool.description += " Also reads directories or finds source from a symbol/question passed as path. Use about to focus a file or directory on a question. An array of paths returns all readable files and labels individual errors.";
+      tool.description += " Also reads directories or finds source from a symbol/question passed as path. Use about to focus a file or directory on a question (at most 16 keywords). An array of up to 64 paths returns all readable files and labels individual errors. Images return as attachments up to 20 MiB each; at most 16 image attachments are returned.";
       tool.parameters = { ...definition.parameters, properties: {
         ...definition.parameters.properties,
         path: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 64 }], description: "File, directory, source question, or up to 64 paths to read" },
-        about: { type: "string", description: "Focus on this question or symbol; source selection reports uncertainty instead of guessing" },
+        about: { type: "string", description: "Focus on this question or symbol (at most 16 keywords); source selection reports uncertainty instead of guessing" },
+        query: { type: "string", description: "Source question; optional path scopes the search" },
+        outline: { type: "boolean" },
+        evidence: { type: "boolean" },
+        resolve: { type: "boolean" },
+        complete: { type: "boolean" },
+        json: { anyOf: [{ type: "boolean" }, { type: "string" }, { type: "array", items: { type: "string" }, maxItems: 64 }] },
       } };
       tool.promptGuidelines = [...(definition.promptGuidelines || []), "read can find source from a symbol or question; check its selection status before choosing a file. Plain file reads preserve full text within the stated limits."];
     }
@@ -179,7 +189,7 @@ export function registerNativeTools(pi, host, config = loadConfig()) {
   }
 
   pi.on("session_start", (_event, ctx) => {
-    cwd = ctx?.cwd || cwd;
+    cwd = isString(ctx?.cwd) && ctx.cwd ? ctx.cwd : cwd;
     base.invalidateFiles();
   });
   pi.registerCommand("supernova", {

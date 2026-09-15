@@ -65,7 +65,9 @@ export function toPlain(value, seen = new Set(), depth = 0) {
   if (value === null || value === undefined) return value;
   const tag = toStr.call(value);
 
-  if (tag === "[object String]" || tag === "[object Number]" || tag === "[object Boolean]") return value.valueOf();
+  if (tag === "[object String]") return value.valueOf();
+
+  if (tag === "[object Number]" || tag === "[object Boolean]") return value.valueOf();
 
   if (tag === "[object BigInt]") return value.toString() + "n";
 
@@ -84,7 +86,12 @@ export function toPlain(value, seen = new Set(), depth = 0) {
   if (value instanceof Error) {
     const out = { name: value.name, message: value.message };
 
-    if (value.cause !== undefined) out.cause = toPlain(value.cause, seen, depth + 1);
+    if (value.cause !== undefined) {
+      seen.add(value);
+
+      try { out.cause = toPlain(value.cause, seen, depth + 1); }
+      finally { seen.delete(value); }
+    }
 
     return out;
   }
@@ -93,7 +100,12 @@ export function toPlain(value, seen = new Set(), depth = 0) {
 
   if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return plainFromBinary(value);
 
-  if (isFunction(value.toJSON)) return toPlain(value.toJSON(), seen, depth + 1);
+  if (isFunction(value.toJSON)) {
+    seen.add(value);
+
+    try { return toPlain(value.toJSON(), seen, depth + 1); }
+    finally { seen.delete(value); }
+  }
   seen.add(value);
 
   try {

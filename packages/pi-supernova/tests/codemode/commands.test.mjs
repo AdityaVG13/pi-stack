@@ -18,7 +18,24 @@ it("read accepts familiar object arguments inside CodeMode and honors the reques
   await fixture.write("lines.txt", "one\ntwo\nthree\nfour\n");
   const result = await fixture.execute('return await read({path: "lines.txt", offset: 2, limit: 2});');
   assert.equal(result.details.ok, true, result.details.error);
-  assert.equal(result.details.result, "two\nthree");
+  assert.equal(result.details.result, "two\nthree\n");
+});
+
+it("read normalizes numeric line parameters and reports an empty EOF window honestly", async t => {
+  const fixture = await engineFixture(t);
+  await fixture.write("lines.txt", "one\ntwo\nthree\n");
+  const result = await fixture.execute(`
+    return {
+      stringOffset: await read({path:"lines.txt", offset:"2", limit:"1"}),
+      tail: await read({path:"lines.txt", offset:99, limit:1, resolve:true}),
+      stagedTail: await write("staged.txt", "a\\nb\\n").then(() => read({path:"staged.txt", offset:2, limit:10}))
+    };
+  `);
+  assert.equal(result.details.ok, true, result.details.error);
+  assert.equal(result.details.result.stringOffset, "two\n");
+  assert.equal(result.details.result.tail.status, "incomplete");
+  assert.equal(result.details.result.tail.line, 99);
+  assert.equal(result.details.result.stagedTail, "b\n");
 });
 
 it("one edit command applies a related edit set and returns only after all replacements are visible", async t => {
@@ -41,4 +58,13 @@ it("one edit command applies a related edit set and returns only after all repla
 it("an uncaught program failure is a host-visible failed tool execution, not a successful error-shaped result", async t => {
   const fixture = await engineFixture(t);
   await assert.rejects(fixture.execute('throw new Error("hard-failure-sentinel");'), /hard-failure-sentinel/);
+});
+
+it("a failing command attaches a bounded source window for reported file lines", async t => {
+  const fixture = await engineFixture(t);
+  await fixture.write("a.js", "one\ntwo\nthree\n");
+  await assert.rejects(
+    fixture.execute('return await bash({command:"printf \\\'a.js:2\\\\n\\\' >&2; exit 7"});'),
+    /a\.js:2[\s\S]*--- source[\s\S]*►\s+2 two/,
+  );
 });

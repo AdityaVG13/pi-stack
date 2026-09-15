@@ -1,20 +1,73 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isString } from "../shared/decode.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 const VFS_CACHE_MAX = 1024;
+
+const VFS_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 
 // Serialize validation + replacement across Supernova transactions in this host.
 let commitTail = Promise.resolve();
 
+function textSignature(text) {
+  return { size: Buffer.byteLength(text, "utf8"), sha256: createHash("sha256").update(text, "utf8").digest("hex") };
+}
+
+function sameFileVersion(a, b) {
+  return ["dev", "ino", "size", "mtimeMs", "ctimeMs"].every(key => a[key] === b[key]);
+}
+
+async function fileSignature(target, signal, observed) {
+  const file = await fs.open(target, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+
+  try {
+    const actual = await file.stat();
+
+    if (!actual.isFile()) throw new Error("read requires a regular file: " + target);
+    if (observed && !sameFileVersion(observed, actual)) throw new Error("file changed while reading: " + target);
+    const hash = createHash("sha256");
+
+    for await (const chunk of file.createReadStream({ autoClose: false, signal })) hash.update(chunk);
+    const after = await file.stat();
+
+    if (!after.isFile() || !sameFileVersion(actual, after)) throw new Error("file changed while signing: " + target);
+
+    return { size: actual.size, sha256: hash.digest("hex") };
+  } finally {
+    await file.close();
+  }
+}
+
+// realpath() cannot resolve a missing leaf. Canonicalize its nearest existing
+// ancestor so two symlink spellings still share one commit destination.
+async function canonicalNewPath(target) {
+  let ancestor = path.dirname(target);
+
+  for (;;) {
+    try { return path.join(await fs.realpath(ancestor), path.relative(ancestor, target)); }
+    catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      const parent = path.dirname(ancestor);
+
+      if (parent === ancestor) throw error;
+      ancestor = parent;
+    }
+  }
+}
+
+function sameSignature(a, b) {
+  return a === b || (a !== null && b !== null && a.size === b.size && a.sha256 === b.sha256);
+}
+
 export class CausalVfs {
   constructor(onNewFile, validateWrite) {
     this.validateWrite = validateWrite;
-    // Last-seen original bytes for write CAS, not a read cache. read() always
-    // hits disk unless an overlay is staged. Serving cache on read would be a
-    // false-valid against editors/git between two reads.
+    // Optional receipt bodies, never the authority for CAS. Signatures survive
+    // body eviction. Explicit reads hit disk and replace the observed snapshot;
+    // internal receipt reads preserve it until an external-mutation boundary.
     this.cache = new Map();
+    this.cacheBytes = 0;
     this.overlays = [];
     this.expected = new Map();
     this.onNewFile = onNewFile;
@@ -28,9 +81,31 @@ export class CausalVfs {
     this.signal?.throwIfAborted();
   }
 
+  dropCache(target) {
+    const previous = this.cache.get(target);
+
+    if (previous !== undefined && this.cache.delete(target)) this.cacheBytes -= Buffer.byteLength(previous, "utf8");
+  }
+
   setCache(target, content) {
-    if (this.cache.size >= VFS_CACHE_MAX && !this.cache.has(target)) this.cache.delete(this.cache.keys().next().value);
+    const bytes = Buffer.byteLength(content, "utf8");
+
+    if (bytes > VFS_CACHE_MAX_BYTES) {
+      this.dropCache(target);
+      return;
+    }
+
+    this.dropCache(target);
+
+    while ((this.cache.size >= VFS_CACHE_MAX || this.cacheBytes + bytes > VFS_CACHE_MAX_BYTES) && this.cache.size) {
+      const oldest = this.cache.keys().next().value;
+
+      this.cacheBytes -= Buffer.byteLength(this.cache.get(oldest), "utf8");
+      this.cache.delete(oldest);
+    }
+
     this.cache.set(target, content);
+    this.cacheBytes += bytes;
   }
 
   getOverlay(target) {
@@ -43,28 +118,30 @@ export class CausalVfs {
     return [...new Set(this.overlays.flatMap(overlay => [...overlay.keys()]))];
   }
 
-  async read(target, { preserveRead = false, maxBytes } = {}) {
+  async read(target, { preserveRead = false, maxBytes, label = "read input" } = {}) {
     const overlay = this.getOverlay(target);
 
     if (overlay !== undefined) {
-      if (maxBytes !== undefined && Buffer.byteLength(overlay, "utf8") > maxBytes) throw new Error("JSON input exceeds " + maxBytes + " bytes; use a streaming parser through bash");
+      if (maxBytes !== undefined && Buffer.byteLength(overlay, "utf8") > maxBytes) throw new Error(label + " exceeds " + maxBytes + " bytes; use a streaming parser through bash");
 
       return overlay;
     }
 
     // External editors and captured tools can change a file between any two reads.
+    // Open once with O_NONBLOCK so a FIFO or device cannot park a host I/O worker.
     try {
-      let text;
+      const file = await fs.open(target, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+      let bytes;
 
-      if (maxBytes === undefined) text = await fs.readFile(target, "utf8");
-      else {
-        const file = await fs.open(target, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+      try {
+        const stat = await file.stat();
 
-        try {
-          const stat = await file.stat();
+        if (stat.isDirectory()) throw new Error("read path is a directory, not a file: " + target);
+        if (!stat.isFile()) throw new Error("read requires a regular file: " + target);
 
-          if (!stat.isFile()) throw new Error("JSON read requires a regular file: " + target);
-          const tooLarge = () => new Error("JSON input exceeds " + maxBytes + " bytes; use a streaming parser through bash");
+        if (maxBytes === undefined) bytes = await file.readFile({ signal: this.signal });
+        else {
+          const tooLarge = () => new Error(label + " exceeds " + maxBytes + " bytes; use a streaming parser through bash");
 
           if (stat.size > maxBytes) throw tooLarge();
           const chunks = [];
@@ -77,15 +154,19 @@ export class CausalVfs {
             chunks.push(chunk);
           }
 
-          text = Buffer.concat(chunks).toString("utf8");
-        } finally { await file.close(); }
-      }
+          bytes = Buffer.concat(chunks);
+        }
+        if (!sameFileVersion(stat, await file.stat())) throw new Error("file changed while reading: " + target);
+      } finally { await file.close(); }
 
-      if (!preserveRead || !this.cache.has(target)) this.setCache(target, text);
+      // Hash the actual bytes, not a lossy UTF-8 decode/re-encode.
+      if (!preserveRead || !this.expected.has(target)) this.expected.set(target, textSignature(bytes));
+      const text = bytes.toString("utf8");
+      this.setCache(target, text);
 
       return text;
     } catch (err) {
-      this.cache.delete(target);
+      this.dropCache(target);
 
       if (err.code === "EISDIR") throw new Error("read path is a directory, not a file: " + target);
 
@@ -97,6 +178,27 @@ export class CausalVfs {
 
       throw err;
     }
+  }
+
+  async #diskSignature(target) {
+    let stat;
+
+    try { stat = await fs.stat(target); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+
+    return stat?.isFile() ? await fileSignature(target, this.signal, stat) : null;
+  }
+
+  async captureExpected(target) {
+    if (this.getOverlay(target) !== undefined || this.expected.has(target)) return;
+
+    this.expected.set(target, await this.#diskSignature(target));
+  }
+
+  async recordExpected(target, observed) {
+    if (this.getOverlay(target) !== undefined) return;
+    const signature = observed ? await fileSignature(target, this.signal, observed) : await this.#diskSignature(target);
+    this.expected.set(target, signature);
   }
 
   async write(target, content) {
@@ -112,14 +214,7 @@ export class CausalVfs {
 
     this.assertWritable();
 
-    if (this.getOverlay(target) === undefined) {
-      let original;
-
-      try { original = this.cache.has(target) ? this.cache.get(target) : await fs.readFile(target, "utf8"); }
-      catch (error) { if (error.code !== "ENOENT") throw error; original = null; }
-
-      this.expected.set(target, original);
-    }
+    await this.captureExpected(target);
 
     this.assertWritable();
 
@@ -169,6 +264,7 @@ export class CausalVfs {
           if (!stat.isFile()) throw new Error("cannot write to a non-file: " + logicalPath);
         } catch (err) {
           if (err.code !== "ENOENT") throw err;
+          target = await canonicalNewPath(logicalPath);
         }
 
         await this.validateWrite?.(logicalPath);
@@ -177,9 +273,9 @@ export class CausalVfs {
         targets.add(target);
 
         if (this.expected.has(logicalPath)) {
-          const current = stat ? await fs.readFile(target, "utf8") : null;
+          const current = stat ? await fileSignature(target, this.signal) : null;
 
-          if (current !== this.expected.get(logicalPath)) {
+          if (!sameSignature(current, this.expected.get(logicalPath))) {
             throw new Error("write conflict: file changed since it was read: " + logicalPath + "; read it again before retrying");
           }
         }
@@ -227,10 +323,12 @@ export class CausalVfs {
 
       for (const entry of staged) {
         this.setCache(entry.logicalPath, entry.content);
-        this.expected.delete(entry.logicalPath);
+        this.expected.set(entry.logicalPath, textSignature(entry.content));
       }
 
-      if (staged.length) this.onNewFile?.(staged.map(entry => entry.target));
+      // Canonical commit destinations must not rewrite established event paths
+      // for newly created files, whose callers supplied a logical cwd spelling.
+      if (staged.length) this.onNewFile?.(staged.map(entry => entry.existed ? entry.target : entry.logicalPath));
       this.mutations.committed += staged.length;
     } catch (error) {
       failed = true;
@@ -291,9 +389,8 @@ export class CausalVfs {
     const top = this.overlays.pop();
     this.mutations.rolledBack += top?.size ?? 0;
 
-    for (const target of top?.keys() ?? []) {
-      if (this.getOverlay(target) === undefined) this.expected.delete(target);
-    }
+    // Rolling back staged writes does not undo observations of disk. Keep the
+    // read snapshot, including for files without a surviving parent overlay.
 
     return { rolledBack: top?.size ?? 0, depth: this.overlays.length };
   }
@@ -316,7 +413,7 @@ export class CausalVfs {
     return pending.size > 0;
   }
 
-  invalidateCache() { this.cache.clear(); }
+  invalidateCache() { this.cache.clear(); this.cacheBytes = 0; this.expected.clear(); }
   getCacheSize() { return this.cache.size; }
   getOverlayDepth() { return this.overlays.length; }
 }

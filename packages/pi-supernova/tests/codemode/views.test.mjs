@@ -74,6 +74,18 @@ export function calibrate(samples) {
   assert.equal(result.details.result, after);
 });
 
+it("view replacement preserves CRLF separators", async t => {
+  const f = await engineFixture(t);
+  await f.write("crlf.txt", "ONE\r\nTWO\r\nTHREE\r\n");
+  const result = await f.execute(`
+    const v = await read({path:"crlf.txt",offset:2,limit:1,resolve:true});
+    await edit(v, "CHANGED");
+    return await read("crlf.txt");
+  `);
+  assert.equal(result.details.ok, true, result.details.error);
+  assert.equal(await fs.readFile(path.join(f.root, "crlf.txt"), "utf8"), "ONE\r\nCHANGED\r\nTHREE\r\n");
+});
+
 it("a span-local miss numbers the view, not the file", async t => {
   const f = await engineFixture(t);
   await f.write("twins.js", `export function measure() {\n  const RETRY_LIMIT = 3;\n}\n\nexport function calibrate() {\n  const RETRY_LIMIT = 3;\n}\n`);
@@ -97,4 +109,33 @@ it("a view edit receipt names the replaced span, not a padded context window", a
   assert.doesNotMatch(text, /edited note\.txt:1-4/);
   assert.doesNotMatch(text, /keep-A|keep-B/);
   assert.equal(await fs.readFile(path.join(f.root, "note.txt"), "utf8"), "keep-A\nVIEW-NEW\nkeep-B\nVIEW-OLD\nkeep-C\n");
+});
+
+it("a view edit can add an explicit EOF newline and can delete a line", async t => {
+  const f = await engineFixture(t);
+  await f.write("eof.txt", "one\ntwo");
+  await f.execute(`
+    const v = await read({path:"eof.txt", offset:2, limit:1, resolve:true});
+    await edit(v, "TWO\\n");
+  `);
+  assert.equal(await fs.readFile(path.join(f.root, "eof.txt"), "utf8"), "one\nTWO\n");
+
+  await f.execute(`
+    const v = await read({path:"eof.txt", offset:1, limit:1, resolve:true});
+    await edit(v, "");
+  `);
+  assert.equal(await fs.readFile(path.join(f.root, "eof.txt"), "utf8"), "TWO\n");
+});
+
+it("a view edit maps duplicate replacement text to the actual span for references", async t => {
+  const f = await engineFixture(t);
+  await f.write("twins.js", "export function measure() {\n  return 1;\n}\n\nexport function calibrate() {\n  return 1;\n}\n");
+  await f.write("caller.js", "calibrate();\n");
+  const result = await f.execute(`
+    const v = await read({query:"calibrate", resolve:true});
+    await edit(v, "return 1", "return 2");
+  `);
+  const text = modelText(result);
+  assert.match(text, /calibrate also referenced in caller\.js:1/);
+  assert.doesNotMatch(text, /measure also referenced/);
 });

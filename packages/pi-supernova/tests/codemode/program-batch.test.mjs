@@ -33,7 +33,7 @@ it("batch admission rejects malformed, sparse, nested and oversized plans before
   }
 
   await assert.rejects(run(f,[write],{code:"return 1"}),/cannot combine/);
-  await assert.rejects(run(f,[write],{data:false}),/cannot combine/);
+  await assert.rejects(run(f,[write],{file:"another.js"}),/cannot combine/);
   await assert.rejects(fs.stat(path.join(f.root,"never.txt")),{code:"ENOENT"});
 });
 
@@ -262,4 +262,40 @@ it("failed cutovers compose file reuse, JSON, checkpoints, argv, images and repa
     assert.deepEqual(repaired.details.result[1],{version:2,alias:"undefined"});
     assert.equal(await fs.readFile(path.join(cwd,"late.txt"),"utf8"),"after verification");
   }));
+});
+
+// Intent: a batch may supply one literal input default without resending it per
+// entry. Explicit data replaces (never merges) the default, including falsy data.
+it("batch data defaults preserve literals and explicit per-entry overrides", async t => {
+  const f = await engineFixture(t);
+  for (const data of [false,0,null,"",{paths:["a","b"],literal:"λ😀\r\n"}]) {
+    const result = await run(f,[{code:"return data;"},{code:"return data;",data:{local:true}},{code:"return data;",data:null},{code:"return data;",data:false}],{data});
+    assert.equal(result.details.ok,true);
+    assert.deepEqual(result.details.result,[data,{local:true},null,false]);
+  }
+});
+
+it("each guest gets an independent copy of shared batch data", async t => {
+  const f = await engineFixture(t);
+  const data = {paths:["original"],nested:{count:0}};
+  const result = await run(f,[
+    {code:'data.paths.push("changed"); data.nested.count=9; return data;'},
+    {code:'return data;'},
+  ],{data});
+  assert.equal(result.details.ok,true);
+  assert.deepEqual(result.details.result,[{paths:["original","changed"],nested:{count:9}},{paths:["original"],nested:{count:0}}]);
+  assert.deepEqual(data,{paths:["original"],nested:{count:0}});
+});
+
+it("shared batch data counts once against admission and never bypasses its cap", async t => {
+  const f = await engineFixture(t);
+  const programs = Array.from({length:8},()=>({code:'return data.length;'}));
+  const result = await run(f,programs,{data:"x".repeat(8000)});
+  assert.equal(result.details.ok,true);
+  assert.deepEqual(result.details.result,Array(8).fill(8000));
+  const write = {code:'await write("never-shared.txt","bad");'};
+  for (const data of ["x".repeat(48000),1n]) await assert.rejects(run(f,[write],{data}),/no programs ran/);
+  const cyclic = {}; cyclic.self = cyclic;
+  await assert.rejects(run(f,[write],{data:cyclic}),/no programs ran/);
+  await assert.rejects(fs.stat(path.join(f.root,"never-shared.txt")),{code:"ENOENT"});
 });

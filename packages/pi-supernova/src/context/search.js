@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isString } from "../shared/decode.js";
 import { WorkspaceIndex, globToRegExp } from "./repo-index.js";
@@ -10,6 +11,22 @@ import { runCommand, relativeSlash } from "../fs/workspace.js";
 
 function textResult(text, details) {
   return { content: [{ type: "text", text: String(text ?? "") }], details: details || {} };
+}
+
+async function candidateFileList(index, root, includeHidden = false, signal) {
+  const stat = await fs.stat(root).catch(() => null);
+
+  if (stat?.isFile()) return [root];
+
+  return index.files(root, includeHidden, signal);
+}
+
+function pendingInScope(root, pendingPaths) {
+  return pendingPaths.filter(file => {
+    const relative = path.relative(root, file);
+
+    return relative === "" || (relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative));
+  });
 }
 
 /** One bounded direct search for all changed names; no repository index or per-name spawn. */
@@ -48,10 +65,10 @@ export async function referencesForNames({ root, names, excludePath, overlayText
     if (overlayText(file) === undefined) add(file, record.data.line_number, record.data.lines.text);
   }
 
-  for (const file of pendingPaths) {
+  for (const file of pendingInScope(root, pendingPaths)) {
     const text = overlayText(file);
 
-    if (text !== undefined) text.split("\n").forEach((line, i) => add(file, i + 1, line));
+    if (text !== undefined && Buffer.byteLength(text, "utf8") <= 512 * 1024) text.split("\n").forEach((line, i) => add(file, i + 1, line));
   }
 
   return { references, incomplete: result.outputTruncated === true };
@@ -59,29 +76,57 @@ export async function referencesForNames({ root, names, excludePath, overlayText
 
 export function rgGrepArgs(pattern, params, searchPath) {
   const args = ["--line-number", "--no-heading", "--color", "never"];
+  const caseSensitive = params?.caseSensitive === true || (params?.caseSensitive !== false && smartCase(pattern));
 
-  if (params?.caseSensitive !== true) args.push("--ignore-case");
+  if (!caseSensitive) args.push("--ignore-case");
 
   if (params?.glob) args.push("--glob", String(params.glob));
+  if (Number.isInteger(params?.limit) && params.limit > 0) args.push("--max-count", String(Math.min(params.limit, 2000)));
   args.push("--", pattern, searchPath);
 
   return args;
 }
 
 /** rg --files, then find(1) when rg is unavailable; both accept an optional glob/name pattern. */
-export async function listWithTools(searchDir, pattern, cwd, signal) {
+export async function listWithTools(searchDir, pattern, cwd, signal, pendingPaths = []) {
+  const stat = await fs.stat(searchDir).catch(() => null);
+  const pendingAbs = pendingInScope(searchDir, pendingPaths);
+  const pending = pendingAbs.map(file => relativeSlash(cwd, file));
+
+  let matcher = null;
+
+  if (pattern) {
+    try { matcher = globToRegExp(pattern); }
+    catch { matcher = /^$/; }
+  }
+
+  if (stat?.isFile() || (!stat?.isDirectory() && pending.length)) {
+    const rel = stat?.isFile() ? relativeSlash(cwd, searchDir) : null;
+    const rows = [...new Set([...(rel ? [rel] : []), ...pending])].filter(file => !matcher || matcher.test(file));
+
+    return textResult(rows.length ? rows.join("\n") + "\n" : "", { via: pending.length ? "vfs" : "file" });
+  }
+
+  const pendingMerged = pendingAbs.filter((_, i) => !matcher || matcher.test(pending[i]));
+  const mergePending = stdout => {
+    const diskRows = String(stdout || "").split("\n").filter(Boolean)
+      .map(row => relativeSlash(cwd, path.isAbsolute(row) ? row : path.resolve(cwd, row)));
+    const rows = [...new Set([...diskRows, ...pendingMerged])];
+
+    return rows.length ? rows.join("\n") + "\n" : "";
+  };
   const args = ["--files"];
 
   if (pattern) args.push("-g", pattern);
   const res = await runCommand(["rg", ...args, searchDir], { cwd, timeoutMs: 30_000, signal }).catch(() => null);
 
-  if (res && (res.exitCode === 0 || res.exitCode === 1)) return textResult(res.stdout, { via: "rg" });
+  if (res && (res.exitCode === 0 || res.exitCode === 1)) return textResult(mergePending(res.stdout), { via: "rg", outputTruncated: res.outputTruncated === true });
   const findArgs = [searchDir];
 
   if (pattern) findArgs.push("-name", pattern);
   const findRes = await runCommand(["find", ...findArgs], { cwd, timeoutMs: 30_000, signal });
 
-  return textResult(findRes.stdout, { via: "find" });
+  return textResult(mergePending(findRes.stdout), { via: "find", outputTruncated: findRes.outputTruncated === true });
 }
 
 const GLOB_CHARS = /[*?[\]{}]/;
@@ -90,9 +135,9 @@ const GLOB_CHARS = /[*?[\]{}]/;
  * fffind: a pattern without glob characters is a fuzzy, typo-tolerant, frecency-ranked path query.
  * Returns "path" rows (best first) or null when the pattern is a real glob.
  */
-export async function fuzzyFind(index, root, cwd, pattern, limit = 20) {
+export async function fuzzyFind(index, root, cwd, pattern, limit = 20, pendingPaths = []) {
   if (!pattern || GLOB_CHARS.test(pattern)) return null;
-  const files = await index.files(root);
+  const files = [...new Set([...await candidateFileList(index, root), ...pendingInScope(root, pendingPaths)])];
 
   if (!index.canScan(files)) return null;
   const rel = files.map((f) => relativeSlash(cwd, f));
@@ -109,12 +154,12 @@ export async function fuzzyFind(index, root, cwd, pattern, limit = 20) {
 }
 
 /** fff-style grep: smart-case, definition lines first, fuzzy fallback when the literal has no hits. */
-export async function grepIndexed(index, pattern, params, searchPath, cwd) {
+export async function grepIndexed(index, pattern, params, searchPath, cwd, overlayText = () => undefined, pendingPaths = []) {
   const compiled = grepRegex(pattern, params);
 
   if (!compiled) return null;
   const { regex, caseSensitive } = compiled;
-  let files = await index.files(searchPath);
+  let files = [...new Set([...await candidateFileList(index, searchPath), ...pendingInScope(searchPath, pendingPaths)])];
 
   if (!index.canScan(files)) return null;
 
@@ -123,14 +168,19 @@ export async function grepIndexed(index, pattern, params, searchPath, cwd) {
     files = files.filter((f) => matcher.test(relativeSlash(cwd, f)));
   }
 
-  const rows = index.grepRows(files, regex, cwd);
-  const fallback = rows.length === 0 && /^[\w$.-]{4,}$/.test(pattern) ? fuzzyGrepRows(index, files, pattern, cwd, caseSensitive) : rows;
+  for (const file of files) {
+    const overlay = overlayText(file);
+
+    if (overlay === undefined && index.entry(file) === null) return null;
+  }
+  const rows = index.grepRows(files, regex, cwd, overlayText);
+  const fallback = rows.length === 0 && /^[\w$.-]{4,}$/.test(pattern) ? fuzzyGrepRows(index, files, pattern, cwd, caseSensitive, overlayText) : rows;
 
   return formatGrepRows(fallback, grepLimit(params));
 }
 
 function grepLimit(params) {
-  return Number.isInteger(params?.limit) && params.limit > 0 ? params.limit : 200;
+  return Number.isInteger(params?.limit) && params.limit > 0 ? Math.min(params.limit, 2000) : 200;
 }
 
 function grepRegex(pattern, params) {
@@ -144,12 +194,15 @@ function grepRegex(pattern, params) {
 }
 
 /** Zero literal hits: retry each line fuzzily (1 typo, 2 for long names) within a tight span, so IsOffTheRecord finds is_off_the_record. */
-function fuzzyGrepRows(index, files, pattern, cwd, caseSensitive) {
+function fuzzyGrepRows(index, files, pattern, cwd, caseSensitive, overlayText = () => undefined) {
   const maxTypos = pattern.length >= 8 ? 2 : 1;
   const rows = [];
 
   for (const filePath of files) {
-    const e = index.entry(filePath);
+    const pending = overlayText(filePath);
+    const e = pending === undefined
+      ? index.entry(filePath)
+      : Buffer.byteLength(pending, "utf8") <= 512 * 1024 ? WorkspaceIndex.fromText(filePath, pending) : null;
 
     if (!e) continue;
     const { raw, defNames } = WorkspaceIndex.linesOf(e);
@@ -197,8 +250,8 @@ function formatGrepRows(rows, limit) {
 }
 
 /** rg --files [-g pattern] served from the index; null when the tree is too large. */
-export async function listIndexed(index, root, cwd, pattern) {
-  const files = await index.files(root);
+export async function listIndexed(index, root, cwd, pattern, pendingPaths = []) {
+  const files = [...new Set([...await candidateFileList(index, root), ...pendingInScope(root, pendingPaths)])];
 
   if (!index.canScan(files)) return null;
   const rel = files.map((f) => path.relative(cwd, f).split(path.sep).join("/"));

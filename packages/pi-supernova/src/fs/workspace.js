@@ -16,6 +16,9 @@ const realNearest = new Map();
 const PATH_CACHE_MAX = 2048;
 
 export function clearPathCache() {
+  cachedCwd = null;
+  cachedResolvedCwd = null;
+  realRoots.clear();
   realNearest.clear();
 }
 
@@ -126,7 +129,10 @@ export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = f
 export async function runCommand(argv, options = {}) {
   options.signal?.throwIfAborted();
   const cwd = options.cwd || process.cwd();
-  const timeoutMs = options.timeoutMs ?? 60_000;
+  const requestedTimeout = Number(options.timeoutMs === undefined ? 60_000 : options.timeoutMs);
+
+  if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0) throw new Error("command timeoutMs must be a positive finite number");
+  const timeoutMs = Math.max(1, Math.min(2_147_483_647, Math.floor(requestedTimeout)));
   const maxOutputChars = options.maxOutputChars ?? 2 * 1024 * 1024;
 
   return new Promise((resolve, reject) => {

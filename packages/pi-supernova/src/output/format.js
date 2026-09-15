@@ -143,7 +143,8 @@ function formatPrimitive(value) {
 
   if (Number.isNaN(value) || value === Infinity || value === -Infinity) return String(value);
 
-  return JSON.stringify(value) ?? String(value);
+  try { return JSON.stringify(value) ?? String(value); }
+  catch { return String(value); }
 }
 
 /**
@@ -168,39 +169,46 @@ function formatFlatWithin(value, limit) {
     return true;
   };
 
-  return walkFlat(value, push) ? parts.join("") : null;
+  return walkFlat(value, push, new Set()) ? parts.join("") : null;
 }
 
-function walkFlat(value, push) {
+function walkFlat(value, push, seen) {
   if (value?.[RAW_TEXT] !== undefined) return push(value[RAW_TEXT]);
 
   if (!isObject(value) && !Array.isArray(value)) return push(formatPrimitive(value));
 
-  if (Array.isArray(value)) {
-    if (value.length === 0) return push("[]");
+  if (seen.has(value)) return push("[Circular]");
+  seen.add(value);
 
-    if (!push("[")) return false;
+  try {
+    if (Array.isArray(value)) {
+      if (value.length === 0) return push("[]");
 
-    for (let i = 0; i < value.length; i++) {
-      if (i && !push(",")) return false;
+      if (!push("[")) return false;
 
-      if (!walkFlat(value[i] === undefined ? null : value[i], push)) return false;
+      for (let i = 0; i < value.length; i++) {
+        if (i && !push(",")) return false;
+
+        if (!walkFlat(value[i] === undefined ? null : value[i], push, seen)) return false;
+      }
+
+      return push("]");
     }
 
-    return push("]");
+    const keys = Object.keys(value).filter((key) => value[key] !== undefined);
+
+    if (keys.length === 0) return push("{}");
+
+    for (let i = 0; i < keys.length; i++) {
+      if (!push((i ? "," : "{") + formatKey(keys[i]) + ":")) return false;
+
+      if (!walkFlat(value[keys[i]], push, seen)) return false;
+    }
+
+    return push("}");
+  } finally {
+    seen.delete(value);
   }
-
-  const keys = Object.keys(value).filter((key) => value[key] !== undefined);
-
-  if (keys.length === 0) return push("{}");
-
-  for (let i = 0; i < keys.length; i++) {
-    if (!push((i ? "," : "{") + formatKey(keys[i]) + ":")) return false;
-
-    if (!walkFlat(value[keys[i]], push)) return false;
-  }
-
-  return push("}");
 }
 
 /**
@@ -209,24 +217,31 @@ function walkFlat(value, push) {
  * indent is one space. Whitespace is what costs tokens: this measures ~43% fewer
  * than JSON.stringify(value, null, 2) on typical shaped returns (gpt-tokenizer).
  */
-export function formatValue(value, indent = "", width = FORMAT_WIDTH) {
+export function formatValue(value, indent = "", width = FORMAT_WIDTH, seen = new Set()) {
   if (value?.[RAW_TEXT] !== undefined) return value[RAW_TEXT];
 
   if (!isObject(value) && !Array.isArray(value)) return formatPrimitive(value);
-  const flat = formatFlatWithin(value, width - indent.length);
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
 
-  if (flat !== null) return flat;
-  const pad = indent + " ";
+  try {
+    const flat = formatFlatWithin(value, width - indent.length);
 
-  if (Array.isArray(value)) {
-    if (value.length === 0) return "[]";
+    if (flat !== null) return flat;
+    const pad = indent + " ";
 
-    return "[\n" + value.map((item) => pad + formatValue(item === undefined ? null : item, pad, width)).join(",\n") + "\n" + indent + "]";
+    if (Array.isArray(value)) {
+      if (value.length === 0) return "[]";
+
+      return "[\n" + value.map((item) => pad + formatValue(item === undefined ? null : item, pad, width, seen)).join(",\n") + "\n" + indent + "]";
+    }
+
+    const keys = Object.keys(value).filter((key) => value[key] !== undefined);
+
+    if (keys.length === 0) return "{}";
+
+    return "{\n" + keys.map((key) => pad + formatKey(key) + ":" + formatValue(value[key], pad, width, seen)).join(",\n") + "\n" + indent + "}";
+  } finally {
+    seen.delete(value);
   }
-
-  const keys = Object.keys(value).filter((key) => value[key] !== undefined);
-
-  if (keys.length === 0) return "{}";
-
-  return "{\n" + keys.map((key) => pad + formatKey(key) + ":" + formatValue(value[key], pad, width)).join(",\n") + "\n" + indent + "}";
 }

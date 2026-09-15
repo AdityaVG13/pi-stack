@@ -67,7 +67,9 @@ function findHunkMatch(fileLines, expectedOld, nominal) {
 
   if (!expectedOld.length) return -1;
 
-  for (let delta = 1; delta <= Math.max(fileLines.length, 100); delta++) {
+  const maxDrift = Math.min(Math.max(fileLines.length, 100), 200);
+
+  for (let delta = 1; delta <= maxDrift; delta++) {
     if (matchAt(nominal + delta)) return nominal + delta;
 
     if (matchAt(nominal - delta)) return nominal - delta;
@@ -103,7 +105,7 @@ export function applyPatchToText(originalText, patchText) {
       const line = hunk.lines[i];
 
       if (line[0] === "+") {
-        replacement.push({ text: textOf(line), ending: hunk.noNewline.includes(i) ? "" : line.endsWith("\r") ? "\r\n" : ending });
+        replacement.push({ text: textOf(line), ending: hunk.noNewline.includes(i) ? "" : ending });
       } else {
         const original = fileLines[oldIndex++];
 

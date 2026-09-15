@@ -28,6 +28,7 @@ function relevance(span, lower, stems) {
 }
 
 function chooseExpanded(spans, lower, stems, raw, opts) {
+  if (stems.length === 0) return new Set();
   const scored = spans.map((s, i) => ({ i, r: relevance(s, lower, stems), chars: raw.slice(s.start - 1, s.end).join("\n").length }));
   scored.sort((a, b) => b.r - a.r || a.i - b.i);
   const expanded = new Set();
@@ -118,7 +119,15 @@ export function outlineFile(entry, relPath, about, options = {}) {
   }
 
   for (let i = 0; i < spans.length; i++) parts.push(expanded.has(i) ? expandedBlock(spans[i], raw, opts) : foldedLine(spans[i]));
-  const title = "// " + relPath + " · " + lineCount + " lines · " + spans.length + " declarations · " + expanded.size + " expanded" + (about ? " for \"" + about + "\"" : "") + " · read(path, line, count) for a folded body";
+  const label = about ? String(about).replace(/\s+/g, " ").slice(0, 120) : "";
+  const title = "// " + relPath + " · " + lineCount + " lines · " + spans.length + " declarations · " + expanded.size + " expanded" + (label ? " for \"" + label + "\"" : "") + " · read(path, line, count) for a folded body";
+  let text = title + "\n" + parts.join("\n");
 
-  return { text: title + "\n" + parts.join("\n"), expanded: expanded.size, declarations: spans.length };
+  if (text.length > opts.maxChars) {
+    const end = text.lastIndexOf("\n", Math.max(0, opts.maxChars - 160));
+
+    text = (end > title.length ? text.slice(0, end) : text.slice(0, opts.maxChars)) + "\n      … outline truncated; use read(path, line, count) for later declarations";
+  }
+
+  return { text, expanded: expanded.size, declarations: spans.length };
 }

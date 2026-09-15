@@ -19,7 +19,7 @@ function detailsOf(raw) {
 export function hostResultFailed(raw) {
   const details = detailsOf(raw);
 
-  return raw?.isError === true || details?.ok === false || (Number.isInteger(details?.exitCode) && details.exitCode !== 0);
+  return raw?.isError === true || raw?.ok === false || details?.ok === false || (Number.isInteger(details?.exitCode) && details.exitCode !== 0);
 }
 
 function extractRawString(raw) {
@@ -92,12 +92,16 @@ function summarizeDetails(value, budget = 2000) {
 }
 
 function spill(fullText, config) {
-  if (!isString(config.spillDir) || !config.spillDir) return undefined;
-  fs.mkdirSync(config.spillDir, { recursive: true, mode: 0o700 });
-  const file = path.join(config.spillDir, Date.now() + "-" + randomUUID().slice(0, 8) + ".txt");
-  fs.writeFileSync(file, fullText, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  try {
+    if (!isString(config.spillDir) || !config.spillDir) return undefined;
+    fs.mkdirSync(config.spillDir, { recursive: true, mode: 0o700 });
+    const file = path.join(config.spillDir, Date.now() + "-" + randomUUID().slice(0, 8) + ".txt");
+    fs.writeFileSync(file, fullText, { encoding: "utf8", mode: 0o600, flag: "wx" });
 
-  return file;
+    return file;
+  } catch {
+    return undefined;
+  }
 }
 
 export function packageHostResult(raw, config) {
@@ -108,7 +112,10 @@ export function packageHostResult(raw, config) {
   const capped = truncateChars(text, maxChars, "host-result");
   let truncated = capped.truncated || details?.outputTruncated === true;
   const image = raw?.content?.find(part => part?.type === "image");
-  const result = { ok: !hostResultFailed(raw), value: image ?? capped.text, truncated };
+  const directoryEntries = image === undefined && details?.directory === true && Array.isArray(details.entries) && json(details.entries).length <= maxChars
+    ? details.entries
+    : undefined;
+  const result = { ok: !hostResultFailed(raw), value: image ?? directoryEntries ?? capped.text, truncated };
 
   if (details !== undefined) result.details = summarizeDetails(batch ? { ...details, items: undefined } : details);
 
@@ -117,7 +124,25 @@ export function packageHostResult(raw, config) {
     let remaining = maxChars;
     result.items = batch.map((item, index) => {
       if (item?.type === "image") return item;
-      const bounded = truncateChars(item, details.independent === true ? maxChars : Math.floor(remaining / (batch.length - index)), "host-result");
+      const share = details.independent === true ? maxChars : Math.floor(remaining / (batch.length - index));
+
+      if (!isString(item)) {
+        const encoded = json(item);
+
+        if (encoded.length <= share) {
+          remaining -= encoded.length;
+
+          return item;
+        }
+
+        const bounded = truncateChars(encoded, share, "host-result");
+        remaining -= bounded.text.length;
+        truncated ||= bounded.truncated;
+
+        return bounded.text;
+      }
+
+      const bounded = truncateChars(item, share, "host-result");
       remaining -= bounded.text.length;
       truncated ||= bounded.truncated;
 
@@ -128,10 +153,10 @@ export function packageHostResult(raw, config) {
   result.truncated = truncated;
 
   if (truncated) {
-    result.originalChars = batch ? batch.reduce((sum, item) => sum + String(item).length, 0) : text.length;
+    result.originalChars = batch ? batch.reduce((sum, item) => sum + (isString(item) ? item.length : json(item).length), 0) : text.length;
 
     if (config.spillDir) {
-      const pointer = spill(batch ? batch.join("\n---\n") : text, config);
+      const pointer = spill(batch ? batch.map(item => isString(item) ? item : json(item)).join("\n---\n") : text, config);
 
       if (pointer) {
         result.spill = pointer;

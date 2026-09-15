@@ -194,8 +194,12 @@ for short one-off operations. See [token measurements](docs/TOKEN_COSTS.md).
 }
 ~~~
 
-Use programs instead of top-level code/file/data. Supply 1--32 entries, each with
-code OR file and optional data; the JSON-encoded array must fit maxCodeChars.
+Use programs instead of top-level code/file. Supply 1--32 entries, each with
+code OR file and optional data. Top-level data supplies an optional default for
+each entry; explicit entry data replaces it entirely, including null, false, 0
+and empty strings. Every guest receives its own copy, not a shared mutable heap.
+The JSON-encoded array (or `{programs,data}` when defaults are supplied) must fit
+maxCodeChars. Common input counts once; results remain complete and unchanged.
 Entries run sequentially in fresh guests and commit separately. A successful
 entry can create the file executed by a later entry. No implicit retries,
 reordering, shared heap or nested batches are introduced.

@@ -1,10 +1,13 @@
-import { isFunction } from "../shared/decode.js";
+import { isFunction, isObject } from "../shared/decode.js";
 
 const READ_ONLY_TOOLS = new Set(["read", "grep", "glob", "find", "ls", "snap", "evidence", "surface", "asgrep_search", "asgrep_status", "ast_grep", "web_search"]);
 
 const READ_ONLY_LSP = new Set(["definition", "references", "hover", "symbols", "diagnostics", "implementation", "type_definition", "incoming_calls", "outgoing_calls"]);
 
 export function isMutatingTool(name, config = {}, args = {}, definition) {
+  if (!isObject(args)) args = {};
+  name = String(name);
+
   if ((config.mutatingTools ?? []).includes(name)) return true;
 
   if ((config.mutatingPrefixes ?? []).some(prefix => prefix && name.startsWith(prefix))) return true;

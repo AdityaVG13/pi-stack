@@ -58,7 +58,8 @@ function verify(result) {
   assert.match(result.details.result.edited, /hostToken also referenced in .*caller\.js:1/);
   assert.match(result.details.result.warning, /check:/);
   assert.match(result.details.result.diagnostic, /return 2/);
-  assert.ok(result.details.result.rawSource.includes(sourceBody.replace("return 1", "return 2")));
+  assert.equal(result.details.result.rawSource.path, "auth.js");
+  assert.ok(result.details.result.rawSource.text.includes(sourceBody.replace("return 1", "return 2")));
   assert.equal(result.content.find(block => block.type === "image")?.data, png);
   assert.ok(result.details.trace.some(call => Array.isArray(call.args.path)), "Actual host must retain automatic read coalescing");
 }

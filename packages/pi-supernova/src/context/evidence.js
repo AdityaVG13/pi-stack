@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { WorkspaceIndex } from "./repo-index.js";
 import { tokenizeQuery, scorePathTopology, stem } from "./snap.js";
@@ -143,7 +144,7 @@ function lexicalSim(a, b) {
 
 function activateEntities(profile, graph) {
   const eta = new Map();
-  const anchors = profile.subjects.length ? profile.subjects : profile.keywords;
+  const anchors = profile.subjects.length ? profile.subjects : profile.stems;
 
   for (const anchor of anchors) {
     let best = null;
@@ -388,12 +389,12 @@ function candidateFiles(files, profile, index, limit, overlayText) {
 
   scored.sort((a, b) => b.s - a.s);
   const chosen = new Set();
-  const anchors = (profile.subjects.length ? profile.subjects : profile.keywords).map((a) => a.toLowerCase()).filter((a) => a.length > 2);
+  const anchors = (profile.subjects.length ? profile.subjects : profile.stems).map((a) => a.toLowerCase()).filter((a) => a.length > 2);
 
   const pendingHits = files.filter(file => {
     const pending = overlayText(file);
 
-    return pending !== undefined && anchors.some(anchor => pending.toLowerCase().includes(anchor));
+    return pending !== undefined && Buffer.byteLength(pending, "utf8") <= 512 * 1024 && anchors.some(anchor => pending.toLowerCase().includes(anchor));
   });
 
   const hits = anchors.length ? [...new Set([...pendingHits, ...index.filesContaining(files, anchors, true)])] : [];
@@ -511,7 +512,12 @@ export async function selectEvidence({ query, root, searchDir, index, overlayTex
     return relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative);
   });
 
-  const files = [...new Set([...await index.files(searchRoot), ...staged])];
+  const rootStat = await fs.stat(searchRoot).catch(error => {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+    throw error;
+  });
+  const diskFiles = rootStat?.isFile() ? [searchRoot] : rootStat ? await index.files(searchRoot) : [];
+  const files = [...new Set([...diskFiles, ...staged])];
 
   if (files.length === 0) throw new Error(`no files found to search in ${searchDir || root}`);
 
@@ -520,7 +526,9 @@ export async function selectEvidence({ query, root, searchDir, index, overlayTex
 
   for (const f of chosenFiles) {
     const pending = overlayText(f);
-    const entry = pending === undefined ? index.entry(f) : WorkspaceIndex.fromText(f, pending);
+    const entry = pending === undefined
+      ? index.entry(f)
+      : Buffer.byteLength(pending, "utf8") <= 512 * 1024 ? WorkspaceIndex.fromText(f, pending) : null;
 
     if (!entry) continue;
     spans.push(...spansOf(entry, f, opts.maxSpanLines));

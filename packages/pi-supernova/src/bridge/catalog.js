@@ -4,22 +4,24 @@ import { isString, isObject } from "../shared/decode.js";
 const NATIVE_TOOL_DEFINITIONS = [
   {
     name: "read",
-    description: "Read files, images or directories. JSON selectors project full documents within output budgets. Source questions locate and open source directly; resolve returns structured source/status without guessing.",
+    description: "Read files, images or directories (directory reads return entries). JSON selectors project full documents within output budgets. Source questions locate and open source directly; resolve returns structured source/status without guessing.",
     parameters: { type: "object", properties: {
-      path: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }], description: "Workspace-relative file or directory, source question, or array of paths" },
+      path: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 64 }], description: "Workspace-relative file or directory, source question, or up to 64 paths" },
       target: { anyOf: [{ type: "string" }, { type: "array" }], description: "File path/query or array of paths" },
       offset: { type: "number", description: "One-based starting line" },
       limit: { type: "number", description: "Maximum lines to return" },
-      about: { type: "string", description: "Question or symbol: expand file bodies, or locate and open source inside a directory" },
-      query: { type: "string", description: "Source question; optional path scopes the search directory" },
+      about: { type: "string", description: "Question or symbol (at most 16 keywords): expand file bodies, or locate/open source inside a directory" },
+      query: { type: "string", description: "Source question (at most 16 keywords); optional path scopes the search directory" },
+      outline: { type: "boolean", description: "Return a compact structural outline for the target file" },
+      evidence: { type: "boolean", description: "Rank source spans answering the target/path question" },
       resolve: { type: "boolean", description: "Return structured source/status for a direct resolve-to-edit handoff" },
       complete: { type: "boolean", description: "Fail unless the entire requested file fits without clipping" },
-      json: { anyOf: [{ type: "boolean" }, { type: "string" }, { type: "array", items: { type: "string" } }], description: "Parse the complete JSON input (up to 16 MiB), then select .field, .items[0:3], or quoted keys. A selector array returns an array of values; true selects the root. Oversized selections fail, never clip." },
+      json: { anyOf: [{ type: "boolean" }, { type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 64 }], description: "Parse complete JSON input up to 16 MiB, then select .field, .items[0:3], quoted keys, true, or 1-64 selectors. Oversized selections fail, never clip." },
     } },
   },
   {
     name: "write", description: "Write UTF-8 content to a workspace file.",
-    parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" }, allowReadArtifacts: { type: "boolean", description: "Explicit opt-in for intentionally writing literal truncation-marker text" } }, required: ["path", "content"] },
+    parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" }, append: { type: "boolean", description: "Append to an existing file instead of replacing it" }, allowReadArtifacts: { type: "boolean", description: "Explicit opt-in for intentionally writing literal truncation-marker text" } }, required: ["path", "content"] },
   },
   {
     name: "edit", description: "Apply unique text replacements to a workspace file; returns the post-edit lines, a structural check, and references to changed declarations.",
@@ -53,7 +55,7 @@ const NATIVE_TOOL_DEFINITIONS = [
   },
   {
     name: "bash", description: "Run a shell command inside the workspace and capture bounded output.",
-    parameters: { type: "object", properties: { command: { type: "string" }, cwd: { type: "string" }, timeoutMs: { type: "number" } }, required: ["command"] },
+    parameters: { type: "object", properties: { command: { type: "string" }, args: { type: "array", items: { type: "string" }, description: "Literal argv without shell interpretation (POSIX)" }, cwd: { type: "string" }, timeoutMs: { type: "number" } }, required: ["command"] },
   },
   {
     name: "grep", description: "Search file contents. Smart-case regex; definition lines first (marked *); fuzzy fallback when nothing matches literally.",
@@ -178,7 +180,9 @@ export function searchCatalog(catalog, query, limit = 12) {
 
   scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
 
-  return scored.slice(0, Math.max(1, limit)).map(({ score: _s, ...hit }) => hit);
+  const capped = Math.min(64, Math.max(1, Math.floor(Number(limit)) || 1));
+
+  return scored.slice(0, capped).map(({ score: _s, ...hit }) => hit);
 }
 
 /** Optimal string alignment distance: insert/delete/substitute/adjacent-transpose cost 1. */
@@ -202,7 +206,7 @@ function editDistance(a, b) {
 
 /** Closest tool names for a mistyped name: substring hits first, then a length-scaled edit distance. */
 function suggestNames(name, candidates, limit = 3) {
-  const needle = String(name || "").toLowerCase();
+  const needle = String(name || "").toLowerCase().slice(0, 128);
 
   if (!needle) return [];
   const maxDistance = Math.max(1, Math.floor(needle.length / 3));
@@ -228,7 +232,7 @@ function suggestNames(name, candidates, limit = 3) {
 }
 
 export function unknownToolMessage(name, candidates) {
-  const close = suggestNames(name, candidates);
+  const close = suggestNames(name, candidates.filter(isString));
   const hint = close.length ? ` Did you mean ${close.map((c) => JSON.stringify(c)).join(", ")}?` : "";
 
   return `unknown tool "${name}".${hint} Check the command name and configured tool exclusions.`;

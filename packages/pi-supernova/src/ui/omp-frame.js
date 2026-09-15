@@ -38,7 +38,10 @@ function borderPaint(theme, state, borderColor) {
 
 	if (theme && isFunction(theme.fg)) {
 		try {
-			return (text) => theme.fg(key, text);
+			return (text) => {
+				try { return theme.fg(key, text); }
+				catch { return text; }
+			};
 		} catch {
 			/* fall through */
 		}
@@ -51,10 +54,14 @@ const STATUS_PREFIX = { error: ["error", "✗ "], running: ["dim", "… "] };
 
 function statusHeader(theme, { title, description, state, icon }) {
 	const resolved = icon ?? (state === "error" ? "error" : undefined);
+	const fg = (key, text) => {
+		try { return isFunction(theme?.fg) ? theme.fg(key, text) : text; }
+		catch { return text; }
+	};
 	const prefixSpec = STATUS_PREFIX[resolved];
-	const prefix = prefixSpec ? (theme?.fg ? theme.fg(prefixSpec[0], prefixSpec[1]) : prefixSpec[1]) : "";
-	const titleText = theme?.fg ? theme.fg("accent", title) : title;
-	const descText = description ? (theme?.fg ? theme.fg("muted", description) : description) : "";
+	const prefix = prefixSpec ? fg(prefixSpec[0], prefixSpec[1]) : "";
+	const titleText = fg("accent", title);
+	const descText = description ? fg("muted", description) : "";
 
 	return descText ? `${prefix}${titleText}: ${descText}` : `${prefix}${titleText}`;
 }

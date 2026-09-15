@@ -1,7 +1,7 @@
 import { isObject, isString } from "../shared/decode.js";
 import { truncateChars } from "../output/format.js";
 
-const textOf = result => result.content.filter(block => block.type === "text").map(block => block.text).join("\n");
+const textOf = result => (Array.isArray(result?.content) ? result.content : []).filter(block => block?.type === "text").map(block => block.text).join("\n");
 
 const mutationTotals = results => results.reduce((total, result) => {
   const m = result.details?.mutations;
@@ -24,7 +24,7 @@ export function programBatchText(results, total, stopped = "") {
 }
 
 function batchInputs(params, config) {
-  if (["code","file","data"].some(key => params[key] !== undefined)) throw new Error("programs cannot combine with top-level code, file or data; no programs ran");
+  if (["code","file"].some(key => params[key] !== undefined)) throw new Error("programs cannot combine with top-level code or file; no programs ran");
 
   if (!Array.isArray(params.programs) || !params.programs.length || params.programs.length > 32) throw new Error("programs requires 1..32 entries; no programs ran");
 
@@ -35,20 +35,31 @@ function batchInputs(params, config) {
     }
   }
 
+  const hasDefault = params.data !== undefined;
   let encoded;
 
-  try { encoded = JSON.stringify(params.programs); } catch { throw new Error("programs must be JSON-serializable; no programs ran"); }
+  try { encoded = JSON.stringify(hasDefault ? {programs:params.programs,data:params.data} : params.programs); } catch { throw new Error("programs and data must be JSON-serializable; no programs ran"); }
 
   if (encoded.length > (config.maxCodeChars ?? 48000)) throw new Error("programs JSON exceeds the code character budget; no programs ran");
 
-  return JSON.parse(encoded);
+  const parsed = JSON.parse(encoded);
+
+  if (!hasDefault) return parsed;
+  if (!Object.hasOwn(parsed,"data")) throw new Error("data must be JSON-serializable; no programs ran");
+
+  // The runtime snapshots data separately for each fresh guest. An explicit
+  // entry replaces the default wholesale; falsy values are not missing values.
+  return parsed.programs.map(program => program.data === undefined ? {...program,data:parsed.data} : program);
 }
 
 /** Explicit known continuations, not inferred plans, retries, or a shared heap. */
 export async function runProgramBatch(id, params, signal, onUpdate, ctx, config, execute) {
   const programs = batchInputs(params,config);
+  const requestedTimeout = params.timeoutMs === undefined ? config.timeoutMs : Number(params.timeoutMs);
+
+  if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0) throw new Error("program batch timeoutMs must be a positive finite number");
   const started = performance.now();
-  const timeout = Number.isInteger(params.timeoutMs) ? params.timeoutMs : config.timeoutMs;
+  const timeout = requestedTimeout;
   const deadline = started + timeout;
   const controller = new AbortController();
   const combined = signal ? AbortSignal.any([signal,controller.signal]) : controller.signal;
@@ -76,7 +87,7 @@ export async function runProgramBatch(id, params, signal, onUpdate, ctx, config,
       trace.push(...(result.details?.trace ?? []));
       let image = 0;
 
-      for (const block of result.content) if (block.type === "image") {
+      for (const block of Array.isArray(result?.content) ? result.content : []) if (block?.type === "image" && isString(block.data)) {
         imageBytes += Buffer.byteLength(block.data,"base64");
 
         if (images.length >= 16 || imageBytes > 20*1024*1024) { stopped = "batch image budget exceeded; remaining programs did not run"; break; }

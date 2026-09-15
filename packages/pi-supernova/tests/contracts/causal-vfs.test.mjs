@@ -42,3 +42,17 @@ it("a staged overlay hides disk until commit, then disk matches the overlay", as
   await vfs.commit();
   assert.equal(await fs.readFile(file, "utf8"), "cccc");
 });
+
+// Intent: evicting a performance cache must not discard a correctness snapshot.
+it("byte-cache eviction retains the original CAS expectation", async () => {
+  const file = path.join(await scratch(), "a.txt");
+  await fs.writeFile(file, "old");
+  const vfs = new CausalVfs();
+  await vfs.read(file);
+  vfs.setCache("large-receipt", "x".repeat(64 * 1024 * 1024));
+  assert.equal(vfs.cache.has(file), false, "the probe must actually evict the body");
+  assert.equal(vfs.cacheBytes, [...vfs.cache.values()].reduce((sum, text) => sum + Buffer.byteLength(text), 0));
+  await fs.writeFile(file, "new");
+  await assert.rejects(vfs.write(file, "stale"), /write conflict/);
+  assert.equal(await fs.readFile(file, "utf8"), "new");
+});

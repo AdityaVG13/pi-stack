@@ -13,6 +13,7 @@ it("large document chunks append without round-tripping bounded reads", async t 
   await assert.rejects(f.execute('await write({path:"chunks.txt",content:"lost",append:true}); throw Error("rollback append");'), /rollback append/);
   assert.equal(await fs.readFile(path.join(f.root,"chunks.txt"),"utf8"), first + "tail\n");
   await assert.rejects(f.execute('await write({path:"chunks.txt",content:"…[host-result truncated 10 chars]…",append:true});'), /refusing.*truncat/i);
+  await assert.rejects(f.execute('await write({path:"chunks.txt",content:"…[output truncated]…",append:true});'), /refusing.*truncat/i);
   await f.execute('await write({path:"new.txt",content:"a",append:true}); await write({path:"new.txt",content:"b",append:true});');
   assert.equal(await fs.readFile(path.join(f.root,"new.txt"),"utf8"), "ab");
   let called = false;
@@ -27,6 +28,25 @@ it("large document chunks append without round-tripping bounded reads", async t 
   assert.equal(await fs.readFile(path.join(f.root,"chunks.txt"),"utf8"), first + "tail\n");
 });
 
+it("large overwrites report exact added and removed line counts", async t => {
+  const f = await engineFixture(t);
+  const oldLines = 150000;
+  await f.write("large.txt", "old line\n".repeat(oldLines));
+  const result = await f.execute('await write("large.txt", "replacement\\n"); return "done";');
+  const record = result.details.trace.find(entry => entry.name === "write");
+  assert.equal(record.diff.removed, oldLines);
+  assert.equal(record.diff.added, 1);
+  assert.equal(await fs.readFile(path.join(f.root,"large.txt"),"utf8"), "replacement\n");
+});
+
+it("bash rejects invalid timeout values before spawning", async t => {
+  const f = await engineFixture(t);
+
+  for (const literal of ["0", "-1", "NaN", "Infinity", JSON.stringify("later")]) {
+    await assert.rejects(f.execute(`return await bash({command:"printf should-not-run",timeoutMs:${literal}});`), /positive finite number/);
+  }
+});
+
 it("focused plain-text reads select matching log lines instead of a truncated prefix", async t => {
   const f = await engineFixture(t);
   await f.write("status.log", "unrelated status entry\n".repeat(10000) + "STT database migration pending\nrequired archive: recordings.zip\n");
@@ -36,6 +56,7 @@ it("focused plain-text reads select matching log lines instead of a truncated pr
   assert.ok(result.details.result.length < 8000);
   const absent = await f.execute('return await read("status.log",{about:"quasar"});');
   assert.match(absent.details.result, /no matching text/);
+  await assert.rejects(f.execute('return await read("status.log",{about:"one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen"});'), /at most 16 keywords/);
 });
 
 it("read-modify-write refuses truncated source instead of persisting a hole", async t => {
@@ -86,7 +107,7 @@ it("session resource reads preserve IDs, pagination and caller isolation", async
   assert.deepEqual(values.map(r=>r.details.result[1]),["artifact one","artifact two"]);
   assert.equal(values[0].details.result[0],"one"+" λ😀\r\n".repeat(2000));
   const source=(await execute('return await read({path:"agent://ResearchDigest",resolve:true,offset:2,limit:1});',roots[0])).details.result;
-  assert.equal(source.path,"agent://ResearchDigest"); assert.equal(source.text," λ😀\r");
+  assert.equal(source.path,"agent://ResearchDigest"); assert.equal(source.text," λ😀\r\n");
   await assert.rejects(f.execute('return await read("agent://ResearchDigest");'),/does not expose an artifacts directory/);
   await assert.rejects(execute('return await read("agent://%2e%2e%2fsecret");',roots[0]),/invalid session resource ID/);
   await fs.symlink(path.join(roots[1],"ResearchDigest.md"),path.join(roots[0],"Escape.md"));
@@ -136,6 +157,20 @@ it("a failed edit set and a failed program do not install partial file changes",
   assert.equal(await fs.readFile(path.join(f.root, "atomic.txt"), "utf8"), "original");
 });
 
+it("plain reads reject a FIFO without waiting for a writer", {skip:process.platform === "win32"}, async t => {
+  const f = await engineFixture(t);
+  await f.execute('await bash("mkfifo pipe.txt");');
+  await assert.rejects(f.execute('return await read("pipe.txt");'), /regular file/);
+});
+
+it("image reads see staged files and still reject FIFOs", {skip:process.platform === "win32"}, async t => {
+  const f = await engineFixture(t);
+  const staged = await f.execute('await write("staged.png","png-data"); return await read("staged.png");');
+  assert.equal(staged.content.find(block => block.type === "image")?.data, Buffer.from("png-data").toString("base64"));
+  await f.execute('await bash("mkfifo fifo.png");');
+  await assert.rejects(f.execute('return await read("fifo.png");'), /regular file/);
+});
+
 it("paged reads reconstruct CRLF and Unicode source without missing or duplicated lines", async t => {
   const f = await engineFixture(t);
   const body = Array.from({ length: 1400 }, (_, i) => `${i}: ${"λ😀 ".repeat(20)}\r\n`).join("");
@@ -177,6 +212,7 @@ it("patches preserve empty-file and newline boundaries and reject mismatched con
   for (const [before, patch, after] of [
     ["", "@@ -0,0 +1,1 @@\n+created\n", "created\n"],
     ["before\r\n", "@@ -1 +1 @@\n-before\n+after\n", "after\r\n"],
+    ["before\n", "@@ -1 +1 @@\r\n-before\r\n+after\r\n", "after\n"],
     ["before\n", "@@ -1 +1 @@\n-before\n+after\n\\ No newline at end of file\n", "after"],
   ]) {
     await f.write("patch.txt", before);

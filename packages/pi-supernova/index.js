@@ -67,7 +67,10 @@ export function progressEmitter(onUpdate) {
     const wait = PROGRESS_FRAME_MS - (performance.now() - lastSent);
 
     if (wait <= 0) send();
-    else timer = setTimeout(send, wait);
+    else {
+      timer = setTimeout(send, wait);
+      timer.unref?.();
+    }
   };
 
   emit.flush = () => {
@@ -228,7 +231,7 @@ export function registerCodeMode(pi) {
     execute: async function execute(_id, params, signal, onUpdate, ctx, budget) {
       if (params?.programs !== undefined) return runProgramBatch(_id,params,signal,onUpdate,ctx,config,execute);
       cancelWarmTimer();
-      const runCwd = ctx?.cwd || cwd;
+      const runCwd = isString(ctx?.cwd) && ctx.cwd ? ctx.cwd : cwd;
       const runController = new AbortController();
       const abortRun = () => runController.abort(signal?.reason);
 
@@ -258,7 +261,7 @@ export function registerCodeMode(pi) {
           cwd: runCwd,
           data: params?.data,
           nova: makeNovaApi(runBridge, abortRun),
-          config: { ...config, maxLogLines: Math.max(0,config.maxLogLines-(budget?.logLines ?? 0)), timeoutMs: Number.isInteger(params?.timeoutMs) ? params.timeoutMs : config.timeoutMs },
+          config: { ...config, maxLogLines: Math.max(0,config.maxLogLines-(budget?.logLines ?? 0)), timeoutMs: params?.timeoutMs === undefined ? config.timeoutMs : Number(params.timeoutMs) },
           signal: runController.signal,
           onTimeout: abortRun,
         });
@@ -347,7 +350,7 @@ export function registerCodeMode(pi) {
   pi.on("session_start", (_event, ctx) => {
     stopped = false;
 
-    if (ctx && isString(ctx.cwd) && ctx.cwd) cwd = ctx.cwd;
+    cwd = ctx && isString(ctx.cwd) && ctx.cwd ? ctx.cwd : process.cwd();
     // A new session is a new model context: nothing has been seen yet.
     bridge.bindCallContext(ctx);
     bridge.ledger.reset();

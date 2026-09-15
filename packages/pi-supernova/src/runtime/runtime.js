@@ -47,7 +47,7 @@ function prepareProgram(code) {
 
     if (candidate && FUNCTION_TYPES.has(candidate.type)) {
       expression = candidate;
-      expressionSource = code.slice(0, statement.end).replace(/;\s*$/, "");
+      expressionSource = code.slice(statement.start, statement.end).replace(/;\s*$/, "");
     }
   } catch (bodyError) {
     expressionSource = code.trimEnd().replace(/;+\s*$/, "");
@@ -185,7 +185,10 @@ export async function runGuestProgram({ code, file, cwd = process.cwd(), data, n
 
   if (signal?.aborted) return fail(ABORT_MESSAGE);
   const runId = ++runSeq;
-  const timeoutMs = config.timeoutMs ?? 60000;
+  const requestedTimeout = Number(config.timeoutMs === undefined ? 60000 : config.timeoutMs);
+
+  if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0) return fail("timeoutMs must be a positive finite number");
+  const timeoutMs = Math.max(1, Math.min(2_147_483_647, Math.floor(requestedTimeout)));
   const rssLimit = rssBytes() + (config.maxHeapMb ?? 512) * MEMORY_SLACK * 1048576;
 
   return new Promise((resolve) => {
@@ -195,6 +198,7 @@ export async function runGuestProgram({ code, file, cwd = process.cwd(), data, n
     let completing = false;
     let hostError;
     let notifyingHost = false;
+    let aborting = false;
     const pending = new Set();
     const inputController = new AbortController();
 
@@ -224,11 +228,13 @@ export async function runGuestProgram({ code, file, cwd = process.cwd(), data, n
     };
 
     const abort = () => {
-      if (finished) return;
+      if (finished || aborting) return;
+      aborting = true;
       cancelHost();
 
       try { onTimeout?.(); } catch {}
 
+      aborting = false;
       finish(fail(ABORT_MESSAGE));
     };
 
@@ -267,8 +273,11 @@ export async function runGuestProgram({ code, file, cwd = process.cwd(), data, n
       handle?.worker.off("exit", onExit);
       void killWorker(handle);
 
-      if (!outcome.ok) cancelHost();
-      await Promise.allSettled(pending);
+      if (pending.size || !outcome.ok) cancelHost();
+      // A host tool that ignores cancellation must not keep the result unsettled
+      // after the guest worker is gone. Give it a brief drain window only.
+      await Promise.race([Promise.allSettled(pending), new Promise(resolve => setTimeout(resolve, 250))]);
+      if (pending.size && outcome.ok) hostError ??= "program completed with a host call still running";
 
       if (finished) return;
       finish(outcome.ok && hostError ? fail(hostError) : outcome);
@@ -339,7 +348,9 @@ export async function runGuestProgram({ code, file, cwd = process.cwd(), data, n
         await handle.ready;
 
         if (finished || signal?.aborted) return abort();
-        const available = isFunction(nova.names) ? await nova.names() : [];
+        let available = isFunction(nova.names) ? await nova.names() : [];
+
+        if (!Array.isArray(available)) available = [];
 
         if (finished || signal?.aborted) return abort();
         handle.worker.on("message", onMessage);

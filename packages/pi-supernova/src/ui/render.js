@@ -363,9 +363,9 @@ function opDuration(op, isPartial) {
  */
 function formatOpRow(theme, op, width, isPartial, isError) {
 	const marker = opMarker(theme, op, isPartial, isError);
-	const toolText = op.tool.padEnd(TOOL_COL);
+	const toolText = op.tool.slice(0, TOOL_COL).padEnd(TOOL_COL);
 	const tool = theme.fg("syntaxFunction", toolText);
-	const durationText = opDuration(op, isPartial);
+	const durationText = opDuration(op, isPartial).slice(-DURATION_COL);
 	const duration = theme.fg("dim", durationText.padStart(DURATION_COL));
 	let prefix = `${marker} ${tool} ${duration}  `;
 	let used = 2 + toolText.length + 1 + DURATION_COL + 2;

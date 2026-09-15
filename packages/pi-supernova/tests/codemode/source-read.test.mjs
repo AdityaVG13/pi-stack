@@ -27,6 +27,64 @@ it("a path read stays raw text after gravity", async t => {
   assert.equal(source, "plain file body\n");
 });
 
+it("a direct path resolve stays a whole-file view instead of snapping to line one", async t => {
+  const f = await engineFixture(t);
+  const body = "export function one() { return 1; }\nexport function two() { return 2; }\n";
+  await f.write("two.js", body);
+  const source = (await f.execute('return await read({path:"two.js",resolve:true});')).details.result;
+  assert.equal(source.status, "found");
+  assert.equal(source.text, body);
+  assert.deepEqual(source.lines, [1, 2]);
+  assert.equal(source.complete, true);
+  const missing = (await f.execute('return await read({path:"missing.txt",resolve:true});')).details.result;
+  assert.equal(missing.status, "not_found");
+  await assert.rejects(f.execute('return await read({path:"two.js",about:"one",resolve:true});'), /cannot combine/);
+});
+
+it("a file-scoped source query searches that file after commit", async t => {
+  const f = await engineFixture(t);
+  await f.write("two.js", "export function one() { return 1; }\nexport function two() { return 2; }\n");
+  await f.write("long.js", "export function longFn() {\n  const a = 1;\n  const b = 2;\n  return a + b;\n}\n");
+  const source = (await f.execute('return await read({path:"two.js",query:"two",resolve:true});')).details.result;
+  assert.equal(source.status, "found");
+  assert.equal(source.path, "two.js");
+  assert.deepEqual(source.lines, [2, 2]);
+  assert.equal(source.complete, false, "a complete declaration is not a complete file");
+  assert.match(source.text, /^export function two/);
+  const capped = (await f.execute('return await read({query:"longFn",resolve:true,limit:2});')).details.result;
+  assert.deepEqual(capped.lines, [1, 2]);
+  assert.equal(capped.complete, false);
+  const missingScope = (await f.execute('return await read({path:"missing-dir",query:"two",resolve:true});')).details.result;
+  assert.equal(missingScope.status, "not_found");
+  const pastEnd = (await f.execute('return await read({path:"two.js",resolve:true,offset:99});')).details.result;
+  assert.equal(pastEnd.status, "incomplete");
+  await assert.rejects(f.execute('return await read({path:"two.js",query:"two",about:"one"});'), /only one of about, query, outline, or evidence/);
+});
+
+it("a resolved source window stays bounded in an oversized file", async t => {
+  const f = await engineFixture(t);
+  const header = "// filler\n".repeat(20000);
+  const tail = "// tail\n".repeat(50000);
+  const body = header + "export function hugeFn() {\n  return 42;\n}\n" + tail;
+  assert.ok(Buffer.byteLength(body) > 512 * 1024, "exercise the large-file branch");
+  await f.write("huge.js", body);
+  const source = (await f.execute('return await read({query:"hugeFn",resolve:true});')).details.result;
+  assert.equal(source.status, "found");
+  assert.equal(source.path, "huge.js");
+  assert.equal(source.line, 20001);
+  assert.ok(source.lines[1] - source.lines[0] <= 119);
+  assert.equal(source.complete, false);
+  assert.match(source.text, /export function hugeFn/);
+});
+
+it("a focused read stays bounded on an oversized text file", async t => {
+  const f = await engineFixture(t);
+  await f.write("big.log", "noise\n".repeat(80000) + "needle event happened here\n" + "noise\n".repeat(80000));
+  const result = await f.execute('return await read("big.log",{about:"needle"});');
+  assert.match(result.details.result, /needle event/);
+  assert.ok(result.details.result.length < 20000, result.details.result.length);
+});
+
 it("a cold source read returns the complete selected file without an index or follow-up read", async t => {
   const f = await engineFixture(t);
   const body = "export function validateRefreshToken(token) {\n" + "  // keep exact source and whitespace\n".repeat(15) + "  return token.length > 3;\n}\n";
@@ -58,6 +116,19 @@ it("natural source questions reuse lexical stems instead of requiring exact iden
   const result = await f.execute('return await read({query:"where refresh tokens are validated",resolve:true});');
   assert.equal(result.details.result.status,"found");
   assert.equal(result.details.result.path,"auth.js");
+});
+
+it("scoped source reads expand matching Python module constants", async t => {
+  const f = await engineFixture(t);
+  await f.write("audio.py", "MEL_KWARGS = {\n    \"n_mels\": 80,\n}\n\ndef build_model():\n    return MEL_KWARGS\n");
+  const outline = (await f.execute('return await read({path:"audio.py",about:"MEL_KWARGS"});')).details.result;
+  assert.match(outline, /2 declarations · 1 expanded/);
+  assert.match(outline, /MEL_KWARGS = \{/);
+  assert.match(outline, /"n_mels": 80/);
+  const source = (await f.execute('return await read({path:".",about:"MEL_KWARGS",resolve:true});')).details.result;
+  assert.equal(source.status, "found");
+  assert.equal(source.path, "audio.py");
+  assert.match(source.text, /^MEL_KWARGS = \{/);
 });
 
 it("structured source resolution supports a resolve-to-edit handoff in one program", async t => {

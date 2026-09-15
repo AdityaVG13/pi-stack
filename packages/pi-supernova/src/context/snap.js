@@ -20,6 +20,8 @@ const TYPED_EXT = new Set([".ts", ".tsx", ".rs", ".go"]);
 
 const MAX_SEARCH_CHARS = 2 * 1024 * 1024;
 
+const MAX_NEEDLE_CHARS = 128;
+
 const MAX_ALTERNATIVES = 3;
 
 /** Light suffix stripping so "terminated" ⊇ "terminat" matches "terminate"; deterministic, no dictionary. */
@@ -82,21 +84,25 @@ function makeCandidate(filePath, dir, query, tokens, flags) {
   const lower = relative.toLowerCase();
   const base = path.basename(lower);
 
+  const extension = path.extname(base);
+  const stemBase = extension ? base.slice(0, -extension.length) : base;
   const exactPath = lower === query.toLowerCase() || base === query.toLowerCase()
-    || base.slice(0, -path.extname(base).length) === query.toLowerCase();
+    || stemBase === query.toLowerCase();
+
+  const needles = tokens.map(token => stem(token).slice(0, MAX_NEEDLE_CHARS));
 
   return { path: filePath, pathScore: scorePathTopology(relative, tokens, flags), exactPath,
-    pathCoverage: tokens.filter(token => lower.includes(token)).length,
+    pathCoverage: tokens.filter((token, index) => lower.includes(needles[index] ?? token)).length,
     matched: new Set(), exactDefinition: false, definitionCoverage: 0, lineCoverage: 0,
     line: 1, signature: "", context: new Map(), recent: [], anchorScore: -1, exactLines: new Set() };
 }
 
-function inspectLine(candidate, lineNumber, raw, query, tokens, isMatch) {
+function inspectLine(candidate, lineNumber, raw, query, tokens, needles, isMatch) {
   const text = raw.replace(/\r?\n$/, "");
   const lower = text.toLowerCase();
 
   if (isMatch) {
-    const matches = tokens.filter(token => lower.includes(token));
+    const matches = tokens.filter((token, index) => lower.includes(needles[index] ?? token));
 
     for (const token of matches) candidate.matched.add(token);
     const ext = path.extname(candidate.path).toLowerCase();
@@ -108,7 +114,7 @@ function inspectLine(candidate, lineNumber, raw, query, tokens, isMatch) {
     for (const item of items) {
       const name = item.name.toLowerCase();
       const itemExact = name === query.toLowerCase();
-      const coverage = tokens.filter(token => name.includes(token)).length;
+      const coverage = tokens.filter((token, index) => name.includes(needles[index] ?? token)).length;
 
       if (itemExact || coverage > definitionCoverage) { declaration = item; definitionCoverage = coverage; exact = itemExact; }
 
@@ -140,33 +146,47 @@ function inspectLine(candidate, lineNumber, raw, query, tokens, isMatch) {
   if (candidate.recent.length > 2) candidate.recent.shift();
 }
 
-function inspectOverlay(candidate, text, needles, query, tokens) {
-  const lines = text.split("\n");
-  const matches = [];
+function inspectOverlay(candidate, text, needles, query, tokens, signal) {
+  let start = 0, line = 1, truncated = false;
 
-  for (let i = 0; i < lines.length; i++) if (needles.some(needle => lines[i].toLowerCase().includes(needle))) matches.push(i);
+  // Keep only the candidate and its short context, not another copy of every
+  // line in a staged document. Oversized individual lines disclose uncertainty.
+  while (start < text.length) {
+    if ((line & 127) === 0) signal?.throwIfAborted();
+    const newline = text.indexOf("\n", start);
+    const end = newline < 0 ? text.length : newline + 1;
 
-  for (const i of matches) inspectLine(candidate, i + 1, lines[i], query, tokens, true);
-  candidate.context.clear();
+    if (end - start > MAX_SEARCH_CHARS) truncated = true;
+    else {
+      const row = text.slice(start, end);
+      const lower = row.toLowerCase();
+      inspectLine(candidate, line, row, query, tokens, needles, needles.some(needle => lower.includes(needle)));
+    }
+    start = end;
+    line++;
+  }
 
-  for (let i = Math.max(0, candidate.line - 3); i < Math.min(lines.length, candidate.line + 4); i++) candidate.context.set(i + 1, truncateChars(lines[i], 240, "source line").text);
+  return truncated;
 }
 
-async function contentCandidates({ dir, includeHidden, query, tokens, flags, pendingPaths, run, overlayText, signal, exact, diskFiles }) {
-  const needles = exact ? [query.toLowerCase()] : tokens;
+async function contentCandidates({ dir, includeHidden, query, tokens, flags, pendingPaths, run, overlayText, signal, exact, diskFiles, focusFile }) {
+  const needles = exact ? [query.toLowerCase().slice(0, MAX_NEEDLE_CHARS)] : tokens.map(token => stem(token).slice(0, MAX_NEEDLE_CHARS));
+  const searchNeedles = [...new Set(needles)];
+  const candidateRoot = focusFile ? path.dirname(focusFile) : dir;
+  const candidates = new Map();
+
   const args = ["rg", "--json", "--fixed-strings", "--ignore-case", "--before-context", "2", "--after-context", "4"];
 
   if (includeHidden) args.push("--hidden");
   args.push("-g", "!.git/**", "-g", "!**/.git/**");
 
-  for (const needle of needles) args.push("-e", needle);
-  args.push("--", dir);
+  for (const needle of searchNeedles) args.push("-e", needle);
+  args.push("--", focusFile ?? dir);
 
-  const response = diskFiles ? await run(args, { cwd: dir, timeoutMs: 15000, maxOutputChars: MAX_SEARCH_CHARS, signal })
+  const response = diskFiles || (focusFile && overlayText(focusFile) === undefined) ? await run(args, { cwd: focusFile ? path.dirname(focusFile) : dir, timeoutMs: 15000, maxOutputChars: MAX_SEARCH_CHARS, signal })
     : { stdout: "", stderr: "", exitCode: 1 };
 
   if (response.exitCode !== 0 && response.exitCode !== 1) throw new Error("source search failed: " + response.stderr.trim());
-  const candidates = new Map();
   const records = response.stdout.split("\n");
 
   for (let i = 0; i < records.length; i++) {
@@ -190,24 +210,26 @@ async function contentCandidates({ dir, includeHidden, query, tokens, flags, pen
     let candidate = candidates.get(filePath);
 
     if (!candidate) {
-      candidate = makeCandidate(filePath, dir, query, tokens, flags);
+      candidate = makeCandidate(filePath, candidateRoot, query, tokens, flags);
       candidates.set(filePath, candidate);
     }
 
-    inspectLine(candidate, data.line_number, data.lines.text, query, tokens, record.type === "match");
+    inspectLine(candidate, data.line_number, data.lines.text, query, tokens, needles, record.type === "match");
   }
+
+  let overlayTruncated = false;
 
   for (const filePath of pendingPaths) {
     const pending = overlayText(filePath);
 
     if (pending === undefined) continue;
-    const candidate = makeCandidate(filePath, dir, query, tokens, flags);
-    inspectOverlay(candidate, pending, needles, query, tokens);
+    const candidate = makeCandidate(filePath, candidateRoot, query, tokens, flags);
+    overlayTruncated = inspectOverlay(candidate, pending, needles, query, tokens, signal) || overlayTruncated;
 
     if (candidate.matched.size) candidates.set(filePath, candidate);
   }
 
-  return { candidates, truncated: response.outputTruncated === true };
+  return { candidates, truncated: response.outputTruncated === true || overlayTruncated };
 }
 
 function rankScore(candidate, tokenCount) {
@@ -224,25 +246,48 @@ function location(candidate, root) {
     context: [...context].sort((a, b) => a[0] - b[0]).map(([line, text]) => (line === candidate.line ? "►" : " ") + line + " " + text) };
 }
 
-async function spanCandidates(filePath, lines, root, overlayText) {
+async function spanCandidates(filePath, lines, root, overlayText, signal) {
   const staged = overlayText(filePath);
-  const text = staged !== undefined ? staged : await fs.readFile(filePath, "utf8");
-  const spans = WorkspaceIndex.spansOf(WorkspaceIndex.fromText(filePath, text));
   const rel = path.relative(root, filePath);
+  let text = staged;
+
+  if (text === undefined) {
+    const file = await fs.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+
+    try {
+      const stat = await file.stat();
+
+      if (!stat.isFile()) throw new Error("source candidate is not a regular file: " + filePath);
+      if (stat.size > 512 * 1024) return lines.map(line => ({ path: rel, line, signature: "", context: [] }));
+      text = await file.readFile({ encoding: "utf8", signal });
+    } finally { await file.close(); }
+  }
+  const spans = WorkspaceIndex.spansOf(WorkspaceIndex.fromText(filePath, text));
 
   return lines.map(line => {
     const span = pickSpan(spans, { line }) ?? { start: line, end: line };
+    const end = Math.min(span.end, span.start + 119);
 
-    return spanCandidate(rel, line, spanWindow(text, span.start, span.end));
+    return spanCandidate(rel, line, spanWindow(text, span.start, end));
   });
 }
 
-async function rankedSpanCandidates(ranked, root, overlayText) {
+async function rankedSpanCandidates(ranked, root, overlayText, signal) {
   const out = [];
 
   for (const candidate of ranked) {
     const lines = candidate.exactLines?.size ? [...candidate.exactLines].sort((a, b) => a - b) : [candidate.line];
-    out.push(...await spanCandidates(candidate.path, lines, root, overlayText));
+    const staged = overlayText(candidate.path);
+    let large = false;
+
+    if (staged !== undefined) large = Buffer.byteLength(staged) > 512 * 1024;
+    else try { large = (await fs.stat(candidate.path)).size > 512 * 1024; } catch {}
+
+    if (large) out.push(location(candidate, root));
+    else {
+      try { out.push(...await spanCandidates(candidate.path, lines, root, overlayText, signal)); }
+      catch (error) { signal?.throwIfAborted(); out.push(location(candidate, root)); }
+    }
     if (out.length >= MAX_ALTERNATIVES) break;
   }
 
@@ -251,11 +296,11 @@ async function rankedSpanCandidates(ranked, root, overlayText) {
 
 export async function executeSnap({ query, searchDir, root, includeHidden = false, run = runCommand, overlayText = () => undefined, pendingPaths = [], pathContext = {}, signal }) {
   const flags = tokenizeQuery(query);
+
+  if (flags.tokens.length > 16) throw new Error("source question is too broad; use at most 16 keywords");
   const tokens = [...new Set(flags.tokens.map(stem))];
 
   if (tokens.length === 0) throw new Error("read requires a file path or a searchable source question");
-
-  if (tokens.length > 16) throw new Error("source question is too broad; use at most 16 keywords");
   query = query.trim();
   const dir = path.resolve(searchDir || process.cwd());
 
@@ -264,15 +309,21 @@ export async function executeSnap({ query, searchDir, root, includeHidden = fals
   flags.wantsTest ||= isTestPath(path.relative(root ?? dir, dir));
   pendingPaths = pendingPaths.filter(file => inScope(file, dir, includeHidden));
 
-  const diskFiles = await fs.stat(dir).then(stat => stat.isDirectory(), error => {
-    if (error.code !== "ENOENT" || !pendingPaths.length) throw error;
+  const empty = { path: null, line: null, signature: "", confidence: 0, context: [] };
+  const dirStat = await fs.stat(dir).catch(error => {
+    if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
 
-    return false;
+    return null;
   });
 
-  const empty = { path: null, line: null, signature: "", confidence: 0, context: [] };
+  if (!dirStat && !pendingPaths.length) return { ...empty, status: "not_found" };
+  const diskFiles = dirStat?.isDirectory() === true;
+  const focusFile = dirStat?.isFile() === true || pendingPaths.includes(dir) ? dir : null;
+
   const exact = /^[a-zA-Z_$][\w$]*$/.test(query);
-  const search = await contentCandidates({ dir, includeHidden, query, tokens, flags, pendingPaths, run, overlayText, signal, exact, diskFiles });
+
+  if (!tokens.length) return { ...empty, status: "not_found" };
+  const search = await contentCandidates({ dir, includeHidden, query, tokens, flags, pendingPaths, run, overlayText, signal, exact, diskFiles, focusFile });
   // A declaration hit needs no prerequisite file listing or persistent index.
   // Bare names can name files, even when callers mention the same word.
   const needsPaths = !search.candidates.size || (exact && ![...search.candidates.values()].some(candidate => candidate.exactDefinition));
@@ -283,26 +334,27 @@ export async function executeSnap({ query, searchDir, root, includeHidden = fals
 
   if (listing.exitCode !== 0 && listing.exitCode !== 1) throw new Error("source file listing failed: " + listing.stderr.trim());
 
-  const paths = [...new Set([...listing.stdout.split("\0").flatMap(file => file ? [path.resolve(dir, file)] : []), ...pendingPaths])]
+  const paths = [...new Set([...listing.stdout.split("\0").flatMap(file => file ? [path.resolve(dir, file)] : []), ...(focusFile ? [focusFile] : []), ...pendingPaths])]
     .filter(file => inScope(file, dir, includeHidden));
+  const candidateRoot = focusFile ? path.dirname(focusFile) : dir;
 
   for (const filePath of paths) {
     if (!inScope(filePath, dir, includeHidden) || search.candidates.has(filePath)) continue;
-    const relative = path.relative(dir, filePath).toLowerCase();
+    const relative = path.relative(candidateRoot, filePath).toLowerCase();
 
     if (!tokens.some(token => relative.includes(token))) continue;
 
     if (exact && tokens.length > 1 && !relative.includes(query.toLowerCase())) continue;
-    const candidate = makeCandidate(filePath, dir, query, tokens, flags);
+    const candidate = makeCandidate(filePath, candidateRoot, query, tokens, flags);
 
-    if (candidate.pathScore > 0) search.candidates.set(filePath, candidate);
+    if (focusFile || candidate.pathScore > 0) search.candidates.set(filePath, candidate);
   }
 
   const ranked = [];
 
   for (const candidate of search.candidates.values()) {
-    if (candidate.pathScore > -50) {
-      ranked.push({ ...candidate, score: rankScore(candidate, tokens.length) });
+    if (focusFile || candidate.pathScore > -50) {
+      ranked.push({ ...candidate, score: focusFile ? Math.max(1, rankScore(candidate, tokens.length)) : rankScore(candidate, tokens.length) });
     }
   }
 
@@ -336,11 +388,11 @@ export async function executeSnap({ query, searchDir, root, includeHidden = fals
   const uniqueExact = best.exactDefinition && !second?.exactDefinition || best.exactPath && !second?.exactPath && !second?.exactDefinition;
 
   if (!uniqueExact && (coverage < 0.6 || margin < 0.15 || best.definitionCoverage / tokens.length < 0.5)) {
-    return { ...empty, status: "ambiguous", candidates: await rankedSpanCandidates(ranked, relativeRoot, overlayText) };
+    return { ...empty, status: "ambiguous", candidates: await rankedSpanCandidates(ranked, relativeRoot, overlayText, signal) };
   }
 
   if (best.exactLines.size > 1) {
-    return { ...empty, status: "ambiguous", candidates: await rankedSpanCandidates([best], relativeRoot, overlayText) };
+    return { ...empty, status: "ambiguous", candidates: await rankedSpanCandidates([best], relativeRoot, overlayText, signal) };
   }
 
   const confidence = uniqueExact ? 0.95 : Math.min(0.85, 0.5 + coverage * 0.2 + margin * 0.15);
