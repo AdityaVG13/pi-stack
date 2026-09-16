@@ -30,8 +30,11 @@ it("commit rejects a previously checked symlink retargeted outside the workspace
   await assert.rejects(f.execute('await write("link/item.txt","inside"); await bash({command:process.execPath,args:["-e",'+JSON.stringify(swap)+']}); await write("link/item.txt","escaped");'),/escapes workspace/);
   assert.equal(await fs.readFile(path.join(outside,"item.txt"),"utf8"),"outside");
   await fs.symlink("inside",path.join(f.root,"commit-link"));
-  const directSwap='const fs=await import("node:fs/promises");await fs.rename('+JSON.stringify(path.join(f.root,"commit-link"))+','+JSON.stringify(path.join(f.root,"old-commit-link"))+');await fs.symlink('+JSON.stringify(outside)+','+JSON.stringify(path.join(f.root,"commit-link"))+');';
-  await assert.rejects(f.execute('await write("commit-link/item.txt","staged");'+directSwap),/escapes workspace/);
+  const pending = f.execute('await write("commit-link/item.txt","staged"); await new Promise(resolve => setTimeout(resolve, 400));');
+  await new Promise(resolve => setTimeout(resolve, 80));
+  await fs.rename(path.join(f.root,"commit-link"), path.join(f.root,"old-commit-link"));
+  await fs.symlink(outside, path.join(f.root,"commit-link"));
+  await assert.rejects(pending,/escapes workspace/);
   assert.equal(await fs.readFile(path.join(outside,"item.txt"),"utf8"),"outside");
 });
 
@@ -39,7 +42,10 @@ it("write preserves the original explicit-read expectation across its internal d
   const f = await engineFixture(t);
   await f.write("state.txt","left=old\nright=old\n");
   const external=JSON.stringify(path.join(f.root,"state.txt"));
-  await assert.rejects(f.execute('const previous=await read("state.txt"); await (await import("node:fs/promises")).writeFile('+external+',"left=old\\nright=external\\n"); await write("state.txt",previous.replace("left=old","left=new"));'),/write conflict/);
+  const pending = f.execute('const previous=await read("state.txt"); await new Promise(resolve => setTimeout(resolve, 400)); await write({path:"state.txt",content:previous.replace("left=old","left=new"),replace:true});');
+  await new Promise(resolve => setTimeout(resolve, 80));
+  await fs.writeFile(path.join(f.root,"state.txt"),"left=old\nright=external\n");
+  await assert.rejects(pending,/write conflict/);
   assert.equal(await fs.readFile(path.join(f.root,"state.txt"),"utf8"),"left=old\nright=external\n");
 });
 

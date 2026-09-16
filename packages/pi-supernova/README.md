@@ -12,6 +12,15 @@ Ordinary JavaScript control flow remains available; the guest command bindings
 are only `read`, `edit`, `write`, and `bash`. Supernova supplies retrieval,
 transactional file operations, batching, bounded results and the grouped nova UI.
 
+## Unreleased
+
+- **`parallel: true` on `programs`:** independent entries run at once (up to 8),
+  keep result order, and do not stop siblings on failure. Sequential is still
+  the default.
+- **JSON `.length`:** `read({path, json:".items.length"})` returns the array
+  length without dumping the array.
+- Prefer `edit` for a file you already read; `write` still replaces the file.
+
 ## What is new in 0.6.0
 
 - **Shared batch input:** supply top-level `data` once; each program gets an
@@ -267,6 +276,12 @@ Execution failures return a **typed stop report**, rather than throwing away pri
 results/images: isError and details.ok identify failure, details.programs contains
 every attempted result, and details.attempted/total identifies unstarted work.
 Single code/file invocations retain their existing throwing behavior.
+
+Set `parallel: true` with `programs` to run independent entries concurrently
+(up to 8 at once). Each still gets a fresh guest and its own commit; results stay
+in submission order. A failed entry does not stop siblings. Two entries writing
+the same file race: the losing commit reports a conflict. Sequential remains the
+default. `parallel` is invalid on a lone `code` or `file` call.
 
 The outer deadline, host-call budget, log allowance, text budget and image limits
 are shared across the batch. Individual read budgets are not reduced. Every

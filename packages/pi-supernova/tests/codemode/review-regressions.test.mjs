@@ -11,11 +11,14 @@ for (const append of [false, true]) it(`partial-read CAS rejects external change
   const f = await engineFixture(t);
   await f.write("state.txt", "old\ntail\n");
   const absolute = JSON.stringify(path.join(f.root, "state.txt"));
-  await assert.rejects(f.execute(`
+  const pending = f.execute(`
     const previous = await read("state.txt", 1, 1);
-    await (await import("node:fs/promises")).writeFile(${absolute}, "external\\ntail\\n");
-    await write({path:"state.txt",content:previous,append:${append}});
-  `), /write conflict/);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    await write({path:"state.txt",content:previous,append:${append},replace:true});
+  `);
+  await new Promise(resolve => setTimeout(resolve, 80));
+  await fs.writeFile(path.join(f.root, "state.txt"), "external\ntail\n");
+  await assert.rejects(pending, /write conflict/);
   assert.equal(await fs.readFile(path.join(f.root, "state.txt"), "utf8"), "external\ntail\n");
 });
 
@@ -23,13 +26,16 @@ it("a fresh partial reread replaces the old full-read CAS snapshot", async t => 
   const f = await engineFixture(t);
   await f.write("state.txt", "old\ntail\n");
   const absolute = JSON.stringify(path.join(f.root, "state.txt"));
-  await f.execute(`
+  const pending = f.execute(`
     await read("state.txt");
-    await (await import("node:fs/promises")).writeFile(${absolute}, "new\\ntail\\n");
+    await new Promise(resolve => setTimeout(resolve, 400));
     const fresh = await read("state.txt", 1, 1);
     if (fresh !== "new\\n") throw Error("reread was stale");
-    await write("state.txt", fresh + "tail\\n");
+    await write({path:"state.txt",content:fresh + "tail\\n",replace:true});
   `);
+  await new Promise(resolve => setTimeout(resolve, 80));
+  await fs.writeFile(path.join(f.root, "state.txt"), "new\ntail\n");
+  await pending;
   assert.equal(await fs.readFile(path.join(f.root, "state.txt"), "utf8"), "new\ntail\n");
 });
 
@@ -38,12 +44,15 @@ it("a read window above 16 MiB still protects against a lost update", async t =>
   const body = "old\n" + "x".repeat(17 * 1024 * 1024);
   await f.write("large.txt", body);
   const absolute = JSON.stringify(path.join(f.root, "large.txt"));
-  await assert.rejects(f.execute(`
+  const pending = f.execute(`
     const previous = await read("large.txt", 1, 1);
-    const file = await (await import("node:fs/promises")).open(${absolute}, "r+");
-    try { await file.write("NEW", 0, "utf8"); } finally { await file.close(); }
-    await write("large.txt", previous);
-  `), /write conflict/);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    await write({path:"large.txt",content:previous,replace:true});
+  `);
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const handle = await fs.open(path.join(f.root, "large.txt"), "r+");
+  try { await handle.write("NEW", 0, "utf8"); } finally { await handle.close(); }
+  await assert.rejects(pending, /write conflict/);
   assert.equal(await fs.readFile(path.join(f.root, "large.txt"), "utf8"), "NEW" + body.slice(3));
 });
 
@@ -192,13 +201,16 @@ it("additional: large focused disk reads retain a CAS snapshot", async t => {
   const body = "old\n" + "noise\n".repeat(90000) + "needle\n";
   await f.write("focus.log", body);
   const absolute = JSON.stringify(path.join(f.root, "focus.log"));
-  await assert.rejects(f.execute(`
+  const pending = f.execute(`
     const view = await read("focus.log", {about:"needle"});
     if (!view.includes("needle")) throw Error("focus failed to open source");
-    const file = await (await import("node:fs/promises")).open(${absolute}, "r+");
-    try { await file.write("NEW", 0, "utf8"); } finally { await file.close(); }
-    await write("focus.log", "replacement\\n");
-  `), /write conflict/);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    await write({path:"focus.log",content:"replacement\\n",replace:true});
+  `);
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const handle = await fs.open(path.join(f.root, "focus.log"), "r+");
+  try { await handle.write("NEW", 0, "utf8"); } finally { await handle.close(); }
+  await assert.rejects(pending, /write conflict/);
   assert.equal(await fs.readFile(path.join(f.root, "focus.log"), "utf8"), "NEW" + body.slice(3));
 });
 

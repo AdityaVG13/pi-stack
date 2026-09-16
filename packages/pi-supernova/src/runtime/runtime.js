@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 import { packageFinalReturn } from "../output/bottleneck.js";
 import { truncateChars } from "../output/format.js";
 import { isFunction, isObject, isString } from "../shared/decode.js";
+import { guestImportMessage, isDeniedGuestImport } from "./guest-deny-imports.js";
 
 const WORKER_URL = new URL("./guest-worker.js", import.meta.url);
 
@@ -60,8 +61,35 @@ function parseExpressionFunction(code) {
   }
 }
 
+function deniedSpecifier(node) {
+  if (node?.type === "Literal" && isString(node.value)) return node.value;
+  if (node?.type === "TemplateLiteral" && node.expressions.length === 0) return node.quasis[0]?.value?.cooked;
+}
+
+function assertGuestImports(ast) {
+  function walk(node) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node.type === "ImportDeclaration" || node.type === "ImportExpression") {
+      const spec = deniedSpecifier(node.source);
+      throw new Error((spec && isDeniedGuestImport(spec) ? guestImportMessage(spec) : "guest cannot import modules; use read, edit, write, or bash") + "; no commands ran");
+    }
+    if (node.type === "CallExpression" && node.callee?.type === "Identifier" && node.callee.name === "require") {
+      const spec = deniedSpecifier(node.arguments?.[0]);
+      throw new Error((spec && isDeniedGuestImport(spec) ? guestImportMessage(spec) : "guest cannot import modules; use read, edit, write, or bash") + "; no commands ran");
+    }
+    for (const key of Object.keys(node)) {
+      if (key === "start" || key === "end" || key === "loc" || key === "range") continue;
+      walk(node[key]);
+    }
+  }
+
+  walk(ast);
+}
+
 function prepareProgram(code) {
   const parsed = parseExpressionFunction(code);
+  assertGuestImports(parsed.program ?? parsed.expression);
   const body = parsed.expression ? "return await (" + parsed.expressionSource + "\n)();" : code;
   const returns = parsed.expression
     ? parsed.expression.type === "ArrowFunctionExpression" && parsed.expression.body.type !== "BlockStatement" || hasReturn(parsed.expression.body)

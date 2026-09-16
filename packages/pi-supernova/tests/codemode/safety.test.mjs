@@ -63,7 +63,7 @@ it("read-modify-write refuses truncated source instead of persisting a hole", as
   const f=await engineFixture(t);
   const body="unique_value = 1\n"+"safe_value = 1\n".repeat(6000);
   await f.write("large.py",body);
-  await assert.rejects(f.execute('await write("large.py",(await read("large.py")).replace("safe_value", "new_value"));'),/refusing.*truncat/i);
+  await assert.rejects(f.execute('await write("large.py",(await read("large.py")).replace("safe_value", "new_value"));'),/raw read of large.py|refusing.*truncat/i);
   assert.equal(await fs.readFile(path.join(f.root,"large.py"),"utf8"),body);
   await assert.rejects(f.execute('await read({path:"large.py",complete:true});'),/incomplete read/i);
   await assert.rejects(f.execute('await write("large.py","…[host-result truncated 11669 chars]…");'),/refusing.*truncat/i);

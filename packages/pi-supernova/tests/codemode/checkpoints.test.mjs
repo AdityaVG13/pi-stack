@@ -53,7 +53,7 @@ it("edit callbacks retain filesystem checkpoints without exposing a speculate co
     });
     const restored = await read("state.txt");
     const accepted = await edit(async () => {
-      await write("state.txt", "accepted");
+      await write({path:"state.txt",content:"accepted",replace:true});
       return "validated";
     });
     return {rejected, restored, accepted, final: await read("state.txt")};

@@ -1,10 +1,28 @@
 import { parentPort } from "node:worker_threads";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { isString, isObject, toPlain, looksLikePath } from "../shared/decode.js";
+import { register, registerHooks } from "node:module";
+import { isString, isObject, isFunction, toPlain, looksLikePath } from "../shared/decode.js";
 import { truncateChars } from "../output/format.js";
 import { gatherReadArgs, normalizeRead, decodeReadValue, assertReadPaths } from "../contract/read.js";
 import { classifyEdit } from "../contract/edit.js";
 import { normalizeBash } from "../contract/bash.js";
+import { guestImportMessage, isDeniedGuestImport } from "./guest-deny-imports.js";
+
+if (isFunction(registerHooks)) {
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (isDeniedGuestImport(specifier)) {
+        const error = new Error(guestImportMessage(specifier));
+        error.code = "ERR_GUEST_IMPORT";
+        throw error;
+      }
+
+      return nextResolve(specifier, context);
+    },
+  });
+} else {
+  register("./guest-deny-imports.js", import.meta.url);
+}
 
 // Guest programs run here, off the host thread. The host can terminate() this
 // worker mid-loop, so a runaway "while (true) {}" or process.exit() in guest
@@ -357,18 +375,33 @@ function buildGuestApi(available, batchRead, runId, _nativeArgv) {
     p = args.path;
 
     if (Array.isArray(p)) {
-      return await readManyPaths(read, invoke, batchRead, args, p, decode);
+      const values = await readManyPaths(read, invoke, batchRead, args, p, decode);
+      for (const item of p) if (isString(item)) noteReadPath({ path: item }, values);
+
+      return values;
     }
 
     const readValue = !batchRead
       ? decode(unwrapRead(await invoke("read", args), args))
       : await enqueueCompatibleRead(readState, flushReads, args, decode);
+    noteReadPath(args, readValue);
 
     return readValue;
   };
 
+  const readFiles = new Set();
+
+  function noteReadPath(args, value) {
+    if (isString(args.path) && looksLikePath(args.path)) readFiles.add(args.path);
+    if (isObject(value) && isString(value.path) && looksLikePath(value.path)) readFiles.add(value.path);
+  }
+
   const write = async (p, content) => {
     const args = isObject(p) ? p : { path: p, content };
+
+    if (args.append !== true && args.replace !== true && isString(args.path) && readFiles.has(args.path)) {
+      throw new Error("file was already read this program; use edit(oldText, newText) or edit(view, ...). write({path,content,replace:true}) replaces anyway");
+    }
 
     return unwrapValue(await invoke("write", args));
   };
@@ -425,11 +458,43 @@ function postFailure(runId, err, location) {
   post({ op: "error", runId, message, location });
 }
 
+function denyBuiltin(id) {
+  if (isDeniedGuestImport(id)) throw new Error(guestImportMessage(id));
+}
+
+let sealedRealm = false;
+
+function sealGuestRealm() {
+  if (sealedRealm) return;
+  sealedRealm = true;
+  if (isFunction(process.getBuiltinModule)) {
+    const orig = process.getBuiltinModule.bind(process);
+    process.getBuiltinModule = (id) => {
+      denyBuiltin(id);
+
+      return orig(id);
+    };
+  }
+
+  if (isFunction(process.binding)) {
+    process.binding = (id) => {
+      throw new Error(guestImportMessage(String(id)));
+    };
+  }
+
+  if (isFunction(process.dlopen)) {
+    process.dlopen = () => {
+      throw new Error("guest cannot load native modules; use read, edit, write, or bash");
+    };
+  }
+}
+
 async function handleRun(msg) {
   const { runId, prepared, limits, available, batchRead = true } = msg;
   activeRunId = runId;
   runActive = true;
   let compiled;
+  sealGuestRealm();
 
   try {
     // Existing programs may declare their own data variable; bind it only when supplied.

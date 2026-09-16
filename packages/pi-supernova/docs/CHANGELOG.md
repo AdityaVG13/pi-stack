@@ -18,6 +18,34 @@
   program batches are `ProgramBatch`, snap ranking/read/edit/bash/VFS/evidence/
   output/UI are extracted helpers and classify tables. Same public behavior;
   BIND DAG unchanged.
+- Guest isolate: no `fs` / `child_process` / `import` / `require`. After `read()`
+  of a path, `write()` of that path throws (use `edit`, or `replace:true`).
+  Raw reads of large JSON/source require `json` / `about` / offset or
+  `complete:true`.
+- Standing reference stays one nova invocation: prefer `edit` after `read`,
+  `json`/about/`complete:true` for large files, no guest `fs`, and
+  `programs`/`parallel:true` for independent work *inside* one call. Overlapping
+  sibling `supernova` calls still hint that independent work belongs in one
+  program.
+
+### Added
+
+- `parallel: true` on `programs`: independent entries run concurrently (up to 8
+  lanes) in fresh guests, results keep submission order, and a failed entry does
+  not stop siblings. Two entries writing the same file race; the losing commit
+  reports a conflict. Sequential batches still stop on the first failure.
+  `parallel` is rejected on a lone `code` or `file` call.
+- JSON selectors accept array `.length` (for example `.items.length`) so a
+  catalog count does not require dumping the array. String `.length` is still
+  rejected; this is not jq.
+
+### Changed
+
+- Prefer `edit` for a file already read; `write` remains replace-the-file.
+- Overlapping sibling `supernova` calls hint to batch independent work as
+  `programs` with `parallel:true`.
+- Empty programs (no adapter calls) still draw a nova card with a result preview
+  instead of a one-line `complete` status.
 
 ## [0.6.0] - 2026-09-15
 

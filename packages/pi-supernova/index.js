@@ -25,6 +25,7 @@ try {
     Array: (items, opts) => ({ type: "array", items, ...opts }),
     Integer: (opts) => ({ type: "integer", ...opts }),
     Optional: (s) => ({ ...s }),
+    Boolean: (opts) => ({ type: "boolean", ...opts }),
   };
 }
 
@@ -206,6 +207,10 @@ export function registerCodeMode(pi) {
     };
   }
 
+  function rejectLoneParallel(params) {
+    if (params?.parallel !== undefined) throw new Error("parallel applies to the programs array; no commands ran");
+  }
+
   function bindRunSignal(signal) {
     const runController = new AbortController();
     const abortRun = () => runController.abort(signal?.reason);
@@ -289,9 +294,9 @@ export function registerCodeMode(pi) {
     throw error;
   }
 
-  function packExecuteResult(outcome, call, runBridge, budget, peakSeen) {
+  function packExecuteResult(outcome, call, runBridge, budget, runOpts, peakSeen) {
     if (budget) budget.logLines += outcome.logs?.length ?? 0;
-    outcome.overlappedTurn = peakSeen > 1 ? peakSeen : 0;
+    outcome.overlappedTurn = !runOpts?.parallel && peakSeen > 1 ? peakSeen : 0;
     outcome.mutations = runBridge.getMutations();
     const trace = runBridge.getTrace();
     attachReceipts(outcome, trace);
@@ -323,6 +328,7 @@ export function registerCodeMode(pi) {
         file: Type.Optional(Type.String({ minLength: 1 })),
         data: Type.Optional(Type.Unknown()),
       }, {additionalProperties:false}), {minItems:1,maxItems:32})),
+      parallel: Type.Optional(Type.Boolean()),
     }),
     // One self-owned result frame is shared by Pi and OMP; renderCall stays empty
     // so separate call/result slots cannot duplicate the lifecycle card.
@@ -330,8 +336,9 @@ export function registerCodeMode(pi) {
     mergeCallAndResult: true,
     renderCall: renderSupernovaCall,
     renderResult: renderSupernovaResult,
-    execute: async function execute(_id, params, signal, onUpdate, ctx, budget) {
+    execute: async function execute(_id, params, signal, onUpdate, ctx, budget, runOpts) {
       if (params?.programs !== undefined) return runProgramBatch(_id,params,signal,onUpdate,ctx,config,execute);
+      rejectLoneParallel(params);
       cancelWarmTimer();
       const runCwd = isString(ctx?.cwd) && ctx.cwd ? ctx.cwd : cwd;
       const { runController, abortRun } = bindRunSignal(signal);
@@ -362,7 +369,7 @@ export function registerCodeMode(pi) {
         finishRun(runBridge, emitProgress, signal, abortRun, runController);
       }
 
-      return packExecuteResult(outcome, call, runBridge, budget, peakSeen);
+      return packExecuteResult(outcome, call, runBridge, budget, runOpts, peakSeen);
     },
   });
 

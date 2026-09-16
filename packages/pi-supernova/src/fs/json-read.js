@@ -2,7 +2,7 @@ import { isString, isObject } from "../shared/decode.js";
 
 export const MAX_JSON_BYTES = 16 * 1024 * 1024;
 
-const SELECTOR_HELP = 'JSON selector supports .field, .nested[0], .items[0:3], .["quoted.key"], or . (whole value); not full jq';
+const SELECTOR_HELP = 'JSON selector supports .field, .nested[0], .items[0:3], .items.length, .["quoted.key"], or . (whole value); not full jq';
 
 function parseIdentStep(rest, first) {
   const match = (first ? /^([A-Za-z_$][\w$]*)/ : /^\.([A-Za-z_$][\w$]*)/).exec(rest);
@@ -61,6 +61,8 @@ function missingJsonField(value, key) {
 }
 
 function selectKey(value, key) {
+  if (Array.isArray(value) && key === "length") return value.length;
+
   if (!isObject(value) || !Object.hasOwn(value, key)) throw missingJsonField(value, key);
 
   return value[key];

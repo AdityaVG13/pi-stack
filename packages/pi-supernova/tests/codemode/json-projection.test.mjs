@@ -24,10 +24,11 @@ it("JSON projection parses the full report before selecting fields and array sli
   const f = await engineFixture(t);
   const report = { padding:"λ".repeat(50000), verdict:"REVIEW", values:[false,0,null,{pitch:123}], 'a.b':{ 'x/y': 7 } };
   await f.write("report.json", JSON.stringify(report,null,2));
-  await assert.rejects(f.execute('return JSON.parse(await read("report.json"));'), /incomplete JSON read/);
+  await assert.rejects(f.execute('return JSON.parse(await read("report.json"));'), /incomplete JSON read|raw JSON read/);
   const selectors = [".verdict", ".values[1:4]", '.["a.b"]["x/y"]'];
   const result = await f.execute('return await read({path:"report.json",json:' + JSON.stringify(selectors) + '});');
   assert.deepEqual(result.details.result, ["REVIEW",[0,null,{pitch:123}],7]);
+  assert.equal((await f.execute('return await read({path:"report.json",json:".values.length"});')).details.result, 4);
   const both = await f.execute('return await Promise.all([read({path:"report.json",json:".values[0]"}),read({path:"report.json",json:".values[0]"})]);');
   assert.deepEqual(both.details.result,[false,false]);
   const array = await f.execute('return await read(["report.json","report.json"],{json:".values[2]"});');
@@ -41,11 +42,11 @@ it("JSON projection parses the full report before selecting fields and array sli
     ".toString": "JSON field not found: \"toString\"; available keys: " + keys,
     ".values[99]": "JSON index out of range: 99",
     ".verdict.length": "JSON field not found: \"length\"",
-    ".values | length": "JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq",
-    "": "JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq",
-    "..verdict": "JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq",
-    ".values[-1]": "JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq",
-    ".values[1:9007199254740992]": "JSON selector supports .field, .nested[0], .items[0:3], .[\"quoted.key\"], or . (whole value); not full jq",
+    ".values | length": "JSON selector supports .field, .nested[0], .items[0:3], .items.length, .[\"quoted.key\"], or . (whole value); not full jq",
+    "": "JSON selector supports .field, .nested[0], .items[0:3], .items.length, .[\"quoted.key\"], or . (whole value); not full jq",
+    "..verdict": "JSON selector supports .field, .nested[0], .items[0:3], .items.length, .[\"quoted.key\"], or . (whole value); not full jq",
+    ".values[-1]": "JSON selector supports .field, .nested[0], .items[0:3], .items.length, .[\"quoted.key\"], or . (whole value); not full jq",
+    ".values[1:9007199254740992]": "JSON selector supports .field, .nested[0], .items[0:3], .items.length, .[\"quoted.key\"], or . (whole value); not full jq",
   };
 
   for (const [json, message] of Object.entries(rejected)) {

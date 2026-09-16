@@ -1,5 +1,12 @@
 export const IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 export const LARGE_FILE_BYTES = 512 * 1024;
+
+/** Raw path-only reads above these must use json/about/offset/complete. */
+export const RAW_JSON_CHARS = 4096;
+
+export const RAW_SOURCE_CHARS = 8192;
+
+export const RAW_SOURCE_LINES = 160;
 export const ABOUT_TOKEN_MAX = 16;
 export const IMAGE_MIME = {
   ".png": "image/png",

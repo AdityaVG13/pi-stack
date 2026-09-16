@@ -33,7 +33,7 @@ it("return budgets preserve fitting source and disclose loss without corrupting 
   const f = await engineFixture(t);
   const body = '"quoted"\\path\r\n'.repeat(1000);
   await f.write("a.txt",body); await f.write("b.txt",body);
-  const fitting = await f.execute('return await read(["a.txt","b.txt"]);');
+  const fitting = await f.execute('return await read(["a.txt","b.txt"],{complete:true});');
   assert.equal(fitting.details.returnTruncated, false);
   assert.deepEqual(fitting.details.result, [body, body]);
   assert.ok(modelText(fitting).includes(body));
@@ -56,7 +56,7 @@ it("coalescing preserves every independent read budget before the final return i
   for (let i = 0; i < 4; i++) await f.write(`file${i}.txt`, body);
 
   const result = await f.execute(`
-    const values = await Promise.all([0,1,2,3].map(i => read("file"+i+".txt")));
+    const values = await Promise.all([0,1,2,3].map(i => read({path:"file"+i+".txt",complete:true})));
     return values.map(text => ({length:text.length, complete:text === ${JSON.stringify(body)}}));
   `);
 

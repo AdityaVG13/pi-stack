@@ -12,10 +12,15 @@ const mutationTotals = results => results.reduce((total, result) => {
   return total;
 }, {committed:0,rolledBack:0,external:0,pendingCommits:0,recoveryFailed:false});
 
-export function programBatchText(results, total, stopped = "") {
+export function programBatchText(results, total, stopped = "", failed = 0) {
   const m = mutationTotals(results);
+  const summary = stopped
+    ? "error: programs stopped: " + stopped + " " + results.length + "/" + total
+    : failed > 0
+      ? "error: programs " + results.length + "/" + total + " - " + failed + " failed"
+      : "ok: programs " + results.length + "/" + total;
 
-  return (stopped ? "error: programs stopped: " + stopped : "ok: programs") + " " + results.length + "/" + total +
+  return summary +
     (m.recoveryFailed || m.pendingCommits ? "; filesystem outcome uncertain: inspect disk" : "") + "\nresults (UTF-16 lengths):\n" + results.map((result,i) => {
       const text = textOf(result);
 
@@ -69,8 +74,10 @@ function batchTimeoutMs(params, config) {
   return requestedTimeout;
 }
 
+const MAX_PARALLEL_PROGRAMS = 8;
+
 class ProgramBatch {
-  constructor(id, signal, onUpdate, ctx, config, execute, programs, timeout) {
+  constructor(id, params, signal, onUpdate, ctx, config, execute, programs, timeout) {
     this.id = id;
     this.onUpdate = onUpdate;
     this.ctx = ctx;
@@ -84,6 +91,7 @@ class ProgramBatch {
     this.combined = signal ? AbortSignal.any([signal, this.controller.signal]) : this.controller.signal;
     this.timer = setTimeout(() => this.controller.abort(), Math.min(timeout, 2147483647));
     this.budget = {calls:0,logLines:0};
+    this.parallel = params.parallel === true && programs.length > 1;
     this.results = [];
     this.images = [];
     this.imageLabels = [];
@@ -109,7 +117,7 @@ class ProgramBatch {
 
   runOne(program, i) {
     return Promise.resolve()
-      .then(() => this.execute(this.id + ":" + i,{...program,timeoutMs:Math.max(1,Math.ceil(this.deadline-performance.now()))},this.combined,this.updateFor(i),this.ctx,this.budget))
+      .then(() => this.execute(this.id + ":" + i,{...program,timeoutMs:Math.max(1,Math.ceil(this.deadline-performance.now()))},this.combined,this.updateFor(i),this.ctx,this.budget,{parallel:this.parallel}))
       .catch(error => error.supernovaResult ?? {content:[{type:"text",text:String(error?.message ?? error)}],details:{ok:false,error:String(error?.message ?? error)}});
   }
 
@@ -128,6 +136,27 @@ class ProgramBatch {
     this.results.push(result);
     this.trace.push(...(result.details?.trace ?? []));
     this.collectImages(result, i);
+  }
+
+  async runParallel() {
+    const limit = Math.min(this.programs.length, MAX_PARALLEL_PROGRAMS);
+    const settled = new Array(this.programs.length);
+    let next = 0;
+
+    await Promise.all(Array.from({length: limit}, async () => {
+      while (next < this.programs.length && !this.combined.aborted && performance.now() < this.deadline) {
+        const i = next++;
+        settled[i] = await this.runOne(this.programs[i], i);
+        this.live[i] = [];
+      }
+    }));
+
+    for (let i = 0; i < this.programs.length; i++) {
+      if (settled[i] === undefined) continue;
+      this.takeSettled(settled[i], i);
+    }
+
+    if (settled.includes(undefined) || this.combined.aborted || performance.now() >= this.deadline) this.stopped = "batch deadline or cancellation; earlier commits remain";
   }
 
   sequentialStop(result, i) {
@@ -160,19 +189,26 @@ class ProgramBatch {
     }
   }
 
-  boundedText() {
-    return truncateChars(programBatchText(this.results,this.programs.length,this.stopped),Math.max(0,this.config.maxReturnChars-this.imageTextChars()),"batch output");
+  failNote(failed) {
+    return this.stopped || (this.parallel && failed ? failed + " program" + (failed>1?"s":"") + " failed" : undefined);
+  }
+
+  boundedText(failed) {
+    const note = this.imageDropped && !this.stopped ? "some images dropped: batch image budget" : "";
+
+    return truncateChars(programBatchText(this.results,this.programs.length,this.stopped,this.parallel ? failed : 0) + (note ? "; " + note : ""),Math.max(0,this.config.maxReturnChars-this.imageTextChars()),"batch output");
   }
 
   finish() {
-    const bounded = this.boundedText();
+    const failed = this.results.filter(result => result.details?.ok === false).length;
+    const bounded = this.boundedText(failed);
     const content = [{type:"text",text:bounded.text}];
     this.images.forEach((image,i) => content.push({type:"text",text:this.imageLabels[i]},image));
 
     // Return a typed stop report instead of throwing away earlier results/images.
     // Single-program errors retain their existing throwing behavior.
-    return {content,isError:!!this.stopped,details:{ok:!this.stopped,error:this.stopped || undefined,wallMs:Math.round(performance.now()-this.started),
-      programs:this.results,attempted:this.results.length,total:this.programs.length,stopped:this.stopped,
+    return {content,isError:!!this.stopped || (this.parallel && failed>0),details:{ok:!this.stopped && !(this.parallel && failed),error:this.failNote(failed),wallMs:Math.round(performance.now()-this.started),
+      programs:this.results,attempted:this.results.length,total:this.programs.length,stopped:this.stopped,parallel:this.parallel,
       result:bounded.truncated ? bounded.text : this.results.map(result=>result.details?.result),
       returnTruncated:bounded.truncated || this.results.some(result=>result.details?.returnTruncated),
       logTruncated:this.results.some(result=>result.details?.logTruncated),logs:this.results.flatMap(result=>result.details?.logs ?? []),trace:this.trace,mutations:mutationTotals(this.results)}};
@@ -180,7 +216,8 @@ class ProgramBatch {
 
   async run() {
     try {
-      await this.runSequential();
+      if (this.parallel) await this.runParallel();
+      else await this.runSequential();
     } finally { clearTimeout(this.timer); this.controller.abort(); }
 
     return this.finish();
@@ -191,5 +228,5 @@ class ProgramBatch {
 export async function runProgramBatch(id, params, signal, onUpdate, ctx, config, execute) {
   const programs = parseBatchPayload(params, config);
 
-  return new ProgramBatch(id, signal, onUpdate, ctx, config, execute, programs, batchTimeoutMs(params, config)).run();
+  return new ProgramBatch(id, params, signal, onUpdate, ctx, config, execute, programs, batchTimeoutMs(params, config)).run();
 }

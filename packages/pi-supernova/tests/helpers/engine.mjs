@@ -11,6 +11,11 @@ process.env.PI_SUPERNOVA_CONFIG = fileURLToPath(new URL("../../src/config/config
 
 export const limits = { ...packageDefaults(), timeoutMs: 2000 };
 
+/** External mutation via bash+node, not guest fs. */
+export function bashNode(script) {
+  return "await bash({command:process.execPath,args:[\"-e\"," + JSON.stringify(script) + "]});";
+}
+
 export function registrationHost() {
   const tools = new Map();
   const handlers = new Map();

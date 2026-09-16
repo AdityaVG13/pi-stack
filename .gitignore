@@ -18,6 +18,12 @@ coverage/
 .papercuts.archive.jsonl
 .asgrep/
 dogfood/
+# Experimental supernova forks and isolated eval homes. Never publish.
+packages/pi-supernova-astra/
+packages/pi-supernova-devin/
+packages/pi-supernova-kimi/
+.eval/
+.eval/**
 .ee/
 .hermes/
 .pi-subagents/

@@ -152,7 +152,7 @@ it("oversized multi-file returns keep every sentinel in its own framed slot", as
   const names = ["one.txt", "two.txt", "three.txt", "four.txt", "five.txt", "six.txt"];
   const sentinels = ["SENTINEL_ONE", "SENTINEL_TWO", "SENTINEL_THREE", "SENTINEL_FOUR", "SENTINEL_FIVE", "SENTINEL_SIX"];
 
-  for (let i = 0; i < names.length; i++) await f.write(names[i], sentinels[i] + "\n" + "x".repeat(12000) + "\n");
+  for (let i = 0; i < names.length; i++) await f.write(names[i], sentinels[i] + "\n" + "x".repeat(7000) + "\n");
   const result = await f.execute("return await read(" + JSON.stringify(names) + ");");
   const text = modelText(result);
   assert.equal(result.details.ok, true);

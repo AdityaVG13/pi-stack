@@ -482,9 +482,9 @@ function appendLogs(lines, theme, payload, width) {
 	for (const log of payload.logs) for (const line of resultLines(log, width)) lines.push(theme.fg("dim", line));
 }
 
-function appendTail(lines, theme, payload, expanded, isError, width) {
+function appendTail(lines, theme, payload, expanded, isError, width, previewResult) {
 	if (isError) appendError(lines, theme, payload, expanded, width);
-	else if (expanded && payload?.result !== undefined) appendResult(lines, theme, payload, expanded, width);
+	else if (payload?.result !== undefined && (expanded || previewResult)) appendResult(lines, theme, payload, expanded, width);
 
 	if (expanded && payload?.logs?.length) appendLogs(lines, theme, payload, width);
 }
@@ -501,6 +501,10 @@ function appendOverflow(lines, theme, trace, maxOps, isPartial) {
 	if (trace.length > maxOps) lines.push(theme.fg("dim", `  … ${trace.length - maxOps} ${isPartial ? "earlier" : "more"} calls`));
 }
 
+function appendEmptyOps(lines, theme, ops, isError, isPartial) {
+	if (ops.length === 0 && !isError && !isPartial) lines.push(theme.fg("dim", "no adapter calls"));
+}
+
 function buildBodyLines(theme, width, { payload, context, expanded, isPartial, isError }) {
 	const trace = traceFor(payload, context);
 	const { maxOps, maxDiffLines } = bodyLimits(expanded, isPartial);
@@ -508,7 +512,8 @@ function buildBodyLines(theme, width, { payload, context, expanded, isPartial, i
 	const lines = [];
 	appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, isError);
 	appendOverflow(lines, theme, trace, maxOps, isPartial);
-	appendTail(lines, theme, payload, expanded, isError, width);
+	appendEmptyOps(lines, theme, ops, isError, isPartial);
+	appendTail(lines, theme, payload, expanded, isError, width, ops.length === 0 && !isPartial);
 
 	return { lines, opCount: trace.length };
 }

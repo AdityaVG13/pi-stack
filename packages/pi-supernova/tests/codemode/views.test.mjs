@@ -24,7 +24,7 @@ it("a stale view refuses to write and rolls back the program", async t => {
   await f.write("note.txt", original);
   await assert.rejects(f.execute(`
     const v = await read({path:"note.txt", offset:2, limit:1, resolve:true});
-    await write("note.txt", "keep-A\\nCHANGED\\nkeep-B\\n");
+    await write({path:"note.txt",content:"keep-A\\nCHANGED\\nkeep-B\\n",replace:true});
     await edit(v, "VIEW-NEW");
   `), /edit view is stale/);
   assert.equal(await fs.readFile(path.join(f.root, "note.txt"), "utf8"), original);
