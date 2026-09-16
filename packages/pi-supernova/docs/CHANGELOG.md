@@ -46,6 +46,10 @@
   `programs` with `parallel:true`.
 - Empty programs (no adapter calls) still draw a nova card with a result preview
   instead of a one-line `complete` status.
+- Shorter standing tool reference: 68 fewer tokens per request with the same
+  commands and surface needles. Wording compression plus dropped peripheral
+  clauses; the JSON/about signatures, prefer-edit rule, and batching nudge
+  stay. Ablation family verified live over 12 green gpt-6-astra runs.
 
 ## [0.6.0] - 2026-09-15
 
