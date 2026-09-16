@@ -1,210 +1,46 @@
-
-import { isString, isObject } from "../shared/decode.js";
-
-const NATIVE_TOOL_DEFINITIONS = [
-  {
-    name: "read",
-    description: "Read files, images or directories (directory reads return entries). JSON selectors project full documents within output budgets. Source questions locate and open source directly; resolve returns structured source/status without guessing.",
-    parameters: { type: "object", properties: {
-      path: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" }, maxItems: 64 }], description: "Workspace-relative file or directory, source question, or up to 64 paths" },
-      target: { anyOf: [{ type: "string" }, { type: "array" }], description: "File path/query or array of paths" },
-      offset: { type: "number", description: "One-based starting line" },
-      limit: { type: "number", description: "Maximum lines to return" },
-      about: { type: "string", description: "Question or symbol (at most 16 keywords): expand file bodies, or locate/open source inside a directory" },
-      query: { type: "string", description: "Source question (at most 16 keywords); optional path scopes the search directory" },
-      outline: { type: "boolean", description: "Return a compact structural outline for the target file" },
-      evidence: { type: "boolean", description: "Rank source spans answering the target/path question" },
-      resolve: { type: "boolean", description: "Return structured source/status for a direct resolve-to-edit handoff" },
-      complete: { type: "boolean", description: "Fail unless the entire requested file fits without clipping" },
-      json: { anyOf: [{ type: "boolean" }, { type: "string" }, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 64 }], description: "Parse complete JSON input up to 16 MiB, then select .field, .items[0:3], quoted keys, true, or 1-64 selectors. Oversized selections fail, never clip." },
-    } },
-  },
-  {
-    name: "write", description: "Write UTF-8 content to a workspace file.",
-    parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" }, append: { type: "boolean", description: "Append to an existing file instead of replacing it" }, allowReadArtifacts: { type: "boolean", description: "Explicit opt-in for intentionally writing literal truncation-marker text" } }, required: ["path", "content"] },
-  },
-  {
-    name: "edit", description: "Apply unique text replacements to a workspace file; returns the post-edit lines, a structural check, and references to changed declarations.",
-    parameters: { type: "object", properties: {
-      path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" }, edits: { type: "array", description: "[{oldText, newText}] for several replacements in one call" },
-    }, required: ["path"] },
-  },
-  {
-    name: "apply_patch", description: "Apply a unified diff to one workspace file.",
-    parameters: { type: "object", properties: { path: { type: "string" }, patch: { type: "string" } }, required: ["patch"] },
-  },
-  {
-    name: "snap", description: "Select source with found, ambiguous, not_found, or incomplete status. The read command uses the same engine.",
-    parameters: { type: "object", properties: {
-      query: { type: "string", description: "Source concept to resolve" },
-      path: { type: "string", description: "Optional workspace search root; explicitly targeting a hidden directory includes its hidden files, but Git metadata is always excluded" },
-    }, required: ["query"] },
-  },
-  {
-    name: "evidence", description: "Top-K source spans (with path and line provenance) that answer a concept question; read these instead of whole files.",
-    parameters: { type: "object", properties: {
-      query: { type: "string", description: "Concept, symbol, or question" },
-      path: { type: "string", description: "Optional search root" },
-      k: { type: "number", description: "Main spans to return (default 5)" },
-      maxChars: { type: "number", description: "Total text budget (default 6000)" },
-    }, required: ["query"] },
-  },
-  {
-    name: "surface", description: "Extract a structural outline from a workspace source file.",
-    parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-  },
-  {
-    name: "bash", description: "Run a shell command inside the workspace and capture bounded output.",
-    parameters: { type: "object", properties: { command: { type: "string" }, args: { type: "array", items: { type: "string" }, description: "Literal argv without shell interpretation (POSIX)" }, cwd: { type: "string" }, timeoutMs: { type: "number" } }, required: ["command"] },
-  },
-  {
-    name: "grep", description: "Search file contents. Smart-case regex; definition lines first (marked *); fuzzy fallback when nothing matches literally.",
-    parameters: { type: "object", properties: {
-      pattern: { type: "string" }, path: { type: "string" }, glob: { type: "string" }, caseSensitive: { type: "boolean" }, limit: { type: "number" },
-    }, required: ["pattern"] },
-  },
-  {
-    name: "glob", description: "Find files: a glob pattern, or free text for typo-tolerant, frecency-ranked path search.",
-    parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] },
-  },
-  {
-    name: "find", description: "List workspace files, optionally constrained by path and pattern.",
-    parameters: { type: "object", properties: { path: { type: "string" }, pattern: { type: "string" }, glob: { type: "string" } } },
-  },
-  {
-    name: "ls", description: "List direct entries in a workspace directory.",
-    parameters: { type: "object", properties: { path: { type: "string" } } },
-  },
-];
-
-export function mergeNativeToolDefinitions(tools, capturedNames = []) {
-  const nativeByName = new Map(NATIVE_TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
-  const captured = new Set(capturedNames);
-  const seen = new Set();
-  const merged = [];
-
-  for (const tool of tools || []) {
-    const fallback = nativeByName.get(tool?.name);
-    merged.push(fallback && !captured.has(tool.name)
-      ? { ...tool, ...fallback, sourceInfo: { path: "<native:" + tool.name + ">" } }
-      : tool);
-
-    if (tool?.name) seen.add(tool.name);
-  }
-
-  for (const fallback of NATIVE_TOOL_DEFINITIONS) {
-    if (!seen.has(fallback.name)) {
-      merged.push({ ...fallback, sourceInfo: { path: "<native:" + fallback.name + ">" } });
-    }
-  }
-
-  return merged;
-}
-
-function sourcePathOf(tool) {
-  if (tool.sourceInfo && isString(tool.sourceInfo.path)) return tool.sourceInfo.path;
-
-  if (isString(tool.extensionPath)) return tool.extensionPath;
-
-  if (isString(tool.sourcePath)) return tool.sourcePath;
-
-  return undefined;
-}
-
-function normalizeTool(tool) {
-  if (!tool || !isObject(tool)) return null;
-  const name = isString(tool.name) ? tool.name : "";
-
-  if (!name) return null;
-  const description = isString(tool.description) ? tool.description : "";
-
-  return {
-    name,
-    nameLower: name.toLowerCase(),
-    description,
-    descLower: description.toLowerCase(),
-    parameters: tool.parameters,
-    schemaError: tool.schemaError,
-    sourcePath: sourcePathOf(tool),
-  };
-}
-
-export function buildCatalog(tools, excludeNames = []) {
-  const exclude = new Set(excludeNames);
-  const rows = [];
-
-  for (const tool of tools || []) {
-    const row = normalizeTool(tool);
-
-    if (!row || exclude.has(row.name)) continue;
-    rows.push(row);
-  }
-
-  rows.sort((a, b) => a.name.localeCompare(b.name));
-
-  return rows;
-}
-
-function tokenize(query) {
-  return String(query || "")
-    .toLowerCase()
-    .split(/[^a-z0-9_]+/g)
-    .filter((t) => t.length > 1);
-}
-
-function scoreRow(row, tokens) {
-  if (tokens.length === 0) return 1;
-  const name = row.nameLower || row.name.toLowerCase();
-  const desc = row.descLower || row.description.toLowerCase();
-  let score = 0;
-
-  for (const token of tokens) {
-    if (name === token) score += 10;
-    else if (name.includes(token)) score += 5;
-    else if (desc.includes(token)) score += 2;
-  }
-
-  return score;
-}
-
-export function searchCatalog(catalog, query, limit = 12) {
-  const tokens = tokenize(query);
-  const scored = [];
-
-  for (const row of catalog) {
-    const score = scoreRow(row, tokens);
-
-    if (score <= 0 && tokens.length > 0) continue;
-    scored.push({ name: row.name, description: row.description.slice(0, 160), score });
-  }
-
-  scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
-
-  const capped = Math.min(64, Math.max(1, Math.floor(Number(limit)) || 1));
-
-  return scored.slice(0, capped).map(({ score: _s, ...hit }) => hit);
-}
+import { isString } from "../shared/decode.js";
 
 /** Optimal string alignment distance: insert/delete/substitute/adjacent-transpose cost 1. */
+function osaCell(a, b, rows, i, j) {
+  const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+  let best = Math.min(rows[i - 1][j] + 1, rows[i][j - 1] + 1, rows[i - 1][j - 1] + cost);
+
+  if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) best = Math.min(best, rows[i - 2][j - 2] + 1);
+
+  return best;
+}
+
 function editDistance(a, b) {
   const rows = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array.from({ length: b.length }, () => 0)]);
 
   for (let j = 1; j <= b.length; j++) rows[0][j] = j;
 
-  for (let i = 1; i <= a.length; i++) {
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      let best = Math.min(rows[i - 1][j] + 1, rows[i][j - 1] + 1, rows[i - 1][j - 1] + cost);
-
-      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) best = Math.min(best, rows[i - 2][j - 2] + 1);
-      rows[i][j] = best;
-    }
+  for (let i = 1; i < rows.length; i++) {
+    for (let j = 1; j <= b.length; j++) rows[i][j] = osaCell(a, b, rows, i, j);
   }
 
   return rows[a.length][b.length];
 }
 
-/** Closest tool names for a mistyped name: substring hits first, then a length-scaled edit distance. */
+function scoreName(needle, candidate, maxDistance) {
+  const lower = candidate.toLowerCase();
+
+  if (lower === needle) return null;
+  const distance = lower.includes(needle) || needle.includes(lower) ? 1 : editDistance(needle, lower);
+
+  if (distance > maxDistance) return null;
+
+  return { candidate, distance };
+}
+
+function bySuggestionRank(needle, a, b) {
+  return (
+    a.distance - b.distance ||
+    Math.abs(a.candidate.length - needle.length) - Math.abs(b.candidate.length - needle.length) ||
+    a.candidate.localeCompare(b.candidate)
+  );
+}
+
 function suggestNames(name, candidates, limit = 3) {
   const needle = String(name || "").toLowerCase().slice(0, 128);
 
@@ -213,20 +49,12 @@ function suggestNames(name, candidates, limit = 3) {
   const scored = [];
 
   for (const candidate of candidates) {
-    const lower = candidate.toLowerCase();
+    const hit = scoreName(needle, candidate, maxDistance);
 
-    if (lower === needle) continue;
-    const distance = lower.includes(needle) || needle.includes(lower) ? 1 : editDistance(needle, lower);
-
-    if (distance <= maxDistance) scored.push({ candidate, distance });
+    if (hit) scored.push(hit);
   }
 
-  scored.sort(
-    (a, b) =>
-      a.distance - b.distance ||
-      Math.abs(a.candidate.length - needle.length) - Math.abs(b.candidate.length - needle.length) ||
-      a.candidate.localeCompare(b.candidate),
-  );
+  scored.sort((a, b) => bySuggestionRank(needle, a, b));
 
   return scored.slice(0, limit).map((s) => s.candidate);
 }
@@ -236,26 +64,4 @@ export function unknownToolMessage(name, candidates) {
   const hint = close.length ? ` Did you mean ${close.map((c) => JSON.stringify(c)).join(", ")}?` : "";
 
   return `unknown tool "${name}".${hint} Check the command name and configured tool exclusions.`;
-}
-
-export function describeTool(catalog, name) {
-  const row = catalog.find((t) => t.name === name);
-
-  if (!row) {
-    return { ok: false, error: unknownToolMessage(name, catalog.map((t) => t.name)) };
-  }
-
-  if (!isObject(row.parameters)) return { ok: false, name, error: "tool schema unavailable: " + (row.schemaError ?? name) };
-
-  if (!row._described) {
-    row._described = {
-      ok: true,
-      name: row.name,
-      description: row.description,
-      parameters: row.parameters,
-      sourcePath: row.sourcePath,
-    };
-  }
-
-  return row._described;
 }

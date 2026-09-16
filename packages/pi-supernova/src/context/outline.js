@@ -97,16 +97,7 @@ function focusedText(raw, lower, stems, relPath, opts) {
  * @param entry index entry (text + cached lines/surface)
  * @param about question or symbol; empty ⇒ pure skeleton (every body folded)
  */
-export function outlineFile(entry, relPath, about, options = {}) {
-  const opts = { ...OUTLINE_DEFAULTS, ...options };
-  const { raw, lower } = WorkspaceIndex.linesOf(entry);
-  const lineCount = raw.length;
-  const spans = WorkspaceIndex.spansOf(entry).map((s) => ({ ...s, signature: raw[s.start - 1].trim() }));
-  const stems = [...new Set(tokenizeQuery(about || "").tokens.map(stem))];
-
-  if (spans.length === 0) return about ? focusedText(raw, lower, stems, relPath, opts) : null;
-  const expanded = chooseExpanded(spans, lower, stems, raw, opts);
-
+function outlineHeader(spans, raw, opts) {
   const parts = [];
   const headerEnd = Math.min(spans[0].start - 1, opts.headerLines);
 
@@ -118,16 +109,30 @@ export function outlineFile(entry, relPath, about, options = {}) {
     if (spans[0].start - 1 > opts.headerLines) parts.push("      … " + (spans[0].start - 1 - opts.headerLines) + " more header lines");
   }
 
+  return parts;
+}
+
+function clipOutline(text, title, maxChars) {
+  if (text.length <= maxChars) return text;
+  const end = text.lastIndexOf("\n", Math.max(0, maxChars - 160));
+
+  return (end > title.length ? text.slice(0, end) : text.slice(0, maxChars)) + "\n      … outline truncated; use read(path, line, count) for later declarations";
+}
+
+export function outlineFile(entry, relPath, about, options = {}) {
+  const opts = { ...OUTLINE_DEFAULTS, ...options };
+  const { raw, lower } = WorkspaceIndex.linesOf(entry);
+  const lineCount = raw.length;
+  const spans = WorkspaceIndex.spansOf(entry).map((s) => ({ ...s, signature: raw[s.start - 1].trim() }));
+  const stems = [...new Set(tokenizeQuery(about || "").tokens.map(stem))];
+
+  if (spans.length === 0) return about ? focusedText(raw, lower, stems, relPath, opts) : null;
+  const expanded = chooseExpanded(spans, lower, stems, raw, opts);
+  const parts = outlineHeader(spans, raw, opts);
+
   for (let i = 0; i < spans.length; i++) parts.push(expanded.has(i) ? expandedBlock(spans[i], raw, opts) : foldedLine(spans[i]));
   const label = about ? String(about).replace(/\s+/g, " ").slice(0, 120) : "";
   const title = "// " + relPath + " · " + lineCount + " lines · " + spans.length + " declarations · " + expanded.size + " expanded" + (label ? " for \"" + label + "\"" : "") + " · read(path, line, count) for a folded body";
-  let text = title + "\n" + parts.join("\n");
 
-  if (text.length > opts.maxChars) {
-    const end = text.lastIndexOf("\n", Math.max(0, opts.maxChars - 160));
-
-    text = (end > title.length ? text.slice(0, end) : text.slice(0, opts.maxChars)) + "\n      … outline truncated; use read(path, line, count) for later declarations";
-  }
-
-  return { text, expanded: expanded.size, declarations: spans.length };
+  return { text: clipOutline(title + "\n" + parts.join("\n"), title, opts.maxChars), expanded: expanded.size, declarations: spans.length };
 }

@@ -23,27 +23,23 @@ export function programBatchText(results, total, stopped = "") {
     }).join("");
 }
 
-function batchInputs(params, config) {
-  if (["code","file"].some(key => params[key] !== undefined)) throw new Error("programs cannot combine with top-level code or file; no programs ran");
-
-  if (!Array.isArray(params.programs) || !params.programs.length || params.programs.length > 32) throw new Error("programs requires 1..32 entries; no programs ran");
-
-  for (const p of params.programs) {
-    if (!isObject(p) || Array.isArray(p) || Object.keys(p).some(key => !["code","file","data"].includes(key)) ||
-        ((p.code === undefined) === (p.file === undefined)) || !isString(p.code ?? p.file) || !(p.code ?? p.file).trim()) {
-      throw new Error("each program requires code OR file, with optional data; no nested batches or per-entry timeouts; no programs ran");
-    }
+function assertProgramEntry(p) {
+  if (!isObject(p) || Array.isArray(p) || Object.keys(p).some(key => !["code","file","data"].includes(key)) ||
+      ((p.code === undefined) === (p.file === undefined)) || !isString(p.code ?? p.file) || !(p.code ?? p.file).trim()) {
+    throw new Error("each program requires code OR file, with optional data; no nested batches or per-entry timeouts; no programs ran");
   }
+}
 
+function encodeBatchPayload(params) {
   const hasDefault = params.data !== undefined;
   let encoded;
 
   try { encoded = JSON.stringify(hasDefault ? {programs:params.programs,data:params.data} : params.programs); } catch { throw new Error("programs and data must be JSON-serializable; no programs ran"); }
 
-  if (encoded.length > (config.maxCodeChars ?? 48000)) throw new Error("programs JSON exceeds the code character budget; no programs ran");
+  return { hasDefault, encoded };
+}
 
-  const parsed = JSON.parse(encoded);
-
+function applyDefaultData(parsed, hasDefault) {
   if (!hasDefault) return parsed;
   if (!Object.hasOwn(parsed,"data")) throw new Error("data must be JSON-serializable; no programs ran");
 
@@ -52,72 +48,148 @@ function batchInputs(params, config) {
   return parsed.programs.map(program => program.data === undefined ? {...program,data:parsed.data} : program);
 }
 
-/** Explicit known continuations, not inferred plans, retries, or a shared heap. */
-export async function runProgramBatch(id, params, signal, onUpdate, ctx, config, execute) {
-  const programs = batchInputs(params,config);
+function parseBatchPayload(params, config) {
+  if (["code","file"].some(key => params[key] !== undefined)) throw new Error("programs cannot combine with top-level code or file; no programs ran");
+
+  if (!Array.isArray(params.programs) || !params.programs.length || params.programs.length > 32) throw new Error("programs requires 1..32 entries; no programs ran");
+
+  for (const p of params.programs) assertProgramEntry(p);
+  const { hasDefault, encoded } = encodeBatchPayload(params);
+
+  if (encoded.length > (config.maxCodeChars ?? 48000)) throw new Error("programs JSON exceeds the code character budget; no programs ran");
+
+  return applyDefaultData(JSON.parse(encoded), hasDefault);
+}
+
+function batchTimeoutMs(params, config) {
   const requestedTimeout = params.timeoutMs === undefined ? config.timeoutMs : Number(params.timeoutMs);
 
   if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0) throw new Error("program batch timeoutMs must be a positive finite number");
-  const started = performance.now();
-  const timeout = requestedTimeout;
-  const deadline = started + timeout;
-  const controller = new AbortController();
-  const combined = signal ? AbortSignal.any([signal,controller.signal]) : controller.signal;
-  const timer = setTimeout(() => controller.abort(),Math.min(timeout,2147483647));
-  const budget = {calls:0,logLines:0};
-  const results = [], images = [], imageLabels = [], trace = [];
-  const imageTextChars = () => imageLabels.reduce((chars,label)=>chars+label.length+1,0);
-  let imageBytes = 0, stopped = "";
 
-  try {
-    for (const [i, program] of programs.entries()) {
-      if (combined.aborted || performance.now() >= deadline) { stopped = "deadline or cancellation; remaining programs did not run"; break; }
+  return requestedTimeout;
+}
 
-      let result;
+class ProgramBatch {
+  constructor(id, signal, onUpdate, ctx, config, execute, programs, timeout) {
+    this.id = id;
+    this.onUpdate = onUpdate;
+    this.ctx = ctx;
+    this.config = config;
+    this.execute = execute;
+    this.programs = programs;
+    this.timeout = timeout;
+    this.started = performance.now();
+    this.deadline = this.started + timeout;
+    this.controller = new AbortController();
+    this.combined = signal ? AbortSignal.any([signal, this.controller.signal]) : this.controller.signal;
+    this.timer = setTimeout(() => this.controller.abort(), Math.min(timeout, 2147483647));
+    this.budget = {calls:0,logLines:0};
+    this.results = [];
+    this.images = [];
+    this.imageLabels = [];
+    this.trace = [];
+    this.live = programs.map(() => []);
+    this.imageSeq = programs.map(() => 0);
+    this.imageBytes = 0;
+    this.stopped = "";
+    this.imageDropped = false;
+  }
 
-      try {
-        result = await execute(id + ":" + i,{...program,timeoutMs:Math.max(1,Math.ceil(deadline-performance.now()))},combined,update => {
-          try { onUpdate?.({...update,details:{...update.details,trace:[...trace,...(update.details?.trace ?? [])]}}); } catch {}
-        },ctx,budget);
-      } catch (error) {
-        result = error.supernovaResult ?? {content:[{type:"text",text:String(error.message ?? error)}],details:{ok:false,error:String(error.message ?? error)}};
-      }
+  imageTextChars() {
+    return this.imageLabels.reduce((chars, label) => chars + label.length + 1, 0);
+  }
 
-      results.push(result);
-      trace.push(...(result.details?.trace ?? []));
-      let image = 0;
+  updateFor(i) {
+    return update => {
+      this.live[i] = update?.details?.trace ?? [];
 
-      for (const block of Array.isArray(result?.content) ? result.content : []) if (block?.type === "image" && isString(block.data)) {
-        imageBytes += Buffer.byteLength(block.data,"base64");
+      try { this.onUpdate?.({...update,details:{...update?.details,trace:[...this.trace,...this.live.flat()]}}); } catch {}
+    };
+  }
 
-        if (images.length >= 16 || imageBytes > 20*1024*1024) { stopped = "batch image budget exceeded; remaining programs did not run"; break; }
+  runOne(program, i) {
+    return Promise.resolve()
+      .then(() => this.execute(this.id + ":" + i,{...program,timeoutMs:Math.max(1,Math.ceil(this.deadline-performance.now()))},this.combined,this.updateFor(i),this.ctx,this.budget))
+      .catch(error => error.supernovaResult ?? {content:[{type:"text",text:String(error?.message ?? error)}],details:{ok:false,error:String(error?.message ?? error)}});
+  }
 
-        images.push(block);
-        imageLabels.push("program " + (i+1) + " image " + (++image));
-      }
+  collectImages(result, i) {
+    for (const block of Array.isArray(result?.content) ? result.content : []) if (block?.type === "image" && isString(block.data)) {
+      this.imageBytes += Buffer.byteLength(block.data,"base64");
 
-      if (result.details?.ok === false) stopped = "program " + (i+1) + " failed; remaining programs did not run; earlier commits remain";
-      const text = programBatchText(results,programs.length,stopped);
+      if (this.images.length >= 16 || this.imageBytes > 20*1024*1024) { this.imageDropped = true; continue; }
 
-      if (text.length + imageTextChars() > config.maxReturnChars || result.details?.returnTruncated) stopped ||= "batch output budget exceeded; remaining programs did not run; earlier commits remain";
-
-      if (result.details?.logTruncated) stopped ||= "batch log budget exceeded; remaining programs did not run; earlier commits remain";
-
-      if (combined.aborted || performance.now() >= deadline) stopped ||= "batch deadline or cancellation; earlier commits remain";
-
-      if (stopped) break;
+      this.images.push(block);
+      this.imageLabels.push("program " + (i+1) + " image " + (++this.imageSeq[i]));
     }
-  } finally { clearTimeout(timer); controller.abort(); }
+  }
 
-  const bounded = truncateChars(programBatchText(results,programs.length,stopped),Math.max(0,config.maxReturnChars-imageTextChars()),"batch output");
-  const content = [{type:"text",text:bounded.text}];
-  images.forEach((image,i) => content.push({type:"text",text:imageLabels[i]},image));
+  takeSettled(result, i) {
+    this.results.push(result);
+    this.trace.push(...(result.details?.trace ?? []));
+    this.collectImages(result, i);
+  }
 
-  // Return a typed stop report instead of throwing away earlier results/images.
-  // Single-program errors retain their existing throwing behavior.
-  return {content,isError:!!stopped,details:{ok:!stopped,error:stopped || undefined,wallMs:Math.round(performance.now()-started),
-    programs:results,attempted:results.length,total:programs.length,stopped,
-    result:bounded.truncated ? bounded.text : results.map(result=>result.details?.result),
-    returnTruncated:bounded.truncated || results.some(result=>result.details?.returnTruncated),
-    logTruncated:results.some(result=>result.details?.logTruncated),logs:results.flatMap(result=>result.details?.logs ?? []),trace,mutations:mutationTotals(results)}};
+  sequentialStop(result, i) {
+    let stopped = this.stopped;
+
+    if (this.imageDropped) stopped = "batch image budget exceeded; remaining programs did not run";
+
+    if (result.details?.ok === false) stopped = "program " + (i+1) + " failed; remaining programs did not run; earlier commits remain";
+    const text = programBatchText(this.results, this.programs.length, stopped);
+
+    if (text.length + this.imageTextChars() > this.config.maxReturnChars || result.details?.returnTruncated) stopped ||= "batch output budget exceeded; remaining programs did not run; earlier commits remain";
+
+    if (result.details?.logTruncated) stopped ||= "batch log budget exceeded; remaining programs did not run; earlier commits remain";
+
+    if (this.combined.aborted || performance.now() >= this.deadline) stopped ||= "batch deadline or cancellation; earlier commits remain";
+
+    return stopped;
+  }
+
+  async runSequential() {
+    for (const [i, program] of this.programs.entries()) {
+      if (this.combined.aborted || performance.now() >= this.deadline) { this.stopped = "deadline or cancellation; remaining programs did not run"; break; }
+
+      const result = await this.runOne(program, i);
+      this.live[i] = [];
+      this.takeSettled(result, i);
+      this.stopped = this.sequentialStop(result, i);
+
+      if (this.stopped) break;
+    }
+  }
+
+  boundedText() {
+    return truncateChars(programBatchText(this.results,this.programs.length,this.stopped),Math.max(0,this.config.maxReturnChars-this.imageTextChars()),"batch output");
+  }
+
+  finish() {
+    const bounded = this.boundedText();
+    const content = [{type:"text",text:bounded.text}];
+    this.images.forEach((image,i) => content.push({type:"text",text:this.imageLabels[i]},image));
+
+    // Return a typed stop report instead of throwing away earlier results/images.
+    // Single-program errors retain their existing throwing behavior.
+    return {content,isError:!!this.stopped,details:{ok:!this.stopped,error:this.stopped || undefined,wallMs:Math.round(performance.now()-this.started),
+      programs:this.results,attempted:this.results.length,total:this.programs.length,stopped:this.stopped,
+      result:bounded.truncated ? bounded.text : this.results.map(result=>result.details?.result),
+      returnTruncated:bounded.truncated || this.results.some(result=>result.details?.returnTruncated),
+      logTruncated:this.results.some(result=>result.details?.logTruncated),logs:this.results.flatMap(result=>result.details?.logs ?? []),trace:this.trace,mutations:mutationTotals(this.results)}};
+  }
+
+  async run() {
+    try {
+      await this.runSequential();
+    } finally { clearTimeout(this.timer); this.controller.abort(); }
+
+    return this.finish();
+  }
+}
+
+/** Explicit known continuations, not inferred plans, retries, or a shared heap. */
+export async function runProgramBatch(id, params, signal, onUpdate, ctx, config, execute) {
+  const programs = parseBatchPayload(params, config);
+
+  return new ProgramBatch(id, signal, onUpdate, ctx, config, execute, programs, batchTimeoutMs(params, config)).run();
 }

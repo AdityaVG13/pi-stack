@@ -1,20 +1,20 @@
 import { isString, isObject } from "../shared/decode.js";
 
-export function truncateChars(text, maxChars, label = "value") {
-  const normalized = isString(text) ? text : String(text ?? "");
+function normalizeText(text) {
+  return isString(text) ? text : String(text ?? "");
+}
+
+function charLimit(maxChars, length) {
   const numericLimit = Number(maxChars);
-  const limit = Number.isFinite(numericLimit) ? Math.max(0, Math.floor(numericLimit)) : numericLimit === Infinity ? normalized.length : 0;
 
-  if (normalized.length <= limit) return { text: normalized, truncated: false };
+  return Number.isFinite(numericLimit) ? Math.max(0, Math.floor(numericLimit)) : numericLimit === Infinity ? length : 0;
+}
 
-  if (limit <= 100) {
-    return {
-      text: normalized.slice(0, headEnd(normalized, limit)),
-      truncated: true,
-      originalChars: normalized.length,
-    };
-  }
+function truncatedSlice(text, end) {
+  return { text: text.slice(0, headEnd(text, end)), truncated: true, originalChars: text.length };
+}
 
+function truncateHeadTail(normalized, limit, label) {
   let head = headEnd(normalized, Math.floor(limit * 0.7));
   let tail = 0;
   let marker = "";
@@ -23,7 +23,7 @@ export function truncateChars(text, maxChars, label = "value") {
     const omitted = normalized.length - head - tail;
     marker = "\n…[" + label + " truncated " + omitted + " chars]…\n";
 
-    if (marker.length > limit) return { text: normalized.slice(0, headEnd(normalized, limit)), truncated: true, originalChars: normalized.length };
+    if (marker.length > limit) return truncatedSlice(normalized, limit);
     const budget = limit - marker.length;
     const nextHead = headEnd(normalized, Math.min(head, budget));
     const nextTail = normalized.length - tailStartIndex(normalized, Math.max(0, budget - nextHead));
@@ -34,6 +34,17 @@ export function truncateChars(text, maxChars, label = "value") {
   }
 
   return { text: normalized.slice(0, head) + marker + normalized.slice(normalized.length - tail), truncated: true, originalChars: normalized.length };
+}
+
+export function truncateChars(text, maxChars, label = "value") {
+  const normalized = normalizeText(text);
+  const limit = charLimit(maxChars, normalized.length);
+
+  if (normalized.length <= limit) return { text: normalized, truncated: false };
+
+  if (limit <= 100) return truncatedSlice(normalized, limit);
+
+  return truncateHeadTail(normalized, limit, label);
 }
 
 // Lone surrogates in a tool result make the message invalid UTF-8 at the API
@@ -90,35 +101,35 @@ export function formatBoundedStringArray(values, budget) {
   return out;
 }
 
-/** Lossless framing for source arrays, not string escaping or source compression. */
-export function formatReturn(value) {
-  if (isString(value)) return value;
+function formatRawStringArray(value) {
+  if (!(Array.isArray(value) && value.length && hasWellFormedStrings(value) && value.some(text => text.includes("\n")))) return null;
+  const raw = "strings[" + value.length + "]\n" + value.map((text, i) => "[" + i + "] " + text.length + " UTF-16 units\n" + text + "\n").join("");
+  const escapedSize = value.reduce((sum, text) => sum + JSON.stringify(text).length, value.length + 1);
 
-  if (Array.isArray(value) && value.length && hasWellFormedStrings(value) && value.some(text => text.includes("\n"))) {
-    const raw = "strings[" + value.length + "]\n" + value.map((text, i) => "[" + i + "] " + text.length + " UTF-16 units\n" + text + "\n").join("");
-    const escapedSize = value.reduce((sum, text) => sum + JSON.stringify(text).length, value.length + 1);
+  return raw.length < escapedSize ? raw : null;
+}
 
-    if (raw.length < escapedSize) return raw;
+function shouldFrameRaw(input) {
+  return isString(input) && input.includes("\n") && !hasUnpairedSurrogate(input) && JSON.stringify(input).length - input.length > 64;
+}
+
+function visitRawStrings(input, strings) {
+  if (shouldFrameRaw(input)) {
+    const index = strings.push(input) - 1;
+
+    return { [RAW_TEXT]: "raw[" + index + "]" };
   }
 
-  const escaped = formatValue(value);
+  if (Array.isArray(input)) return input.map(child => visitRawStrings(child, strings));
+
+  if (isObject(input)) return Object.fromEntries(Object.entries(input).map(([key, child]) => [key, visitRawStrings(child, strings)]));
+
+  return input;
+}
+
+function framedReturn(value, escaped) {
   const strings = [];
-
-  const visit = input => {
-    if (isString(input) && input.includes("\n") && !hasUnpairedSurrogate(input) && JSON.stringify(input).length - input.length > 64) {
-      const index = strings.push(input) - 1;
-
-      return { [RAW_TEXT]: "raw[" + index + "]" };
-    }
-
-    if (Array.isArray(input)) return input.map(visit);
-
-    if (isObject(input)) return Object.fromEntries(Object.entries(input).map(([key, child]) => [key, visit(child)]));
-
-    return input;
-  };
-
-  const referencedValue = visit(value);
+  const referencedValue = visitRawStrings(value, strings);
 
   if (!strings.length) return escaped;
   // Keep every key, value, duplicate string and byte. References are unquoted
@@ -126,6 +137,16 @@ export function formatReturn(value) {
   const framed = formatValue(referencedValue) + "\nraw strings[" + strings.length + "]\n" + strings.map((text, i) => "raw[" + i + "] " + text.length + " UTF-16 units\n" + text + "\n").join("");
 
   return framed.length < escaped.length ? framed : escaped;
+}
+
+/** Lossless framing for source arrays, not string escaping or source compression. */
+export function formatReturn(value) {
+  if (isString(value)) return value;
+  const rawArray = formatRawStringArray(value);
+
+  if (rawArray !== null) return rawArray;
+
+  return framedReturn(value, formatValue(value));
 }
 
 const RAW_TEXT = Symbol("raw text reference");
@@ -172,6 +193,34 @@ function formatFlatWithin(value, limit) {
   return walkFlat(value, push, new Set()) ? parts.join("") : null;
 }
 
+function walkFlatArray(value, push, seen) {
+  if (value.length === 0) return push("[]");
+
+  if (!push("[")) return false;
+
+  for (let i = 0; i < value.length; i++) {
+    if (i && !push(",")) return false;
+
+    if (!walkFlat(value[i] === undefined ? null : value[i], push, seen)) return false;
+  }
+
+  return push("]");
+}
+
+function walkFlatObject(value, push, seen) {
+  const keys = Object.keys(value).filter((key) => value[key] !== undefined);
+
+  if (keys.length === 0) return push("{}");
+
+  for (let i = 0; i < keys.length; i++) {
+    if (!push((i ? "," : "{") + formatKey(keys[i]) + ":")) return false;
+
+    if (!walkFlat(value[keys[i]], push, seen)) return false;
+  }
+
+  return push("}");
+}
+
 function walkFlat(value, push, seen) {
   if (value?.[RAW_TEXT] !== undefined) return push(value[RAW_TEXT]);
 
@@ -181,34 +230,30 @@ function walkFlat(value, push, seen) {
   seen.add(value);
 
   try {
-    if (Array.isArray(value)) {
-      if (value.length === 0) return push("[]");
-
-      if (!push("[")) return false;
-
-      for (let i = 0; i < value.length; i++) {
-        if (i && !push(",")) return false;
-
-        if (!walkFlat(value[i] === undefined ? null : value[i], push, seen)) return false;
-      }
-
-      return push("]");
-    }
-
-    const keys = Object.keys(value).filter((key) => value[key] !== undefined);
-
-    if (keys.length === 0) return push("{}");
-
-    for (let i = 0; i < keys.length; i++) {
-      if (!push((i ? "," : "{") + formatKey(keys[i]) + ":")) return false;
-
-      if (!walkFlat(value[keys[i]], push, seen)) return false;
-    }
-
-    return push("}");
+    return Array.isArray(value) ? walkFlatArray(value, push, seen) : walkFlatObject(value, push, seen);
   } finally {
     seen.delete(value);
   }
+}
+
+function definedKeys(value) {
+  return Object.keys(value).filter((key) => value[key] !== undefined);
+}
+
+function formatArray(value, indent, width, seen) {
+  if (value.length === 0) return "[]";
+  const pad = indent + " ";
+
+  return "[\n" + value.map((item) => pad + formatValue(item === undefined ? null : item, pad, width, seen)).join(",\n") + "\n" + indent + "]";
+}
+
+function formatObject(value, indent, width, seen) {
+  const keys = definedKeys(value);
+
+  if (keys.length === 0) return "{}";
+  const pad = indent + " ";
+
+  return "{\n" + keys.map((key) => pad + formatKey(key) + ":" + formatValue(value[key], pad, width, seen)).join(",\n") + "\n" + indent + "}";
 }
 
 /**
@@ -228,19 +273,8 @@ export function formatValue(value, indent = "", width = FORMAT_WIDTH, seen = new
     const flat = formatFlatWithin(value, width - indent.length);
 
     if (flat !== null) return flat;
-    const pad = indent + " ";
 
-    if (Array.isArray(value)) {
-      if (value.length === 0) return "[]";
-
-      return "[\n" + value.map((item) => pad + formatValue(item === undefined ? null : item, pad, width, seen)).join(",\n") + "\n" + indent + "]";
-    }
-
-    const keys = Object.keys(value).filter((key) => value[key] !== undefined);
-
-    if (keys.length === 0) return "{}";
-
-    return "{\n" + keys.map((key) => pad + formatKey(key) + ":" + formatValue(value[key], pad, width, seen)).join(",\n") + "\n" + indent + "}";
+    return Array.isArray(value) ? formatArray(value, indent, width, seen) : formatObject(value, indent, width, seen);
   } finally {
     seen.delete(value);
   }

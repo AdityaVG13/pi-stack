@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Internals
+
+- Shared `src/contract/` for read/edit/bash shapes. Guest and host classify once;
+  guest no longer reimplements exclusive-mode routing before RPC.
+- Read dispatch is `classifyRead` → kind table. Disk vs staged `about` focus share
+  one `focusAbout` helper.
+- Invoke permission/target resolution lives in `bridge/invoke.js`.
+- Native adapters live in `src/adapters/{read,write,edit,bash,list}.js`;
+  `createNativeAdapters` is a 30-line assembler. The host kernel stays in
+  `host-bridge.js`.
+- Line/edit helpers in `fs/text-ops.js`. Unused catalog search/describe APIs and
+  the unused native-tool registrar are gone.
+- Per-function cyclomatic complexity is under 10: guest lifecycle is `GuestRun`,
+  program batches are `ProgramBatch`, snap ranking/read/edit/bash/VFS/evidence/
+  output/UI are extracted helpers and classify tables. Same public behavior;
+  BIND DAG unchanged.
+
 ## [0.6.0] - 2026-09-15
 
 ### Added

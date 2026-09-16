@@ -34,37 +34,38 @@ function hasReturn(node) {
   return Object.values(node).some(value => Array.isArray(value) ? value.some(hasReturn) : hasReturn(value));
 }
 
-function prepareProgram(code) {
-  let program;
-  let expression;
-  let expressionSource;
-
+function parseExpressionFunction(code) {
   try {
-    program = parse(code, PARSE_OPTIONS);
+    const program = parse(code, PARSE_OPTIONS);
     const statements = program.body.filter(node => node.type !== "EmptyStatement");
     const statement = statements.length === 1 ? statements[0] : undefined;
     const candidate = statement?.type === "ExpressionStatement" ? statement.expression : statement;
 
     if (candidate && FUNCTION_TYPES.has(candidate.type)) {
-      expression = candidate;
-      expressionSource = code.slice(statement.start, statement.end).replace(/;\s*$/, "");
+      return { program, expression: candidate, expressionSource: code.slice(statement.start, statement.end).replace(/;\s*$/, "") };
     }
+
+    return { program };
   } catch (bodyError) {
-    expressionSource = code.trimEnd().replace(/;+\s*$/, "");
+    const expressionSource = code.trimEnd().replace(/;+\s*$/, "");
 
     try {
       const wrapped = parse("(" + expressionSource + "\n)", PARSE_OPTIONS);
-      expression = wrapped.body[0]?.expression;
+      const expression = wrapped.body[0]?.expression;
 
       if (!expression || !FUNCTION_TYPES.has(expression.type)) throw bodyError;
+
+      return { expression, expressionSource };
     } catch { throw bodyError; }
   }
+}
 
-  const body = expression ? "return await (" + expressionSource + "\n)();" : code;
-
-  const returns = expression
-    ? expression.type === "ArrowFunctionExpression" && expression.body.type !== "BlockStatement" || hasReturn(expression.body)
-    : hasReturn(program);
+function prepareProgram(code) {
+  const parsed = parseExpressionFunction(code);
+  const body = parsed.expression ? "return await (" + parsed.expressionSource + "\n)();" : code;
+  const returns = parsed.expression
+    ? parsed.expression.type === "ArrowFunctionExpression" && parsed.expression.body.type !== "BlockStatement" || hasReturn(parsed.expression.body)
+    : hasReturn(parsed.program);
 
   return { body, hasReturn: returns };
 }
@@ -159,214 +160,285 @@ const RPC_METHODS = {
   speculateRollback: (nova) => nova.speculateRollback(),
 };
 
-export async function runGuestProgram({ code, file, cwd = process.cwd(), data, nova = {}, config = {}, signal, onTimeout }) {
-  const started = performance.now();
-  const wall = () => Math.round(performance.now() - started);
-  const logs = [];
-  const fail = (error) => ({ ok: false, error: truncateChars(String(error), config.maxReturnChars ?? 32000, "error").text, logs, logTruncated, wallMs: wall() });
-  let logTruncated = false;
+function admitData(data, cap) {
+  if (data === undefined) return { data };
 
-  if ((code === undefined) === (file === undefined)) return fail("supply exactly one of code or file; no commands ran");
+  try {
+    const encoded = JSON.stringify(data);
 
-  if (file === undefined && (!isString(code) || !code.trim())) return fail("code must be a non-empty string");
+    if (encoded === undefined) return { error: "data must be JSON-serializable" };
+    if (encoded.length > cap) return { error: "data exceeds " + cap + " characters; split literal inputs across invocations" };
 
-  if (file === undefined && code.length > (config.maxCodeChars ?? 48000)) return fail("code exceeds " + (config.maxCodeChars ?? 48000) + " characters; split large writes into write({path,content,append:true}) chunks");
+    return { data: JSON.parse(encoded) };
+  } catch { return { error: "data must be JSON-serializable" }; }
+}
 
-  if (data !== undefined) {
-    try {
-      const encoded = JSON.stringify(data);
+function admitCode({ code, file, cap }) {
+  if ((code === undefined) === (file === undefined)) return { error: "supply exactly one of code or file; no commands ran" };
+  if (file === undefined && (!isString(code) || !code.trim())) return { error: "code must be a non-empty string" };
+  if (file === undefined && code.length > cap) return { error: "code exceeds " + cap + " characters; split large writes into write({path,content,append:true}) chunks" };
+}
 
-      if (encoded === undefined) return fail("data must be JSON-serializable");
-
-      if (encoded.length > (config.maxCodeChars ?? 48000)) return fail("data exceeds " + (config.maxCodeChars ?? 48000) + " characters; split literal inputs across invocations");
-      data = JSON.parse(encoded);
-    } catch { return fail("data must be JSON-serializable"); }
-  }
-
-  if (signal?.aborted) return fail(ABORT_MESSAGE);
-  const runId = ++runSeq;
+function admitTimeout(config) {
   const requestedTimeout = Number(config.timeoutMs === undefined ? 60000 : config.timeoutMs);
 
-  if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0) return fail("timeoutMs must be a positive finite number");
-  const timeoutMs = Math.max(1, Math.min(2_147_483_647, Math.floor(requestedTimeout)));
-  const rssLimit = rssBytes() + (config.maxHeapMb ?? 512) * MEMORY_SLACK * 1048576;
+  if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0) return { error: "timeoutMs must be a positive finite number" };
 
-  return new Promise((resolve) => {
-    let handle;
-    let finished = false;
-    let accepting = true;
-    let completing = false;
-    let hostError;
-    let notifyingHost = false;
-    let aborting = false;
-    const pending = new Set();
-    const inputController = new AbortController();
+  return { timeoutMs: Math.max(1, Math.min(2_147_483_647, Math.floor(requestedTimeout))) };
+}
 
-    const cleanup = () => {
-      inputController.abort();
-      clearTimeout(timer);
-      clearInterval(memTimer);
-      signal?.removeEventListener("abort", signalAbort);
-      handle?.worker.off("message", onMessage);
-      handle?.worker.off("error", onError);
-      handle?.worker.off("exit", onExit);
-    };
+function admitGuest({ code, file, data, config }) {
+  const cap = config.maxCodeChars ?? 48000;
+  const codeError = admitCode({ code, file, cap });
 
-    const finish = (outcome) => {
-      if (finished) return;
-      finished = true;
-      accepting = false;
-      cleanup();
-      void killWorker(handle);
-      resolve({ ...outcome, wallMs: wall() });
-    };
+  if (codeError) return codeError;
+  const admitted = admitData(data, cap);
 
-    const cancelHost = () => {
-      notifyingHost = true;
+  if (admitted.error) return admitted;
+  const timeout = admitTimeout(config);
 
-      try { nova.cancel?.(); } catch {} finally { notifyingHost = false; }
-    };
+  if (timeout.error) return timeout;
 
-    const abort = () => {
-      if (finished || aborting) return;
-      aborting = true;
-      cancelHost();
+  return { data: admitted.data, timeoutMs: timeout.timeoutMs };
+}
 
-      try { onTimeout?.(); } catch {}
+class GuestRun {
+  constructor({ code, file, cwd, data, nova, config, signal, onTimeout, runId, timeoutMs, rssLimit }) {
+    this.code = code;
+    this.file = file;
+    this.cwd = cwd;
+    this.data = data;
+    this.nova = nova;
+    this.config = config;
+    this.signal = signal;
+    this.onTimeout = onTimeout;
+    this.runId = runId;
+    this.timeoutMs = timeoutMs;
+    this.rssLimit = rssLimit;
+    this.started = performance.now();
+    this.logs = [];
+    this.logTruncated = false;
+    this.handle = undefined;
+    this.finished = false;
+    this.accepting = true;
+    this.completing = false;
+    this.hostError = undefined;
+    this.notifyingHost = false;
+    this.aborting = false;
+    this.pending = new Set();
+    this.inputController = new AbortController();
+  }
 
-      aborting = false;
-      finish(fail(ABORT_MESSAGE));
-    };
+  wall() {
+    return Math.round(performance.now() - this.started);
+  }
 
-    const signalAbort = () => { if (!notifyingHost) abort(); };
+  fail(error) {
+    return { ok: false, error: truncateChars(String(error), this.config.maxReturnChars ?? 32000, "error").text, logs: this.logs, logTruncated: this.logTruncated, wallMs: this.wall() };
+  }
 
-    const timer = setTimeout(abort, Math.min(timeoutMs, 2147483647));
+  cleanup() {
+    this.inputController.abort();
+    clearTimeout(this.timer);
+    clearInterval(this.memTimer);
+    this.signal?.removeEventListener("abort", this.signalAbort);
+    this.handle?.worker.off("message", this.onMessage);
+    this.handle?.worker.off("error", this.onError);
+    this.handle?.worker.off("exit", this.onExit);
+  }
 
-    const memTimer = setInterval(() => {
-      if (rssBytes() <= rssLimit) return;
-      cancelHost();
-      finish(fail("guest exceeded memory limit (maxHeapMb=" + (config.maxHeapMb ?? 512) + ")"));
-    }, MEMORY_POLL_MS);
+  finish(outcome) {
+    if (this.finished) return;
+    this.finished = true;
+    this.accepting = false;
+    this.cleanup();
+    void killWorker(this.handle);
+    this.resolve({ ...outcome, wallMs: this.wall() });
+  }
 
-    signal?.addEventListener("abort", signalAbort, { once: true });
+  cancelHost() {
+    this.notifyingHost = true;
 
-    const postResult = (message) => {
-      if (!accepting || finished) return;
+    try { this.nova.cancel?.(); } catch {} finally { this.notifyingHost = false; }
+  }
 
+  abort() {
+    if (this.finished || this.aborting) return;
+    this.aborting = true;
+    this.cancelHost();
+
+    try { this.onTimeout?.(); } catch {}
+
+    this.aborting = false;
+    this.finish(this.fail(ABORT_MESSAGE));
+  }
+
+  postResult(message) {
+    if (!this.accepting || this.finished) return;
+
+    try {
+      this.handle.worker.postMessage({ ...message, runId: this.runId });
+    } catch (err) {
       try {
-        handle.worker.postMessage({ ...message, runId });
-      } catch (err) {
-        try {
-          handle.worker.postMessage({ op: "rpc:result", id: message.id, runId, ok: false, error: "result not transferable: " + err.message });
-        } catch (error) {
-          onError(error);
-        }
+        this.handle.worker.postMessage({ op: "rpc:result", id: message.id, runId: this.runId, ok: false, error: "result not transferable: " + err.message });
+      } catch (error) {
+        this.onError(error);
       }
-    };
+    }
+  }
 
-    const complete = async (outcome) => {
-      if (finished || completing) return;
-      completing = true;
-      accepting = false;
-      // Stop timers and detached guest continuations before settling host work.
-      handle?.worker.off("error", onError);
-      handle?.worker.off("exit", onExit);
-      void killWorker(handle);
+  async drainPending(outcome) {
+    if (this.pending.size || !outcome.ok) this.cancelHost();
+    await Promise.race([Promise.allSettled(this.pending), new Promise(resolve => setTimeout(resolve, 250))]);
+    if (this.pending.size && outcome.ok) this.hostError ??= "program completed with a host call still running";
+  }
 
-      if (pending.size || !outcome.ok) cancelHost();
-      // A host tool that ignores cancellation must not keep the result unsettled
-      // after the guest worker is gone. Give it a brief drain window only.
-      await Promise.race([Promise.allSettled(pending), new Promise(resolve => setTimeout(resolve, 250))]);
-      if (pending.size && outcome.ok) hostError ??= "program completed with a host call still running";
+  async complete(outcome) {
+    if (this.finished || this.completing) return;
+    this.completing = true;
+    this.accepting = false;
+    this.handle?.worker.off("error", this.onError);
+    this.handle?.worker.off("exit", this.onExit);
+    void killWorker(this.handle);
+    await this.drainPending(outcome);
+    if (this.finished) return;
+    this.finish(outcome.ok && this.hostError ? this.fail(this.hostError) : outcome);
+  }
 
-      if (finished) return;
-      finish(outcome.ok && hostError ? fail(hostError) : outcome);
-    };
+  onError = (err) => { void this.complete(this.fail("guest crashed: " + err.message)); };
 
-    const onError = (err) => { void complete(fail("guest crashed: " + err.message)); };
+  onExit = (exitCode) => { void this.complete(this.fail("guest exited (code " + exitCode + ")")); };
 
-    const onExit = (exitCode) => { void complete(fail("guest exited (code " + exitCode + ")")); };
+  onLog(msg) {
+    if (this.logs.length < (this.config.maxLogLines ?? 100)) this.logs.push(msg.line);
+    else this.logTruncated = true;
+    this.logTruncated ||= msg.truncated === true;
+  }
 
-    const onMessage = (msg) => {
-      if (finished || !accepting || !isObject(msg) || msg.runId !== runId) return;
+  onRpc(msg) {
+    const method = Object.hasOwn(RPC_METHODS, msg.method) && RPC_METHODS[msg.method];
+    const work = Promise.resolve().then(() => {
+      if (!method) throw new Error("unknown nova method: " + msg.method);
 
-      if (msg.op === "log") {
-        if (logs.length < (config.maxLogLines ?? 100)) logs.push(msg.line);
-        else logTruncated = true;
-        logTruncated ||= msg.truncated === true;
-      } else if (msg.op === "logTruncated") {
-        logTruncated = true;
-      } else if (msg.op === "rpc") {
-        const method = Object.hasOwn(RPC_METHODS, msg.method) && RPC_METHODS[msg.method];
+      return method(this.nova, msg.args);
+    });
 
-        const work = Promise.resolve().then(() => {
-          if (!method) throw new Error("unknown nova method: " + msg.method);
+    this.pending.add(work);
+    work.then(
+      value => this.postResult({ op: "rpc:result", id: msg.id, ok: true, value }),
+      err => {
+        if (!this.accepting) this.hostError ??= err instanceof Error ? err.message : String(err);
+        this.postResult({ op: "rpc:result", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
+      },
+    ).finally(() => this.pending.delete(work));
+  }
 
-          return method(nova, msg.args);
-        });
+  onDone(msg) {
+    try {
+      const packed = packageFinalReturn(msg.value, this.logs, this.config);
+      void this.complete({ ok: true, result: packed.returnValue, resultText: packed.returnText,
+        returnTruncated: packed.returnTruncated, images: packed.images, undefinedReturn: msg.undefinedReturn === true,
+        logs: packed.logs, logTruncated: this.logTruncated || packed.logTruncated });
+    } catch (err) {
+      void this.complete(this.fail(err.message));
+    }
+  }
 
-        pending.add(work);
-        work.then(
-          value => postResult({ op: "rpc:result", id: msg.id, ok: true, value }),
-          err => {
-            // An awaited, handled host error must not poison the whole program.
-            if (!accepting) hostError ??= err instanceof Error ? err.message : String(err);
-            postResult({ op: "rpc:result", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
-          },
-        ).finally(() => pending.delete(work));
-      } else if (msg.op === "done") {
-        try {
-          const packed = packageFinalReturn(msg.value, logs, config);
-          void complete({ ok: true, result: packed.returnValue, resultText: packed.returnText,
-            returnTruncated: packed.returnTruncated, images: packed.images, undefinedReturn: msg.undefinedReturn === true,
-            logs: packed.logs, logTruncated: logTruncated || packed.logTruncated });
-        } catch (err) {
-          void complete(fail(err.message));
-        }
-      } else if (msg.op === "error") {
-        const where = msg.location ? " (line " + msg.location.line + ":" + msg.location.col + ")" : "";
-        void complete(fail(msg.message + where));
-      }
-    };
+  guestError(msg) {
+    const where = msg.location ? " (line " + msg.location.line + ":" + msg.location.col + ")" : "";
+    void this.complete(this.fail(msg.message + where));
+  }
 
-    void (async () => {
-      try {
-        if (signal?.aborted) return abort();
+  dispatchGuest(msg) {
+    if (msg.op === "log") this.onLog(msg);
+    else if (msg.op === "logTruncated") this.logTruncated = true;
+    else if (msg.op === "rpc") this.onRpc(msg);
+    else if (msg.op === "done") this.onDone(msg);
+    else if (msg.op === "error") this.guestError(msg);
+  }
 
-        if (file !== undefined) code = await readProgramFile(file, cwd, config.maxCodeChars ?? 48000, inputController.signal);
+  onMessage = (msg) => {
+    if (this.finished || !this.accepting || !isObject(msg) || msg.runId !== this.runId) return;
+    this.dispatchGuest(msg);
+  };
 
-        if (finished) return;
+  signalAbort = () => { if (!this.notifyingHost) this.abort(); };
 
-        if (!code.trim()) return finish(fail("code must be a non-empty string; no commands ran"));
-        let prepared;
+  async loadCode() {
+    if (this.file !== undefined) this.code = await readProgramFile(this.file, this.cwd, this.config.maxCodeChars ?? 48000, this.inputController.signal);
+    if (this.finished) return false;
+    if (!this.code.trim()) { this.finish(this.fail("code must be a non-empty string; no commands ran")); return false; }
 
-        try { prepared = prepareProgram(code); }
-        catch (error) { return finish(fail("JavaScript syntax error: " + error.message + "; no commands ran. Put literal file/script content in the tool's data parameter and use write(data.path,data.content) or bash({command,args:data.args}).")); }
+    try { this.prepared = prepareProgram(this.code); }
+    catch (error) { this.finish(this.fail("JavaScript syntax error: " + error.message + "; no commands ran. Put literal file/script content in the tool's data parameter and use write(data.path,data.content) or bash({command,args:data.args}).")); return false; }
 
-        if (wall() >= timeoutMs) return abort();
-        handle = acquireWorker(config);
-        await handle.ready;
+    return true;
+  }
 
-        if (finished || signal?.aborted) return abort();
-        let available = isFunction(nova.names) ? await nova.names() : [];
+  async attachWorker() {
+    if (this.wall() >= this.timeoutMs) { this.abort(); return false; }
+    this.handle = acquireWorker(this.config);
+    await this.handle.ready;
+    if (this.finished || this.signal?.aborted) { this.abort(); return false; }
+    let available = isFunction(this.nova.names) ? await this.nova.names() : [];
 
-        if (!Array.isArray(available)) available = [];
+    if (!Array.isArray(available)) available = [];
+    if (this.finished || this.signal?.aborted) { this.abort(); return false; }
+    this.handle.worker.on("message", this.onMessage);
+    this.handle.worker.on("error", this.onError);
+    this.handle.worker.on("exit", this.onExit);
+    if (this.wall() >= this.timeoutMs) { this.abort(); return false; }
+    this.available = available;
 
-        if (finished || signal?.aborted) return abort();
-        handle.worker.on("message", onMessage);
-        handle.worker.on("error", onError);
-        handle.worker.on("exit", onExit);
+    return true;
+  }
 
-        if (wall() >= timeoutMs) return abort();
-        handle.worker.postMessage({ op: "run", runId, prepared, data, available,
-          batchRead: nova.batchRead !== false,
-          nativeArgv: nova.nativeArgv === true,
-          limits: { maxLogLines: config.maxLogLines ?? 100, maxLogLineChars: config.maxLogLineChars ?? 4096 } });
-      } catch (err) {
-        if (finished) return;
-        cancelHost();
-        finish(fail("program failed to start: " + err.message + "; no commands ran"));
-      }
-    })();
-  });
+  postRun() {
+    this.handle.worker.postMessage({ op: "run", runId: this.runId, prepared: this.prepared, data: this.data, available: this.available,
+      batchRead: this.nova.batchRead !== false,
+      nativeArgv: this.nova.nativeArgv === true,
+      limits: { maxLogLines: this.config.maxLogLines ?? 100, maxLogLineChars: this.config.maxLogLineChars ?? 4096 } });
+  }
+
+  async boot() {
+    try {
+      if (this.signal?.aborted) return this.abort();
+      if (!await this.loadCode()) return;
+      if (!await this.attachWorker()) return;
+      this.postRun();
+    } catch (err) {
+      if (this.finished) return;
+      this.cancelHost();
+      this.finish(this.fail("program failed to start: " + err.message + "; no commands ran"));
+    }
+  }
+
+  start() {
+    return new Promise((resolve) => {
+      this.resolve = resolve;
+      this.timer = setTimeout(() => this.abort(), Math.min(this.timeoutMs, 2147483647));
+      this.memTimer = setInterval(() => {
+        if (rssBytes() <= this.rssLimit) return;
+        this.cancelHost();
+        this.finish(this.fail("guest exceeded memory limit (maxHeapMb=" + (this.config.maxHeapMb ?? 512) + ")"));
+      }, MEMORY_POLL_MS);
+      this.signal?.addEventListener("abort", this.signalAbort, { once: true });
+      void this.boot();
+    });
+  }
+}
+
+export async function runGuestProgram({ code, file, cwd = process.cwd(), data, nova = {}, config = {}, signal, onTimeout }) {
+  const admitted = admitGuest({ code, file, data, config });
+  const fail = (error) => ({ ok: false, error: truncateChars(String(error), config.maxReturnChars ?? 32000, "error").text, logs: [], logTruncated: false, wallMs: 0 });
+
+  if (admitted.error) return fail(admitted.error);
+  if (signal?.aborted) return fail(ABORT_MESSAGE);
+
+  return new GuestRun({
+    code, file, cwd, data: admitted.data, nova, config, signal, onTimeout,
+    runId: ++runSeq,
+    timeoutMs: admitted.timeoutMs,
+    rssLimit: rssBytes() + (config.maxHeapMb ?? 512) * MEMORY_SLACK * 1048576,
+  }).start();
 }

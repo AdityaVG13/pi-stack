@@ -118,14 +118,7 @@ function consumeQuoted(text, i, stack) {
   return end < 0 ? { error: "unterminated string", at: i } : { end, prev: "value" };
 }
 
-/** Try to consume a comment, string, template, or regex at i. Returns { end, prev } | { error, at } | null. */
-function consumeLiteral(text, i, stack, prev) {
-  const c = text[i];
-
-  if (c === '"' || c === "'" || c === "`") return consumeQuoted(text, i, stack);
-
-  if (c !== "/") return null;
-
+function consumeSlash(text, i, prev) {
   if (text[i + 1] === "/" || text[i + 1] === "*") {
     const end = skipComment(text, i);
 
@@ -138,6 +131,17 @@ function consumeLiteral(text, i, stack, prev) {
   const end = skipRegex(text, i);
 
   return end > 0 ? { end, prev: "value" } : null;
+}
+
+/** Try to consume a comment, string, template, or regex at i. Returns { end, prev } | { error, at } | null. */
+function consumeLiteral(text, i, stack, prev) {
+  const c = text[i];
+
+  if (c === '"' || c === "'" || c === "`") return consumeQuoted(text, i, stack);
+
+  if (c !== "/") return null;
+
+  return consumeSlash(text, i, prev);
 }
 
 /** Push/pop a bracket; returns an error, a stop, or null to continue. */

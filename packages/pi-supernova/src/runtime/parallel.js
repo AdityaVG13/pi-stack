@@ -4,33 +4,91 @@ const READ_ONLY_TOOLS = new Set(["read", "grep", "glob", "find", "ls", "snap", "
 
 const READ_ONLY_LSP = new Set(["definition", "references", "hover", "symbols", "diagnostics", "implementation", "type_definition", "incoming_calls", "outgoing_calls"]);
 
-export function isMutatingTool(name, config = {}, args = {}, definition) {
-  if (!isObject(args)) args = {};
-  name = String(name);
+const NATIVE_TOOLS = ["read", "edit", "write", "bash"];
 
+const SPECIAL_MUTATION = {
+  todo: args => args.op !== "view",
+  hub: args => !["list", "ps", "logs", "describe"].includes(args.op),
+};
+
+function configuredMutating(name, config) {
   if ((config.mutatingTools ?? []).includes(name)) return true;
 
   if ((config.mutatingPrefixes ?? []).some(prefix => prefix && name.startsWith(prefix))) return true;
 
+  return false;
+}
+
+function lspMutates(args) {
+  const action = args.action ?? args.operation;
+
+  if (READ_ONLY_LSP.has(action)) return false;
+
+  if (["rename", "rename_file"].includes(action)) return args.apply !== false;
+
+  if (action === "code_actions") return args.apply === true;
+
+  return true;
+}
+
+export function isMutatingTool(name, config = {}, args = {}, definition) {
+  if (!isObject(args)) args = {};
+  name = String(name);
+
+  if (configuredMutating(name, config)) return true;
+
   if (definition?.annotations?.readOnlyHint === true) return false;
 
-  if (name === "lsp") {
-    const action = args.action ?? args.operation;
+  if (name === "lsp") return lspMutates(args);
+  const special = SPECIAL_MUTATION[name];
 
-    if (READ_ONLY_LSP.has(action)) return false;
-
-    if (["rename", "rename_file"].includes(action)) return args.apply !== false;
-
-    if (action === "code_actions") return args.apply === true;
-
-    return true;
-  }
-
-  if (name === "todo") return args.op !== "view";
-
-  if (name === "hub") return !["list", "ps", "logs", "describe"].includes(args.op);
+  if (special) return special(args);
 
   return !READ_ONLY_TOOLS.has(name);
+}
+
+function takeScheduledWave(queue, first, maxParallelReads) {
+  const wave = [first];
+
+  if (first.name !== "read") return wave;
+
+  while (wave.length < maxParallelReads && queue[0]?.name === "read") {
+    const next = queue.shift();
+
+    if (!next.cancelled) wave.push(next);
+  }
+
+  return wave;
+}
+
+async function runScheduledJob(job) {
+  if (job.cancelled) return;
+  job.started = true;
+  job.signal?.removeEventListener("abort", job.abort);
+
+  try {
+    job.signal?.throwIfAborted();
+    const result = await job.run();
+    job.signal?.throwIfAborted();
+    job.resolve(result);
+  } catch (error) { job.reject(error); }
+}
+
+function runScheduledWave(wave) {
+  // Settle each promise separately: one failed read must not discard its
+  // siblings or release a write barrier while other reads are still active.
+  return Promise.all(wave.map(runScheduledJob));
+}
+
+function attachJobAbort(job, signal, reject) {
+  job.abort = () => {
+    if (job.started) return;
+    job.cancelled = true;
+    signal.removeEventListener("abort", job.abort);
+    reject(signal.reason ?? new Error("aborted"));
+  };
+
+  signal?.addEventListener("abort", job.abort, { once: true });
 }
 
 /** FIFO read waves with mutation barriers; callers keep independent promises. */
@@ -46,33 +104,14 @@ export function createNativeScheduler({ maxParallelReads = 8 } = {}) {
         const first = queue.shift();
 
         if (first.cancelled) continue;
-        const wave = [first];
+        const wave = takeScheduledWave(queue, first, maxParallelReads);
 
         if (first.name === "read") {
-          while (wave.length < maxParallelReads && queue[0]?.name === "read") {
-            const next = queue.shift();
-
-            if (!next.cancelled) wave.push(next);
-          }
-
           stats.readWaves++;
           stats.peakParallelReads = Math.max(stats.peakParallelReads, wave.length);
         }
 
-        // Settle each promise separately: one failed read must not discard its
-        // siblings or release a write barrier while other reads are still active.
-        await Promise.all(wave.map(async job => {
-          if (job.cancelled) return;
-          job.started = true;
-          job.signal?.removeEventListener("abort", job.abort);
-
-          try {
-            job.signal?.throwIfAborted();
-            const result = await job.run();
-            job.signal?.throwIfAborted();
-            job.resolve(result);
-          } catch (error) { job.reject(error); }
-        }));
+        await runScheduledWave(wave);
       }
     } finally { draining = false; }
   }
@@ -80,7 +119,7 @@ export function createNativeScheduler({ maxParallelReads = 8 } = {}) {
   return {
     stats,
     schedule(name, run, signal) {
-      if (!["read", "edit", "write", "bash"].includes(name) || !isFunction(run)) {
+      if (!NATIVE_TOOLS.includes(name) || !isFunction(run)) {
         return Promise.reject(new Error("scheduler requires a native tool and an executor"));
       }
 
@@ -89,14 +128,7 @@ export function createNativeScheduler({ maxParallelReads = 8 } = {}) {
 
       return new Promise((resolve, reject) => {
         const job = { name, run, signal, resolve, reject, started: false, cancelled: false };
-        job.abort = () => {
-          if (job.started) return;
-          job.cancelled = true;
-          signal.removeEventListener("abort", job.abort);
-          reject(signal.reason ?? new Error("aborted"));
-        };
-
-        signal?.addEventListener("abort", job.abort, { once: true });
+        attachJobAbort(job, signal, reject);
         queue.push(job);
 
         if (!draining) {
@@ -116,26 +148,27 @@ function requireArray(value, name) {
   return value;
 }
 
-export async function runParallelWave(thunks, meta, options = {}) {
-  const list = requireArray(thunks, "parallel wave");
-
-  if (list.some(item => !isFunction(item))) throw new TypeError("parallel wave requires functions");
-
-  if (!list.length) return { results: [], mode: "serial", reason: "empty" };
-  const { mode = "auto", config = {} } = options;
+function waveMutates(list, meta, config) {
   const names = meta?.names ?? [];
-  const mutating = names.length !== list.length || names.some((name, i) => isMutatingTool(name, config, meta?.calls?.[i]?.args, meta?.definitions?.[i]));
 
-  if (!mutating && (mode === "parallel" || (mode === "auto" && list.length > 1))) {
-    // Do not finish a wave while its already-started host calls are still running.
-    const settled = await Promise.allSettled(list.map(thunk => Promise.resolve().then(thunk)));
-    const failure = settled.find(item => item.status === "rejected");
+  return names.length !== list.length || names.some((name, i) => isMutatingTool(name, config, meta?.calls?.[i]?.args, meta?.definitions?.[i]));
+}
 
-    if (failure) throw failure.reason;
+function shouldRunParallel(mutating, mode, length) {
+  return !mutating && (mode === "parallel" || (mode === "auto" && length > 1));
+}
 
-    return { results: settled.map(item => item.value), mode: "parallel", reason: "independent-reads" };
-  }
+async function settleParallel(list) {
+  // Do not finish a wave while its already-started host calls are still running.
+  const settled = await Promise.allSettled(list.map(thunk => Promise.resolve().then(thunk)));
+  const failure = settled.find(item => item.status === "rejected");
 
+  if (failure) throw failure.reason;
+
+  return { results: settled.map(item => item.value), mode: "parallel", reason: "independent-reads" };
+}
+
+async function runSerial(list, mutating) {
   const results = [];
 
   for (const thunk of list) results.push(await thunk());
@@ -143,16 +176,16 @@ export async function runParallelWave(thunks, meta, options = {}) {
   return { results, mode: "serial", reason: mutating ? "mutating" : "single-or-forced" };
 }
 
-export async function parallel(items) {
-  return Promise.all(requireArray(items, "parallel").map(item => isFunction(item) ? item() : item));
-}
+export async function runParallelWave(thunks, meta, options = {}) {
+  const list = requireArray(thunks, "parallel wave");
 
-export async function pipeline(items, ...stages) {
-  let current = requireArray(items, "pipeline");
+  if (list.some(item => !isFunction(item))) throw new TypeError("parallel wave requires functions");
 
-  if (stages.some(stage => !isFunction(stage))) throw new TypeError("pipeline stages must be functions");
+  if (!list.length) return { results: [], mode: "serial", reason: "empty" };
+  const { mode = "auto", config = {} } = options;
+  const mutating = waveMutates(list, meta, config);
 
-  for (const stage of stages) current = await Promise.all(current.map(item => stage(item)));
+  if (shouldRunParallel(mutating, mode, list.length)) return settleParallel(list);
 
-  return current;
+  return runSerial(list, mutating);
 }

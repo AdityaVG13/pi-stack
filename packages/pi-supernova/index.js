@@ -206,6 +206,108 @@ export function registerCodeMode(pi) {
     };
   }
 
+  function bindRunSignal(signal) {
+    const runController = new AbortController();
+    const abortRun = () => runController.abort(signal?.reason);
+
+    if (signal?.aborted) abortRun();
+    else signal?.addEventListener("abort", abortRun, { once: true });
+
+    return { runController, abortRun };
+  }
+
+  function openRunBridge(ctx, runCwd, budget, runController) {
+    const runBridge = bridge.fork({ getCwd: () => runCwd, budget });
+    runBridge.bindCallContext(ctx, runController.signal);
+    runBridge.resetCallBudget();
+
+    return runBridge;
+  }
+
+  async function runAndCommit(params, runCwd, runBridge, abortRun, runController, budget) {
+    refreshCatalog(runBridge);
+    runBridge.beginSpeculation();
+    const outcome = await runGuestProgram({
+      code: params?.code,
+      file: params?.file,
+      cwd: runCwd,
+      data: params?.data,
+      nova: makeNovaApi(runBridge, abortRun),
+      config: { ...config, maxLogLines: Math.max(0,config.maxLogLines-(budget?.logLines ?? 0)), timeoutMs: params?.timeoutMs === undefined ? config.timeoutMs : Number(params.timeoutMs) },
+      signal: runController.signal,
+      onTimeout: abortRun,
+    });
+    runBridge.close();
+
+    if (outcome.ok) {
+      if (runBridge.getOverlayDepth() !== 1) throw new Error("program ended with an unfinished edit checkpoint; await it before returning");
+      await runBridge.commitSpeculation();
+    }
+    else while (runBridge.getOverlayDepth()) runBridge.rollbackSpeculation();
+
+    return outcome;
+  }
+
+  function scheduleWarm(runController) {
+    cancelWarmTimer();
+
+    if (!stopped && !runController.signal.aborted) {
+      // Deliver the result before paying for another Worker constructor.
+      warmTimer = setImmediate(() => {
+        warmTimer = undefined;
+
+        if (!stopped && !runController.signal.aborted) warmGuestWorker(config).catch(() => {});
+      });
+      warmTimer.unref?.();
+    }
+  }
+
+  function finishRun(runBridge, emitProgress, signal, abortRun, runController) {
+    runBridge.setCallListener(null);
+    emitProgress.flush();
+    signal?.removeEventListener("abort", abortRun);
+    // Prepare one pristine worker during the model's next decision. Never
+    // recycle a worker that has executed arbitrary guest JavaScript.
+    scheduleWarm(runController);
+  }
+
+  function attachReceipts(outcome, trace) {
+    if (outcome.ok && outcome.result === undefined) {
+      const receipts = mutationReceipts(trace);
+
+      if (receipts) {
+        outcome.resultText = receipts;
+        outcome.undefinedReturn = false;
+      }
+    }
+  }
+
+  function throwIfFailed(outcome, visible, response) {
+    if (outcome.ok) return response;
+    const error = new Error(visible);
+    Object.defineProperty(error,"supernovaResult",{value:response});
+    throw error;
+  }
+
+  function packExecuteResult(outcome, call, runBridge, budget, peakSeen) {
+    if (budget) budget.logLines += outcome.logs?.length ?? 0;
+    outcome.overlappedTurn = peakSeen > 1 ? peakSeen : 0;
+    outcome.mutations = runBridge.getMutations();
+    const trace = runBridge.getTrace();
+    attachReceipts(outcome, trace);
+    const bounded = fitOutput(outcome, call, config.maxReturnChars, outcome.ok ? successText : errorText);
+    const visible = runBridge.ledger.dedupe(bounded, call);
+    const response = result(visible, {
+      ok: outcome.ok, error: outcome.error, wallMs: outcome.wallMs,
+      returnTruncated: outcome.returnTruncated, logTruncated: outcome.logTruncated,
+      logs: outcome.logs, result: outcome.result, trace, mutations: outcome.mutations,
+    });
+
+    if (outcome.images?.length) response.content.push(...outcome.images);
+
+    return throwIfFailed(outcome, visible, response);
+  }
+
   pi.registerTool({
     name: "supernova",
     label: "Supernova",
@@ -232,46 +334,21 @@ export function registerCodeMode(pi) {
       if (params?.programs !== undefined) return runProgramBatch(_id,params,signal,onUpdate,ctx,config,execute);
       cancelWarmTimer();
       const runCwd = isString(ctx?.cwd) && ctx.cwd ? ctx.cwd : cwd;
-      const runController = new AbortController();
-      const abortRun = () => runController.abort(signal?.reason);
-
-      if (signal?.aborted) abortRun();
-      else signal?.addEventListener("abort", abortRun, { once: true });
-      const runBridge = bridge.fork({ getCwd: () => runCwd, budget });
-      runBridge.bindCallContext(ctx, runController.signal);
-      runBridge.resetCallBudget();
-
+      const { runController, abortRun } = bindRunSignal(signal);
+      const runBridge = openRunBridge(ctx, runCwd, budget, runController);
       const call = ++programSeq;
       runBridge.ledger.beginProgram(call);
       const emitProgress = progressEmitter(onUpdate);
       runBridge.setCallListener((_record, trace) => emitProgress(trace));
       emitProgress([]);
       const started = performance.now();
-      let outcome;
       inFlight += 1;
       overlapPeak = Math.max(overlapPeak, inFlight);
       let peakSeen = overlapPeak;
+      let outcome;
 
       try {
-        refreshCatalog(runBridge);
-        runBridge.beginSpeculation();
-        outcome = await runGuestProgram({
-          code: params?.code,
-          file: params?.file,
-          cwd: runCwd,
-          data: params?.data,
-          nova: makeNovaApi(runBridge, abortRun),
-          config: { ...config, maxLogLines: Math.max(0,config.maxLogLines-(budget?.logLines ?? 0)), timeoutMs: params?.timeoutMs === undefined ? config.timeoutMs : Number(params.timeoutMs) },
-          signal: runController.signal,
-          onTimeout: abortRun,
-        });
-        runBridge.close();
-
-        if (outcome.ok) {
-          if (runBridge.getOverlayDepth() !== 1) throw new Error("program ended with an unfinished edit checkpoint; await it before returning");
-          await runBridge.commitSpeculation();
-        }
-        else while (runBridge.getOverlayDepth()) runBridge.rollbackSpeculation();
+        outcome = await runAndCommit(params, runCwd, runBridge, abortRun, runController, budget);
       } catch (error) {
         abortRun();
         runBridge.close();
@@ -282,56 +359,10 @@ export function registerCodeMode(pi) {
         peakSeen = Math.max(peakSeen, overlapPeak);
         inFlight -= 1;
         if (inFlight === 0) overlapPeak = 0;
-        runBridge.setCallListener(null);
-        emitProgress.flush();
-        signal?.removeEventListener("abort", abortRun);
-        // Prepare one pristine worker during the model's next decision. Never
-        // recycle a worker that has executed arbitrary guest JavaScript.
-        cancelWarmTimer();
-
-        if (!stopped && !runController.signal.aborted) {
-          // Deliver the result before paying for another Worker constructor.
-          warmTimer = setImmediate(() => {
-            warmTimer = undefined;
-
-            if (!stopped && !runController.signal.aborted) warmGuestWorker(config).catch(() => {});
-          });
-          warmTimer.unref?.();
-        }
+        finishRun(runBridge, emitProgress, signal, abortRun, runController);
       }
 
-      if (budget) budget.logLines += outcome.logs?.length ?? 0;
-      outcome.overlappedTurn = peakSeen > 1 ? peakSeen : 0;
-      outcome.mutations = runBridge.getMutations();
-      const trace = runBridge.getTrace();
-
-      if (outcome.ok && outcome.result === undefined) {
-        const receipts = mutationReceipts(trace);
-
-        if (receipts) {
-          outcome.resultText = receipts;
-          outcome.undefinedReturn = false;
-        }
-      }
-      const format = outcome.ok ? successText : errorText;
-      const bounded = fitOutput(outcome, call, config.maxReturnChars, format);
-      const visible = runBridge.ledger.dedupe(bounded, call);
-
-      const response = result(visible, {
-        ok: outcome.ok, error: outcome.error, wallMs: outcome.wallMs,
-        returnTruncated: outcome.returnTruncated, logTruncated: outcome.logTruncated,
-        logs: outcome.logs, result: outcome.result, trace, mutations: outcome.mutations,
-      });
-
-      if (outcome.images?.length) response.content.push(...outcome.images);
-
-      if (!outcome.ok) {
-        const error = new Error(visible);
-        Object.defineProperty(error,"supernovaResult",{value:response});
-        throw error;
-      }
-
-      return response;
+      return packExecuteResult(outcome, call, runBridge, budget, peakSeen);
     },
   });
 

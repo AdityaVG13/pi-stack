@@ -101,40 +101,129 @@ export function globToRegExp(glob) {
   return new RegExp(glob.includes("/") ? "^" + body + "$" : "(?:^|/)" + body + "$");
 }
 
-function declarationEnd(raw, lower, start, lineCount, ext) {
-  if (ext === ".py") {
-    const indentOf = (i) => raw[i].length - raw[i].trimStart().length;
-    const base = indentOf(start - 1);
-    let end = start;
+function lineIndent(raw, i) {
+  return raw[i].length - raw[i].trimStart().length;
+}
 
-    for (let i = start; i < lineCount; i++) {
-      if (lower[i] === "") { end = i + 1; continue; }
-      if (indentOf(i) <= base) break;
-      end = i + 1;
-    }
+function pythonDeclarationEnd(raw, lower, start, lineCount) {
+  const base = lineIndent(raw, start - 1);
+  let end = start;
 
-    return Math.min(end, lineCount);
+  for (let i = start; i < lineCount; i++) {
+    if (lower[i] === "") { end = i + 1; continue; }
+    if (lineIndent(raw, i) <= base) break;
+    end = i + 1;
   }
 
+  return Math.min(end, lineCount);
+}
+
+function braceDelta(text) {
   let depth = 0;
 
-  for (const ch of raw[start - 1] ?? "") {
+  for (const ch of text) {
     if (ch === "{") depth++;
     else if (ch === "}") depth--;
   }
 
+  return depth;
+}
+
+function braceDeclarationEnd(raw, start, lineCount) {
+  let depth = braceDelta(raw[start - 1] ?? "");
+
   if (depth <= 0) return start;
 
   for (let i = start; i < raw.length; i++) {
-    for (const ch of raw[i]) {
-      if (ch === "{") depth++;
-      else if (ch === "}") depth--;
-    }
+    depth += braceDelta(raw[i]);
 
     if (depth <= 0) return i + 1;
   }
 
   return lineCount;
+}
+
+function declarationEnd(raw, lower, start, lineCount, ext) {
+  if (ext === ".py") return pythonDeclarationEnd(raw, lower, start, lineCount);
+
+  return braceDeclarationEnd(raw, start, lineCount);
+}
+
+function readFdBuffer(fd, buffer) {
+  let offset = 0;
+
+  while (offset < buffer.length) {
+    const read = fs.readSync(fd, buffer, offset, buffer.length - offset, offset);
+
+    if (read <= 0) break;
+    offset += read;
+  }
+
+  return offset;
+}
+
+function parseRgFiles(res, root) {
+  let error;
+
+  if (res.exitCode !== 0 && res.exitCode !== 1) error = res.stderr.trim() || "rg exited with status " + res.exitCode;
+  const truncated = res.outputTruncated === true;
+  const output = truncated && !res.stdout.endsWith("\n") ? res.stdout.slice(0, res.stdout.lastIndexOf("\n") + 1) : res.stdout;
+
+  return { files: output.split("\n").filter(Boolean).map(f => path.resolve(root, f)).sort(), error, truncated, missing: false };
+}
+
+function addPorcelainRow(rows, i, set) {
+  const row = rows[i];
+
+  if (row.length <= 3) return i;
+  const status = row.slice(0, 2);
+  const file = row.slice(3);
+
+  if (file) set.add(file);
+
+  if ((status.includes("R") || status.includes("C")) && i + 1 < rows.length) {
+    const target = rows[i + 1];
+
+    if (target) set.add(target);
+
+    return i + 1;
+  }
+
+  return i;
+}
+
+function ingestPorcelain(stdout, set) {
+  const rows = stdout.split("\0");
+
+  for (let i = 0; i < rows.length; i++) i = addPorcelainRow(rows, i, set);
+}
+
+function grepPendingHuge(pending, rel, regex, out) {
+  let start = 0;
+  let line = 0;
+
+  while (start <= pending.length) {
+    const end = pending.indexOf("\n", start);
+    const stop = end === -1 ? pending.length : end;
+    const text = pending.slice(start, stop).replace(/\r$/, "");
+
+    line++;
+    if (regex.test(text)) out.push({ rel, line, text, def: false });
+    if (end === -1) break;
+    start = end + 1;
+  }
+}
+
+function grepEntryRows(e, filePath, root, regex, nameRegex, out) {
+  const lineAnchored = /\^|\$/.test(regex.source.replace(/\\[\^$]|\[[^\]]*\]/g, ""));
+
+  if (!lineAnchored && !regex.test(e.text)) return;
+  const { raw, defNames } = WorkspaceIndex.linesOf(e);
+  const rel = relativeSlash(root, filePath);
+
+  for (let i = 0; i < raw.length; i++) {
+    if (regex.test(raw[i])) out.push({ rel, line: i + 1, text: raw[i], def: defNames[i] !== "" && nameRegex.test(defNames[i]) });
+  }
 }
 
 export class WorkspaceIndex {
@@ -211,24 +300,7 @@ export class WorkspaceIndex {
     try {
       const res = await this.runCommand(["git", "status", "--porcelain", "-z", "--untracked-files=all"], { cwd: root, timeoutMs: 5_000 });
 
-      if (res.exitCode === 0) {
-        const rows = res.stdout.split("\0");
-
-        for (let i = 0; i < rows.length; i++) {
-          const row = rows[i];
-
-          if (row.length <= 3) continue;
-          const status = row.slice(0, 2);
-          const file = row.slice(3);
-
-          if (file) set.add(file);
-          if ((status.includes("R") || status.includes("C")) && i + 1 < rows.length) {
-            const target = rows[++i];
-
-            if (target) set.add(target);
-          }
-        }
-      }
+      if (res.exitCode === 0) ingestPorcelain(res.stdout, set);
     } catch {}
 
     this.gitModified.set(root, set);
@@ -248,6 +320,21 @@ export class WorkspaceIndex {
     }
   }
 
+  async listFilesWithRg(root, includeHidden, signal) {
+    const args = ["rg", "--files"];
+
+    if (includeHidden) args.push("--hidden");
+    args.push("-g", "!.git/**", "-g", "!**/.git/**", "--", root);
+
+    try {
+      return parseRgFiles(await this.runCommand(args, { cwd: root, timeoutMs: 15_000, signal }), root);
+    } catch (err) {
+      signal?.throwIfAborted();
+
+      return { files: [], error: err.message, truncated: false, missing: !fs.existsSync(root) };
+    }
+  }
+
   /** Absolute, sorted file list for a root; gitignore-aware via rg; cached for LIST_TTL_MS. */
   async files(root, includeHidden = false, signal) {
     const key = root + "\0" + (includeHidden ? "h" : "");
@@ -255,135 +342,71 @@ export class WorkspaceIndex {
     const ttl = this.watch(root) ? WATCHED_TTL_MS : LIST_TTL_MS;
 
     if (cached && Date.now() - cached.at < ttl) return cached.files;
-    const args = ["rg", "--files"];
+    const listed = await this.listFilesWithRg(root, includeHidden, signal);
+    this.lists.set(key, { ...listed, at: Date.now() });
 
-    if (includeHidden) args.push("--hidden");
-    args.push("-g", "!.git/**", "-g", "!**/.git/**", "--", root);
-    let files = [];
-    let error;
-    let truncated = false;
-    let missing = false;
-
-    try {
-      const res = await this.runCommand(args, { cwd: root, timeoutMs: 15_000, signal });
-
-      if (res.exitCode !== 0 && res.exitCode !== 1) error = res.stderr.trim() || "rg exited with status " + res.exitCode;
-      truncated = res.outputTruncated === true;
-      const output = truncated && !res.stdout.endsWith("\n") ? res.stdout.slice(0, res.stdout.lastIndexOf("\n") + 1) : res.stdout;
-      files = output.split("\n").filter(Boolean).map(f => path.resolve(root, f)).sort();
-    } catch (err) {
-      signal?.throwIfAborted();
-      error = err.message;
-      missing = !fs.existsSync(root);
-    }
-
-    this.lists.set(key, { files, at: Date.now(), error, truncated, missing });
-
-    return files;
+    return listed.files;
   }
 
-  /** Cached {text, lower, ext, surface?} for a file, re-read when mtime/size changed. Null for unreadable, binary, or huge files. */
-  entry(filePath) {
-    if (!isTextCandidate(filePath)) return null;
-    let stat;
-
-    try {
-      stat = fs.statSync(filePath);
-    } catch {
-      const previous = this.entries.get(filePath);
-
-      if (previous) this.entryBytes -= previous.weight ?? 0;
-      this.entries.delete(filePath);
-
-      return null;
-    }
-
-    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) {
-      const previous = this.entries.get(filePath);
-
-      if (previous) this.entryBytes -= previous.weight ?? 0;
-      this.entries.delete(filePath);
-
-      return null;
-    }
-    const cached = this.entries.get(filePath);
-
-    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-      this.entries.delete(filePath);
-      this.entries.set(filePath, cached);
-
-      return cached;
-    }
-    let text;
-    let actual = stat;
-
-    try {
-      const fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
-
-      try {
-        actual = fs.fstatSync(fd);
-        if (!actual.isFile() || actual.size > MAX_FILE_BYTES) {
-          const previous = this.entries.get(filePath);
-
-          if (previous) this.entryBytes -= previous.weight ?? 0;
-          this.entries.delete(filePath);
-
-          return null;
-        }
-        const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
-        let offset = 0;
-
-        while (offset < buffer.length) {
-          const read = fs.readSync(fd, buffer, offset, buffer.length - offset, offset);
-
-          if (read <= 0) break;
-          offset += read;
-        }
-
-        if (offset > MAX_FILE_BYTES) {
-          const previous = this.entries.get(filePath);
-
-          if (previous) this.entryBytes -= previous.weight ?? 0;
-          this.entries.delete(filePath);
-
-          return null;
-        }
-        actual = fs.fstatSync(fd);
-        if (!actual.isFile() || actual.size !== offset) {
-          const previous = this.entries.get(filePath);
-
-          if (previous) this.entryBytes -= previous.weight ?? 0;
-          this.entries.delete(filePath);
-
-          return null;
-        }
-        text = buffer.subarray(0, offset).toString("utf8");
-      } finally { fs.closeSync(fd); }
-    } catch {
-      const previous = this.entries.get(filePath);
-
-      if (previous) this.entryBytes -= previous.weight ?? 0;
-      this.entries.delete(filePath);
-
-      return null;
-    }
-
-    if (text.includes("\0")) {
-      const previous = this.entries.get(filePath);
-
-      if (previous) this.entryBytes -= previous.weight ?? 0;
-      this.entries.delete(filePath);
-
-      return null;
-    }
-    const created = { text, lower: text.toLowerCase(), mtimeMs: actual.mtimeMs, size: actual.size, weight: Math.max(1, actual.size) * 2, ext: path.extname(filePath), surface: undefined, lines: undefined, spans: undefined };
+  dropCached(filePath) {
     const previous = this.entries.get(filePath);
 
     if (previous) this.entryBytes -= previous.weight ?? 0;
     this.entries.delete(filePath);
-    this.entries.set(filePath, created);
-    this.entryBytes += created.weight;
+  }
 
+  rejectEntry(filePath) {
+    this.dropCached(filePath);
+
+    return null;
+  }
+
+  statOrNull(filePath) {
+    try {
+      return fs.statSync(filePath);
+    } catch {
+      return null;
+    }
+  }
+
+  cachedHit(filePath, stat) {
+    const cached = this.entries.get(filePath);
+
+    if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) return null;
+    this.entries.delete(filePath);
+    this.entries.set(filePath, cached);
+
+    return cached;
+  }
+
+  readFdText(filePath, fd) {
+    let actual = fs.fstatSync(fd);
+
+    if (!actual.isFile() || actual.size > MAX_FILE_BYTES) return this.rejectEntry(filePath);
+    const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
+    const offset = readFdBuffer(fd, buffer);
+
+    if (offset > MAX_FILE_BYTES) return this.rejectEntry(filePath);
+    actual = fs.fstatSync(fd);
+
+    if (!actual.isFile() || actual.size !== offset) return this.rejectEntry(filePath);
+
+    return { text: buffer.subarray(0, offset).toString("utf8"), actual };
+  }
+
+  readIndexedText(filePath) {
+    try {
+      const fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+
+      try {
+        return this.readFdText(filePath, fd);
+      } finally { fs.closeSync(fd); }
+    } catch {
+      return this.rejectEntry(filePath);
+    }
+  }
+
+  evictOverflow() {
     while (this.entryBytes > MAX_ENTRY_CACHE_BYTES && this.entries.size > 1) {
       const oldest = this.entries.keys().next().value;
       const evicted = this.entries.get(oldest);
@@ -391,8 +414,36 @@ export class WorkspaceIndex {
       this.entries.delete(oldest);
       this.entryBytes -= evicted?.weight ?? 0;
     }
+  }
+
+  storeCreated(filePath, loaded) {
+    const created = { text: loaded.text, lower: loaded.text.toLowerCase(), mtimeMs: loaded.actual.mtimeMs, size: loaded.actual.size, weight: Math.max(1, loaded.actual.size) * 2, ext: path.extname(filePath), surface: undefined, lines: undefined, spans: undefined };
+    this.dropCached(filePath);
+    this.entries.set(filePath, created);
+    this.entryBytes += created.weight;
+    this.evictOverflow();
 
     return created;
+  }
+
+  /** Cached {text, lower, ext, surface?} for a file, re-read when mtime/size changed. Null for unreadable, binary, or huge files. */
+  entry(filePath) {
+    if (!isTextCandidate(filePath)) return null;
+    const stat = this.statOrNull(filePath);
+
+    if (!stat) return this.rejectEntry(filePath);
+
+    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return this.rejectEntry(filePath);
+    const cached = this.cachedHit(filePath, stat);
+
+    if (cached) return cached;
+    const loaded = this.readIndexedText(filePath);
+
+    if (!loaded) return null;
+
+    if (loaded.text.includes("\0")) return this.rejectEntry(filePath);
+
+    return this.storeCreated(filePath, loaded);
   }
 
   static fromText(filePath, text) {
@@ -470,46 +521,27 @@ export class WorkspaceIndex {
     return hits;
   }
 
+  resolveGrepEntry(filePath, overlayText, root, regex, out) {
+    const pending = overlayText(filePath);
+
+    if (pending === undefined) return this.entry(filePath);
+
+    if (Buffer.byteLength(pending, "utf8") <= MAX_FILE_BYTES) return WorkspaceIndex.fromText(filePath, pending);
+    grepPendingHuge(pending, relativeSlash(root, filePath), regex, out);
+
+    return null;
+  }
+
   /** Structured grep rows {rel, line, text, def}; def marks lines whose declared name itself matches. */
   grepRows(files, regex, root, overlayText = () => undefined) {
     const out = [];
     const nameRegex = new RegExp(regex.source, "i");
 
     for (const filePath of files) {
-      const pending = overlayText(filePath);
-      let e = null;
-
-      if (pending === undefined) e = this.entry(filePath);
-      else if (Buffer.byteLength(pending, "utf8") <= MAX_FILE_BYTES) e = WorkspaceIndex.fromText(filePath, pending);
-      else {
-        const rel = relativeSlash(root, filePath);
-        let start = 0;
-        let line = 0;
-
-        while (start <= pending.length) {
-          const end = pending.indexOf("\n", start);
-          const stop = end === -1 ? pending.length : end;
-          const text = pending.slice(start, stop).replace(/\r$/, "");
-
-          line++;
-          if (regex.test(text)) out.push({ rel, line, text, def: false });
-          if (end === -1) break;
-          start = end + 1;
-        }
-
-        continue;
-      }
+      const e = this.resolveGrepEntry(filePath, overlayText, root, regex, out);
 
       if (!e) continue;
-      const lineAnchored = /\^|\$/.test(regex.source.replace(/\\[\^$]|\[[^\]]*\]/g, ""));
-
-      if (!lineAnchored && !regex.test(e.text)) continue;
-      const { raw, defNames } = WorkspaceIndex.linesOf(e);
-      const rel = relativeSlash(root, filePath);
-
-      for (let i = 0; i < raw.length; i++) {
-        if (regex.test(raw[i])) out.push({ rel, line: i + 1, text: raw[i], def: defNames[i] !== "" && nameRegex.test(defNames[i]) });
-      }
+      grepEntryRows(e, filePath, root, regex, nameRegex, out);
     }
 
     return out;

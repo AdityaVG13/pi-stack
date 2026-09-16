@@ -9,6 +9,36 @@ function parseHunkHeader(line) {
     newStart: Number(match[3]), newLength: match[4] === undefined ? 1 : Number(match[4]), lines: [], noNewline: [] };
 }
 
+function applyNoNewlineMarker(current) {
+  if (!current.lines.length) throw new Error("newline marker requires a preceding hunk line");
+  current.noNewline.push(current.lines.length - 1);
+}
+
+function pushHunkLine(current, line, oldCount, newCount) {
+  if (oldCount === current.oldLength && newCount === current.newLength && /^--- |^\+\+\+ /.test(line)) {
+    throw new Error("apply_patch accepts one file at a time");
+  }
+
+  current.lines.push(line);
+
+  return {
+    oldCount: line[0] !== "+" ? oldCount + 1 : oldCount,
+    newCount: line[0] !== "-" ? newCount + 1 : newCount,
+  };
+}
+
+function consumeHunkLine(current, line, oldCount, newCount) {
+  if (line.startsWith("\\ No newline at end of file")) {
+    applyNoNewlineMarker(current);
+
+    return { oldCount, newCount };
+  }
+
+  if (!/^[+ -]/.test(line)) return { oldCount, newCount };
+
+  return pushHunkLine(current, line, oldCount, newCount);
+}
+
 export function parsePatchHunks(patchText) {
   const hunks = [];
   let current;
@@ -23,19 +53,8 @@ export function parsePatchHunks(patchText) {
       hunks.push(current);
       oldCount = 0;
       newCount = 0;
-    } else if (current && line.startsWith("\\ No newline at end of file")) {
-      if (!current.lines.length) throw new Error("newline marker requires a preceding hunk line");
-      current.noNewline.push(current.lines.length - 1);
-    } else if (current && /^[+ -]/.test(line)) {
-      if (oldCount === current.oldLength && newCount === current.newLength && /^--- |^\+\+\+ /.test(line)) {
-        throw new Error("apply_patch accepts one file at a time");
-      }
-
-      current.lines.push(line);
-
-      if (line[0] !== "+") oldCount++;
-
-      if (line[0] !== "-") newCount++;
+    } else if (current) {
+      ({ oldCount, newCount } = consumeHunkLine(current, line, oldCount, newCount));
     }
   }
 
@@ -78,6 +97,50 @@ function findHunkMatch(fileLines, expectedOld, nominal) {
   return -1;
 }
 
+function hunkLineText(line) {
+  return line.slice(1).replace(/\r$/, "");
+}
+
+function applyHunkLines(hunk, fileLines, matchIndex, ending) {
+  const replacement = [];
+  let oldIndex = matchIndex;
+
+  for (let i = 0; i < hunk.lines.length; i++) {
+    const line = hunk.lines[i];
+
+    if (line[0] === "+") {
+      replacement.push({ text: hunkLineText(line), ending: hunk.noNewline.includes(i) ? "" : ending });
+    } else {
+      const original = fileLines[oldIndex++];
+
+      if (hunk.noNewline.includes(i) && original.ending) throw new Error("patch newline marker does not match the file");
+
+      if (line[0] === " ") replacement.push(original);
+    }
+  }
+
+  return replacement;
+}
+
+function applyOneHunk(hunk, h, fileLines, offsetShift, relocationShift, ending) {
+  const expectedOld = hunk.lines.filter(line => line[0] !== "+").map(hunkLineText);
+  const newCount = hunk.lines.filter(line => line[0] !== "-").length;
+
+  if (expectedOld.length !== hunk.oldLength || newCount !== hunk.newLength) throw new Error("patch hunk " + (h + 1) + " length does not match its header");
+  // The new coordinate also handles BSD diff's -1,0 header at file start.
+  const nominal = hunk.oldLength === 0 ? hunk.newStart - 1 + relocationShift : hunk.oldStart - 1 + offsetShift;
+  const matchIndex = findHunkMatch(fileLines, expectedOld, nominal);
+
+  if (matchIndex < 0) throw new Error("patch hunk " + (h + 1) + " rejected at line " + hunk.oldStart + ": context did not match");
+  const replacement = applyHunkLines(hunk, fileLines, matchIndex, ending);
+  fileLines.splice(matchIndex, expectedOld.length, ...replacement);
+
+  return {
+    relocationShift: relocationShift + matchIndex - nominal,
+    offsetShift: offsetShift + matchIndex - nominal + replacement.length - expectedOld.length,
+  };
+}
+
 export function applyPatchToText(originalText, patchText) {
   if (!isString(patchText) || !patchText.trim()) throw new Error("apply_patch requires non-empty patch");
   const hunks = parsePatchHunks(patchText);
@@ -87,37 +150,7 @@ export function applyPatchToText(originalText, patchText) {
   let relocationShift = 0;
 
   for (let h = 0; h < hunks.length; h++) {
-    const hunk = hunks[h];
-    const textOf = line => line.slice(1).replace(/\r$/, "");
-    const expectedOld = hunk.lines.filter(line => line[0] !== "+").map(textOf);
-    const newCount = hunk.lines.filter(line => line[0] !== "-").length;
-
-    if (expectedOld.length !== hunk.oldLength || newCount !== hunk.newLength) throw new Error("patch hunk " + (h + 1) + " length does not match its header");
-    // The new coordinate also handles BSD diff's -1,0 header at file start.
-    const nominal = hunk.oldLength === 0 ? hunk.newStart - 1 + relocationShift : hunk.oldStart - 1 + offsetShift;
-    const matchIndex = findHunkMatch(fileLines, expectedOld, nominal);
-
-    if (matchIndex < 0) throw new Error("patch hunk " + (h + 1) + " rejected at line " + hunk.oldStart + ": context did not match");
-    const replacement = [];
-    let oldIndex = matchIndex;
-
-    for (let i = 0; i < hunk.lines.length; i++) {
-      const line = hunk.lines[i];
-
-      if (line[0] === "+") {
-        replacement.push({ text: textOf(line), ending: hunk.noNewline.includes(i) ? "" : ending });
-      } else {
-        const original = fileLines[oldIndex++];
-
-        if (hunk.noNewline.includes(i) && original.ending) throw new Error("patch newline marker does not match the file");
-
-        if (line[0] === " ") replacement.push(original);
-      }
-    }
-
-    fileLines.splice(matchIndex, expectedOld.length, ...replacement);
-    relocationShift += matchIndex - nominal;
-    offsetShift += matchIndex - nominal + replacement.length - expectedOld.length;
+    ({ offsetShift, relocationShift } = applyOneHunk(hunks[h], h, fileLines, offsetShift, relocationShift, ending));
   }
 
   return { resultText: fileLines.map(line => line.text + line.ending).join(""), hunkCount: hunks.length };

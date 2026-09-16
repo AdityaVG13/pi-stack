@@ -4,6 +4,36 @@ export const MAX_JSON_BYTES = 16 * 1024 * 1024;
 
 const SELECTOR_HELP = 'JSON selector supports .field, .nested[0], .items[0:3], .["quoted.key"], or . (whole value); not full jq';
 
+function parseIdentStep(rest, first) {
+  const match = (first ? /^([A-Za-z_$][\w$]*)/ : /^\.([A-Za-z_$][\w$]*)/).exec(rest);
+
+  return match ? { step: { key: match[1] }, match } : null;
+}
+
+function parseQuotedStep(rest) {
+  const match = /^\[("(?:[^"\\]|\\.)*")\]/.exec(rest);
+
+  if (!match) return null;
+
+  try { return { step: { key: JSON.parse(match[1]) }, match }; } catch { throw new Error(SELECTOR_HELP); }
+}
+
+function parseIndexBounds(start, end) {
+  if (!Number.isSafeInteger(start) || (end !== undefined && (!Number.isSafeInteger(end) || end < start))) throw new Error(SELECTOR_HELP);
+
+  return end === undefined ? { index: start } : { start, end };
+}
+
+function parseIndexStep(rest) {
+  const match = /^\[(\d+)(?::(\d+))?\]/.exec(rest);
+
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = match[2] === undefined ? undefined : Number(match[2]);
+
+  return { step: parseIndexBounds(start, end), match };
+}
+
 /** Parse a small, non-evaluating selector language. No dynamic code or prototype lookup. */
 function parseSelector(selector) {
   if (!isString(selector) || !selector.startsWith(".") || selector.length > 2048) throw new Error(SELECTOR_HELP);
@@ -12,23 +42,42 @@ function parseSelector(selector) {
   let first = true;
 
   while (rest) {
-    let match;
+    const parsed = parseIdentStep(rest, first) || parseQuotedStep(rest) || parseIndexStep(rest);
 
-    if ((match = (first ? /^([A-Za-z_$][\w$]*)/ : /^\.([A-Za-z_$][\w$]*)/).exec(rest))) {
-      steps.push({ key: match[1] });
-    } else if ((match = /^\[("(?:[^"\\]|\\.)*")\]/.exec(rest))) {
-      try { steps.push({ key: JSON.parse(match[1]) }); } catch { throw new Error(SELECTOR_HELP); }
-    } else if ((match = /^\[(\d+)(?::(\d+))?\]/.exec(rest))) {
-      const start = Number(match[1]), end = match[2] === undefined ? undefined : Number(match[2]);
-
-      if (!Number.isSafeInteger(start) || (end !== undefined && (!Number.isSafeInteger(end) || end < start))) throw new Error(SELECTOR_HELP);
-      steps.push(end === undefined ? { index: start } : { start, end });
-    } else throw new Error(SELECTOR_HELP);
-    rest = rest.slice(match[0].length);
+    if (!parsed) throw new Error(SELECTOR_HELP);
+    steps.push(parsed.step);
+    rest = rest.slice(parsed.match[0].length);
     first = false;
   }
 
   return steps;
+}
+
+function missingJsonField(value, key) {
+  const keys = isObject(value) ? Object.keys(value) : [];
+  const preview = keys.length ? "; available keys: " + keys.slice(0, 24).map(key => JSON.stringify(key)).join(", ") + (keys.length > 24 ? ", …" : "") : "";
+
+  return new Error("JSON field not found: " + JSON.stringify(key) + preview);
+}
+
+function selectKey(value, key) {
+  if (!isObject(value) || !Object.hasOwn(value, key)) throw missingJsonField(value, key);
+
+  return value[key];
+}
+
+function selectStep(value, step) {
+  if (step.key !== undefined) return selectKey(value, step.key);
+
+  if (!Array.isArray(value)) throw new Error("JSON index requires an array");
+
+  if (step.index !== undefined) {
+    if (step.index >= value.length) throw new Error("JSON index out of range: " + step.index);
+
+    return value[step.index];
+  }
+
+  return value.slice(step.start, step.end);
 }
 
 export function jsonProjector(json) {
@@ -41,27 +90,7 @@ export function jsonProjector(json) {
   // Yield one selection at a time so the caller can budget it before the next
   // slice allocation. Eagerly mapping 64 large slices can exhaust the host heap.
   return function* (root) {
-    for (const steps of plans) yield steps.reduce((value, step) => {
-      if (step.key !== undefined) {
-        if (!isObject(value) || !Object.hasOwn(value, step.key)) {
-          const keys = isObject(value) ? Object.keys(value) : [];
-          const preview = keys.length ? "; available keys: " + keys.slice(0, 24).map(key => JSON.stringify(key)).join(", ") + (keys.length > 24 ? ", …" : "") : "";
-          throw new Error("JSON field not found: " + JSON.stringify(step.key) + preview);
-        }
-
-        return value[step.key];
-      }
-
-      if (!Array.isArray(value)) throw new Error("JSON index requires an array");
-
-      if (step.index !== undefined) {
-        if (step.index >= value.length) throw new Error("JSON index out of range: " + step.index);
-
-        return value[step.index];
-      }
-
-      return value.slice(step.start, step.end);
-    }, root);
+    for (const steps of plans) yield steps.reduce(selectStep, root);
   };
 }
 

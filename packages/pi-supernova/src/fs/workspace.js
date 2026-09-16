@@ -67,14 +67,7 @@ export function isTestPath(filePath) {
   return segments.some((s) => TEST_SEGMENTS.has(s)) || /\.(test|spec)\./.test(base);
 }
 
-/** Reject scheme:// and scheme:/ paths. A single-letter drive (C:/) stays a filesystem path. */
-export function assertFilesystemPath(inputPath, opName, allowSessionRead = false) {
-  if (inputPath == null || !isString(inputPath) || !inputPath.trim()) {
-    throw new Error(`${opName} requires path`);
-  }
-
-  const trimmed = inputPath.trim();
-
+function rejectUriPath(trimmed, opName, allowSessionRead) {
   if (/^(?:agent|artifact):\/\//i.test(trimmed)) {
     if (allowSessionRead) return trimmed;
     throw new Error(`${opName} requires a filesystem path; session resource URIs are read-only`);
@@ -82,17 +75,25 @@ export function assertFilesystemPath(inputPath, opName, allowSessionRead = false
 
   const uri = /^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$/.exec(trimmed);
 
-  if (uri) {
-    const scheme = uri[1];
-    const rest = uri[2];
-    const windowsDrive = scheme.length === 1 && (rest.startsWith("/") || rest.startsWith("\\"));
+  if (!uri) return trimmed;
+  const scheme = uri[1];
+  const rest = uri[2];
+  const windowsDrive = scheme.length === 1 && (rest.startsWith("/") || rest.startsWith("\\"));
 
-    if (!windowsDrive && (rest.startsWith("//") || rest.startsWith("/"))) {
-      throw new Error(`${opName} does not accept ${scheme}: URI paths; use a workspace filesystem path`);
-    }
+  if (!windowsDrive && (rest.startsWith("//") || rest.startsWith("/"))) {
+    throw new Error(`${opName} does not accept ${scheme}: URI paths; use a workspace filesystem path`);
   }
 
   return trimmed;
+}
+
+/** Reject scheme:// and scheme:/ paths. A single-letter drive (C:/) stays a filesystem path. */
+export function assertFilesystemPath(inputPath, opName, allowSessionRead = false) {
+  if (inputPath == null || !isString(inputPath) || !inputPath.trim()) {
+    throw new Error(`${opName} requires path`);
+  }
+
+  return rejectUriPath(inputPath.trim(), opName, allowSessionRead);
 }
 
 export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = false, fresh = false) {
@@ -126,104 +127,114 @@ export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = f
   return target;
 }
 
-export async function runCommand(argv, options = {}) {
-  options.signal?.throwIfAborted();
-  const cwd = options.cwd || process.cwd();
+function commandTimeoutMs(options) {
   const requestedTimeout = Number(options.timeoutMs === undefined ? 60_000 : options.timeoutMs);
 
   if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0) throw new Error("command timeoutMs must be a positive finite number");
-  const timeoutMs = Math.max(1, Math.min(2_147_483_647, Math.floor(requestedTimeout)));
+
+  return Math.max(1, Math.min(2_147_483_647, Math.floor(requestedTimeout)));
+}
+
+function spawnCommand(argv, options, cwd) {
+  return spawn(argv[0], argv.slice(1), {
+    cwd, env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32",
+  });
+}
+
+function signalProcessTree(child, signal) {
+  if (!child.pid) return;
+
+  if (process.platform === "win32") {
+    const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+    killer.on("error", () => child.kill(signal));
+  } else {
+    try { process.kill(-child.pid, signal); } catch (err) { if (err.code !== "ESRCH") child.kill(signal); }
+  }
+}
+
+function failCommand(state, error) {
+  if (state.settled) return;
+  state.settled = true;
+  state.cleanup();
+  // Keep bounded diagnostic output when a command times out or is cancelled.
+  error.stdout = state.stdout;
+  error.stderr = state.stderr;
+  error.outputTruncated = state.outputTruncated;
+  const output = [state.stdout, state.stderr].filter(Boolean).join("\n").trimEnd();
+
+  if (output) error.message += "\n" + output;
+
+  if (state.outputTruncated) error.message += "\n[output truncated]";
+  state.reject(error);
+}
+
+function terminateCommand(state, error) {
+  if (state.settled || state.terminationError) return;
+  state.terminationError = error;
+  signalProcessTree(state.child, "SIGTERM");
+  // Keep ownership after the direct child exits: descendants may ignore SIGTERM.
+  state.escalation = setTimeout(() => { signalProcessTree(state.child, "SIGKILL"); failCommand(state, error); }, 150);
+}
+
+function appendCommandOutput(state, current, chunk) {
+  const remaining = Math.max(0, state.maxOutputChars - state.stdout.length - state.stderr.length);
+
+  if (chunk.length > remaining) state.outputTruncated = true;
+
+  return remaining ? current + chunk.slice(0, remaining) : current;
+}
+
+function onCommandClose(state, code, signal) {
+  if (state.settled) return;
+
+  if (state.terminationError) {
+    // A closed pipe alone says nothing about descendants. Only ESRCH proves
+    // the owned POSIX group is gone; otherwise retain the escalation timer.
+    if (process.platform !== "win32" && state.child.pid) {
+      try { process.kill(-state.child.pid, 0); }
+      catch (error) { if (error.code === "ESRCH") failCommand(state, state.terminationError); }
+    }
+
+    return;
+  }
+
+  state.settled = true;
+  state.cleanup();
+  state.resolve({ stdout: state.stdout, stderr: state.stderr, exitCode: code ?? (128 + (constants.signals[signal] ?? 1)), signal, outputTruncated: state.outputTruncated });
+}
+
+function attachCommandIO(state, options, argv, timeoutMs) {
+  const { child } = state;
+  const onAbort = () => terminateCommand(state, new Error("aborted"));
+  state.cleanup = () => {
+    clearTimeout(state.timer);
+    clearTimeout(state.escalation);
+    options.signal?.removeEventListener("abort", onAbort);
+  };
+  state.timer = setTimeout(() => terminateCommand(state, new Error("command timed out after " + timeoutMs + "ms: " + (options.commandLabel ?? argv.join(" ")))), timeoutMs);
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", chunk => { state.stdout = appendCommandOutput(state, state.stdout, chunk); });
+  child.stderr.on("data", chunk => { state.stderr = appendCommandOutput(state, state.stderr, chunk); });
+  child.on("error", error => failCommand(state, error));
+  child.on("close", (code, signal) => onCommandClose(state, code, signal));
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+
+  if (options.signal?.aborted) onAbort();
+}
+
+export async function runCommand(argv, options = {}) {
+  options.signal?.throwIfAborted();
+  const cwd = options.cwd || process.cwd();
+  const timeoutMs = commandTimeoutMs(options);
   const maxOutputChars = options.maxOutputChars ?? 2 * 1024 * 1024;
 
   return new Promise((resolve, reject) => {
-    const child = spawn(argv[0], argv.slice(1), {
-      cwd, env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32",
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    let outputTruncated = false;
-    let terminationError;
-    let escalation;
-
-    const cleanup = () => {
-      clearTimeout(timer);
-      clearTimeout(escalation);
-      options.signal?.removeEventListener("abort", onAbort);
-    };
-
-    const fail = error => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      // Keep bounded diagnostic output when a command times out or is cancelled.
-      error.stdout = stdout;
-      error.stderr = stderr;
-      error.outputTruncated = outputTruncated;
-      const output = [stdout, stderr].filter(Boolean).join("\n").trimEnd();
-
-      if (output) error.message += "\n" + output;
-
-      if (outputTruncated) error.message += "\n[output truncated]";
-      reject(error);
-    };
-
-    const signalTree = signal => {
-      if (!child.pid) return;
-
-      if (process.platform === "win32") {
-        const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
-        killer.on("error", () => child.kill(signal));
-      } else {
-        try { process.kill(-child.pid, signal); } catch (err) { if (err.code !== "ESRCH") child.kill(signal); }
-      }
-    };
-
-    const terminate = error => {
-      if (settled || terminationError) return;
-      terminationError = error;
-      signalTree("SIGTERM");
-      // Keep ownership after the direct child exits: descendants may ignore SIGTERM.
-      escalation = setTimeout(() => { signalTree("SIGKILL"); fail(error); }, 150);
-    };
-
-    const onAbort = () => terminate(new Error("aborted"));
-    const timer = setTimeout(() => terminate(new Error("command timed out after " + timeoutMs + "ms: " + (options.commandLabel ?? argv.join(" ")))), timeoutMs);
-
-    const append = (current, chunk) => {
-      const remaining = Math.max(0, maxOutputChars - stdout.length - stderr.length);
-
-      if (chunk.length > remaining) outputTruncated = true;
-
-      return remaining ? current + chunk.slice(0, remaining) : current;
-    };
-
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", chunk => { stdout = append(stdout, chunk); });
-    child.stderr.on("data", chunk => { stderr = append(stderr, chunk); });
-    child.on("error", fail);
-    child.on("close", (code, signal) => {
-      if (settled) return;
-
-      if (terminationError) {
-        // A closed pipe alone says nothing about descendants. Only ESRCH proves
-        // the owned POSIX group is gone; otherwise retain the escalation timer.
-        if (process.platform !== "win32" && child.pid) {
-          try { process.kill(-child.pid, 0); }
-          catch (error) { if (error.code === "ESRCH") fail(terminationError); }
-        }
-
-        return;
-      }
-
-      settled = true;
-      cleanup();
-      resolve({ stdout, stderr, exitCode: code ?? (128 + (constants.signals[signal] ?? 1)), signal, outputTruncated });
-    });
-    options.signal?.addEventListener("abort", onAbort, { once: true });
-
-    if (options.signal?.aborted) onAbort();
+    const child = spawnCommand(argv, options, cwd);
+    attachCommandIO({
+      child, resolve, reject, stdout: "", stderr: "", settled: false,
+      outputTruncated: false, terminationError: undefined, escalation: undefined,
+      maxOutputChars, timer: undefined, cleanup() {},
+    }, options, argv, timeoutMs);
   });
 }

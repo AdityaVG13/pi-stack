@@ -39,19 +39,23 @@ function newHistory() {
 // Experimental candidate collection, not proof of provider-visible retention:
 // AgentMessage metadata and later context transformations can hide these strings.
 // Keep this optimization opt-in until exact outgoing citation targets are validated.
+function retainString(value, retained) {
+  // Every line, not only substantive ones. A run may span a blank or short line,
+  // so isRetained must be exact per line or the run truncates there. An oversized
+  // line is never stored: it cannot sit inside a six-line run, and this is what
+  // keeps base64 image payloads out of the retention set.
+  if (value.length > MAX_OBSERVED_LINE && !value.includes("\n")) return;
+
+  for (const line of value.split("\n")) {
+    if (retained.size >= MAX_STORED_LINES) return;
+
+    if (line.length <= MAX_OBSERVED_LINE) retained.add(line);
+  }
+}
+
 function collectRetained(value, retained, depth = 0) {
   if (isString(value)) {
-    // Every line, not only substantive ones. A run may span a blank or short line,
-    // so isRetained must be exact per line or the run truncates there. An oversized
-    // line is never stored: it cannot sit inside a six-line run, and this is what
-    // keeps base64 image payloads out of the retention set.
-    if (value.length > MAX_OBSERVED_LINE && !value.includes("\n")) return;
-
-    for (const line of value.split("\n")) {
-      if (retained.size >= MAX_STORED_LINES) return;
-
-      if (line.length <= MAX_OBSERVED_LINE) retained.add(line);
-    }
+    retainString(value, retained);
 
     return;
   }
@@ -174,7 +178,7 @@ export class SeenLedger {
     return count;
   }
 
-  longestRun(lines, hashes, index, call) {
+  bestCandidateRun(lines, hashes, index, call) {
     const candidates = this.occurrences.get(hashes[index]);
 
     if (!candidates) return null;
@@ -186,12 +190,23 @@ export class SeenLedger {
       if (length >= MIN_RUN && (!best || length > best.length)) best = { ...candidate, length };
     }
 
-    if (!best) return null;
+    return best;
+  }
+
+  substantiveCount(lines, index, length) {
     let count = 0;
 
-    for (let i = index; i < index + best.length; i++) if (collapsible(lines[i])) count++;
+    for (let i = index; i < index + length; i++) if (collapsible(lines[i])) count++;
 
-    return count >= MIN_SUBSTANTIVE ? best : null;
+    return count;
+  }
+
+  longestRun(lines, hashes, index, call) {
+    const best = this.bestCandidateRun(lines, hashes, index, call);
+
+    if (!best) return null;
+
+    return this.substantiveCount(lines, index, best.length) >= MIN_SUBSTANTIVE ? best : null;
   }
 
   citation(lines, index, run) {
@@ -245,19 +260,14 @@ export class SeenLedger {
     return sent;
   }
 
-  remember(call, lines) {
-    if (this.window === 0 || call <= this.history.latestCall - this.window || lines.length > MAX_STORED_LINES) return;
-
-    if (this.results.has(call)) this.forget(call);
-
+  evictForCapacity(incoming) {
     for (const old of [...this.results.keys()].sort((a, b) => a - b)) {
-      if (this.storedLines + lines.length <= MAX_STORED_LINES) break;
+      if (this.storedLines + incoming <= MAX_STORED_LINES) break;
       this.forget(old);
     }
+  }
 
-    const hashes = Uint32Array.from(lines, hashLine);
-    const origins = lines.map(line => this.origins.get(line));
-
+  indexCollapsible(lines, hashes, call) {
     for (let i = 0; i < lines.length; i++) {
       if (!collapsible(lines[i])) continue;
       let list = this.occurrences.get(hashes[i]);
@@ -265,7 +275,16 @@ export class SeenLedger {
       if (!list) this.occurrences.set(hashes[i], (list = []));
       list.push({ call, index: i });
     }
+  }
 
+  remember(call, lines) {
+    if (this.window === 0 || call <= this.history.latestCall - this.window || lines.length > MAX_STORED_LINES) return;
+
+    if (this.results.has(call)) this.forget(call);
+    this.evictForCapacity(lines.length);
+    const hashes = Uint32Array.from(lines, hashLine);
+    const origins = lines.map(line => this.origins.get(line));
+    this.indexCollapsible(lines, hashes, call);
     this.results.set(call, { hashes, lines, origins });
     this.history.storedLines += lines.length;
   }

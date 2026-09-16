@@ -29,6 +29,47 @@ function pendingInScope(root, pendingPaths) {
   });
 }
 
+function parseMatchRecord(line, truncated, isLast) {
+  if (!line) return { skip: true };
+
+  try { return { record: JSON.parse(line) }; }
+  catch (error) {
+    if (truncated && isLast) return { stop: true };
+    throw error;
+  }
+}
+
+function isRgMatch(record) {
+  return record.type === "match" && isString(record.data?.path?.text) && isString(record.data.lines?.text);
+}
+
+function applyMatchRecord(record, root, overlayText, add) {
+  if (!isRgMatch(record)) return;
+  const file = path.resolve(root, record.data.path.text);
+
+  if (overlayText(file) === undefined) add(file, record.data.line_number, record.data.lines.text);
+}
+
+function ingestRgMatches(records, result, signal, root, overlayText, add) {
+  for (let i = 0; i < records.length; i++) {
+    signal?.throwIfAborted();
+    const parsed = parseMatchRecord(records[i], result.outputTruncated, i === records.length - 1);
+
+    if (parsed.stop) break;
+
+    if (parsed.skip) continue;
+    applyMatchRecord(parsed.record, root, overlayText, add);
+  }
+}
+
+function ingestPendingRefs(root, pendingPaths, overlayText, add) {
+  for (const file of pendingInScope(root, pendingPaths)) {
+    const text = overlayText(file);
+
+    if (text !== undefined && Buffer.byteLength(text, "utf8") <= 512 * 1024) text.split("\n").forEach((line, i) => add(file, i + 1, line));
+  }
+}
+
 /** One bounded direct search for all changed names; no repository index or per-name spawn. */
 export async function referencesForNames({ root, names, excludePath, overlayText, pendingPaths, signal, run = runCommand }) {
   const references = new Map(names.map(name => [name, []]));
@@ -48,43 +89,71 @@ export async function referencesForNames({ root, names, excludePath, overlayText
     { cwd: root, signal, timeoutMs: 5000, maxOutputChars: 65536 });
 
   if (result.exitCode !== 0 && result.exitCode !== 1) throw new Error(result.stderr.trim() || "reference search failed");
-  const records = result.stdout.split("\n");
-
-  for (let i = 0; i < records.length; i++) {
-    signal?.throwIfAborted();
-
-    if (!records[i]) continue;
-    let record;
-
-    try { record = JSON.parse(records[i]); }
-    catch (error) { if (result.outputTruncated && i === records.length - 1) break; throw error; }
-
-    if (record.type !== "match" || !isString(record.data?.path?.text) || !isString(record.data.lines?.text)) continue;
-    const file = path.resolve(root, record.data.path.text);
-
-    if (overlayText(file) === undefined) add(file, record.data.line_number, record.data.lines.text);
-  }
-
-  for (const file of pendingInScope(root, pendingPaths)) {
-    const text = overlayText(file);
-
-    if (text !== undefined && Buffer.byteLength(text, "utf8") <= 512 * 1024) text.split("\n").forEach((line, i) => add(file, i + 1, line));
-  }
+  ingestRgMatches(result.stdout.split("\n"), result, signal, root, overlayText, add);
+  ingestPendingRefs(root, pendingPaths, overlayText, add);
 
   return { references, incomplete: result.outputTruncated === true };
 }
 
-export function rgGrepArgs(pattern, params, searchPath) {
-  const args = ["--line-number", "--no-heading", "--color", "never"];
-  const caseSensitive = params?.caseSensitive === true || (params?.caseSensitive !== false && smartCase(pattern));
+function grepCaseSensitive(pattern, params) {
+  return params?.caseSensitive === true || (params?.caseSensitive !== false && smartCase(pattern));
+}
 
-  if (!caseSensitive) args.push("--ignore-case");
+function pushGrepFlags(args, pattern, params) {
+  if (!grepCaseSensitive(pattern, params)) args.push("--ignore-case");
 
   if (params?.glob) args.push("--glob", String(params.glob));
-  if (Number.isInteger(params?.limit) && params.limit > 0) args.push("--max-count", String(Math.min(params.limit, 2000)));
+  const limit = params?.limit;
+
+  if (Number.isInteger(limit) && limit > 0) args.push("--max-count", String(Math.min(limit, 2000)));
+}
+
+export function rgGrepArgs(pattern, params, searchPath) {
+  const args = ["--line-number", "--no-heading", "--color", "never"];
+  pushGrepFlags(args, pattern, params);
   args.push("--", pattern, searchPath);
 
   return args;
+}
+
+function globMatcher(pattern) {
+  if (!pattern) return null;
+
+  try { return globToRegExp(pattern); }
+  catch { return /^$/; }
+}
+
+function isDirectList(stat, pendingLength) {
+  return !!(stat?.isFile() || (!stat?.isDirectory() && pendingLength));
+}
+
+function listDirectRows(stat, searchDir, cwd, pending, matcher) {
+  const rel = stat?.isFile() ? relativeSlash(cwd, searchDir) : null;
+
+  return [...new Set([...(rel ? [rel] : []), ...pending])].filter(file => !matcher || matcher.test(file));
+}
+
+function mergeListStdout(stdout, cwd, pendingMerged) {
+  const diskRows = String(stdout || "").split("\n").filter(Boolean)
+    .map(row => relativeSlash(cwd, path.isAbsolute(row) ? row : path.resolve(cwd, row)));
+  const rows = [...new Set([...diskRows, ...pendingMerged])];
+
+  return rows.length ? rows.join("\n") + "\n" : "";
+}
+
+async function listDisk(searchDir, pattern, cwd, signal) {
+  const args = ["--files"];
+
+  if (pattern) args.push("-g", pattern);
+  const res = await runCommand(["rg", ...args, searchDir], { cwd, timeoutMs: 30_000, signal }).catch(() => null);
+
+  if (res && (res.exitCode === 0 || res.exitCode === 1)) return { stdout: res.stdout, via: "rg", outputTruncated: res.outputTruncated === true };
+  const findArgs = [searchDir];
+
+  if (pattern) findArgs.push("-name", pattern);
+  const findRes = await runCommand(["find", ...findArgs], { cwd, timeoutMs: 30_000, signal });
+
+  return { stdout: findRes.stdout, via: "find", outputTruncated: findRes.outputTruncated === true };
 }
 
 /** rg --files, then find(1) when rg is unavailable; both accept an optional glob/name pattern. */
@@ -92,41 +161,18 @@ export async function listWithTools(searchDir, pattern, cwd, signal, pendingPath
   const stat = await fs.stat(searchDir).catch(() => null);
   const pendingAbs = pendingInScope(searchDir, pendingPaths);
   const pending = pendingAbs.map(file => relativeSlash(cwd, file));
+  const matcher = globMatcher(pattern);
 
-  let matcher = null;
-
-  if (pattern) {
-    try { matcher = globToRegExp(pattern); }
-    catch { matcher = /^$/; }
-  }
-
-  if (stat?.isFile() || (!stat?.isDirectory() && pending.length)) {
-    const rel = stat?.isFile() ? relativeSlash(cwd, searchDir) : null;
-    const rows = [...new Set([...(rel ? [rel] : []), ...pending])].filter(file => !matcher || matcher.test(file));
+  if (isDirectList(stat, pending.length)) {
+    const rows = listDirectRows(stat, searchDir, cwd, pending, matcher);
 
     return textResult(rows.length ? rows.join("\n") + "\n" : "", { via: pending.length ? "vfs" : "file" });
   }
 
   const pendingMerged = pendingAbs.filter((_, i) => !matcher || matcher.test(pending[i]));
-  const mergePending = stdout => {
-    const diskRows = String(stdout || "").split("\n").filter(Boolean)
-      .map(row => relativeSlash(cwd, path.isAbsolute(row) ? row : path.resolve(cwd, row)));
-    const rows = [...new Set([...diskRows, ...pendingMerged])];
+  const listed = await listDisk(searchDir, pattern, cwd, signal);
 
-    return rows.length ? rows.join("\n") + "\n" : "";
-  };
-  const args = ["--files"];
-
-  if (pattern) args.push("-g", pattern);
-  const res = await runCommand(["rg", ...args, searchDir], { cwd, timeoutMs: 30_000, signal }).catch(() => null);
-
-  if (res && (res.exitCode === 0 || res.exitCode === 1)) return textResult(mergePending(res.stdout), { via: "rg", outputTruncated: res.outputTruncated === true });
-  const findArgs = [searchDir];
-
-  if (pattern) findArgs.push("-name", pattern);
-  const findRes = await runCommand(["find", ...findArgs], { cwd, timeoutMs: 30_000, signal });
-
-  return textResult(mergePending(findRes.stdout), { via: "find", outputTruncated: findRes.outputTruncated === true });
+  return textResult(mergeListStdout(listed.stdout, cwd, pendingMerged), { via: listed.via, outputTruncated: listed.outputTruncated });
 }
 
 const GLOB_CHARS = /[*?[\]{}]/;
@@ -153,6 +199,23 @@ export async function fuzzyFind(index, root, cwd, pattern, limit = 20, pendingPa
   return rows.map((r) => r.path).join("\n") + "\n";
 }
 
+function applyGlob(files, params, cwd) {
+  if (!params?.glob) return files;
+  const matcher = globToRegExp(String(params.glob));
+
+  return files.filter((f) => matcher.test(relativeSlash(cwd, f)));
+}
+
+function filesReadable(index, files, overlayText) {
+  for (const file of files) {
+    const overlay = overlayText(file);
+
+    if (overlay === undefined && index.entry(file) === null) return false;
+  }
+
+  return true;
+}
+
 /** fff-style grep: smart-case, definition lines first, fuzzy fallback when the literal has no hits. */
 export async function grepIndexed(index, pattern, params, searchPath, cwd, overlayText = () => undefined, pendingPaths = []) {
   const compiled = grepRegex(pattern, params);
@@ -162,17 +225,9 @@ export async function grepIndexed(index, pattern, params, searchPath, cwd, overl
   let files = [...new Set([...await candidateFileList(index, searchPath), ...pendingInScope(searchPath, pendingPaths)])];
 
   if (!index.canScan(files)) return null;
+  files = applyGlob(files, params, cwd);
 
-  if (params?.glob) {
-    const matcher = globToRegExp(String(params.glob));
-    files = files.filter((f) => matcher.test(relativeSlash(cwd, f)));
-  }
-
-  for (const file of files) {
-    const overlay = overlayText(file);
-
-    if (overlay === undefined && index.entry(file) === null) return null;
-  }
+  if (!filesReadable(index, files, overlayText)) return null;
   const rows = index.grepRows(files, regex, cwd, overlayText);
   const fallback = rows.length === 0 && /^[\w$.-]{4,}$/.test(pattern) ? fuzzyGrepRows(index, files, pattern, cwd, caseSensitive, overlayText) : rows;
 
@@ -193,35 +248,45 @@ function grepRegex(pattern, params) {
   }
 }
 
+function overlaySearchEntry(index, filePath, overlayText) {
+  const pending = overlayText(filePath);
+
+  return pending === undefined
+    ? index.entry(filePath)
+    : Buffer.byteLength(pending, "utf8") <= 512 * 1024 ? WorkspaceIndex.fromText(filePath, pending) : null;
+}
+
+function fuzzyLineRow(pattern, rawLine, defName, rel, line, maxTypos, caseSensitive) {
+  const m = fuzzyMatch(pattern, rawLine, { maxTypos, caseSensitive });
+
+  if (!m || m.end - m.start > pattern.length + 2) return null;
+
+  return { rel, line, text: rawLine, def: defName !== "" && fuzzyMatch(pattern, defName, { maxTypos }) !== null };
+}
+
 /** Zero literal hits: retry each line fuzzily (1 typo, 2 for long names) within a tight span, so IsOffTheRecord finds is_off_the_record. */
 function fuzzyGrepRows(index, files, pattern, cwd, caseSensitive, overlayText = () => undefined) {
   const maxTypos = pattern.length >= 8 ? 2 : 1;
   const rows = [];
 
   for (const filePath of files) {
-    const pending = overlayText(filePath);
-    const e = pending === undefined
-      ? index.entry(filePath)
-      : Buffer.byteLength(pending, "utf8") <= 512 * 1024 ? WorkspaceIndex.fromText(filePath, pending) : null;
+    const e = overlaySearchEntry(index, filePath, overlayText);
 
     if (!e) continue;
     const { raw, defNames } = WorkspaceIndex.linesOf(e);
     const rel = relativeSlash(cwd, filePath);
 
     for (let i = 0; i < raw.length && rows.length <= 400; i++) {
-      const m = fuzzyMatch(pattern, raw[i], { maxTypos, caseSensitive });
+      const row = fuzzyLineRow(pattern, raw[i], defNames[i], rel, i + 1, maxTypos, caseSensitive);
 
-      if (!m || m.end - m.start > pattern.length + 2) continue;
-      rows.push({ rel, line: i + 1, text: raw[i], def: defNames[i] !== "" && fuzzyMatch(pattern, defNames[i], { maxTypos }) !== null });
+      if (row) rows.push(row);
     }
   }
 
   return rows;
 }
 
-/** fff definition-first hinting: files that declare the name come first, declarations first within a file; one header per file. */
-function formatGrepRows(rows, limit) {
-  if (rows.length === 0) return "";
+function groupGrepRows(rows) {
   const groups = new Map();
 
   for (const r of rows) {
@@ -229,19 +294,34 @@ function formatGrepRows(rows, limit) {
     groups.get(r.rel).push(r);
   }
 
-  const files = [...groups.values()].sort((a, b) => Number(b.some((r) => r.def)) - Number(a.some((r) => r.def)));
+  return [...groups.values()].sort((a, b) => Number(b.some((r) => r.def)) - Number(a.some((r) => r.def)));
+}
+
+function formatGroup(group, limit, shown) {
+  let out = group[0].rel + "\n";
+  group.sort((a, b) => Number(b.def) - Number(a.def) || a.line - b.line);
+  let n = shown;
+
+  for (const r of group) {
+    if (n++ >= limit) break;
+    out += "  " + r.line + (r.def ? "*" : ":") + " " + r.text.trim() + "\n";
+  }
+
+  return { out, shown: n };
+}
+
+/** fff definition-first hinting: files that declare the name come first, declarations first within a file; one header per file. */
+function formatGrepRows(rows, limit) {
+  if (rows.length === 0) return "";
+  const files = groupGrepRows(rows);
   let out = "";
   let shown = 0;
 
   for (const group of files) {
     if (shown >= limit) break;
-    out += group[0].rel + "\n";
-    group.sort((a, b) => Number(b.def) - Number(a.def) || a.line - b.line);
-
-    for (const r of group) {
-      if (shown++ >= limit) break;
-      out += "  " + r.line + (r.def ? "*" : ":") + " " + r.text.trim() + "\n";
-    }
+    const next = formatGroup(group, limit, shown);
+    out += next.out;
+    shown = next.shown;
   }
 
   if (rows.length > limit) out += "… " + (rows.length - limit) + " more matches (pass limit or narrow the pattern)\n";

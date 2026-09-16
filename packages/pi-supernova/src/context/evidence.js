@@ -87,36 +87,36 @@ function spanLines(span) {
 
 // ---- eq.3 / eq.4: entity–context graph over candidate spans ----
 
-function buildGraph(spans) {
-  const entityNames = new Set(spans.map((s) => s.name).filter((n) => n && n.length > 2));
-  const spanEntities = new Map(); // span.id → Map(entity → w(d,e))
-  const entitySpans = new Map();  // entity → Set(span.id)
+function countSpanEntities(span, entityNames) {
+  const counts = new Map();
+  let total = 0;
+  const { idents } = span.lines;
 
-  for (const span of spans) {
-    const counts = new Map();
-    let total = 0;
-    const { idents } = span.lines;
-
-    for (let li = span.start - 1; li < span.end; li++) {
-      for (const word of idents[li]) {
-        if (!entityNames.has(word)) continue;
-        counts.set(word, (counts.get(word) || 0) + 1);
-        total += 1;
-      }
+  for (let li = span.start - 1; li < span.end; li++) {
+    for (const word of idents[li]) {
+      if (!entityNames.has(word)) continue;
+      counts.set(word, (counts.get(word) || 0) + 1);
+      total += 1;
     }
-
-    const weights = new Map();
-
-    for (const [e, c] of counts) {
-      weights.set(e, c / total); // eq.4
-
-      if (!entitySpans.has(e)) entitySpans.set(e, new Set());
-      entitySpans.get(e).add(span.id);
-    }
-
-    spanEntities.set(span.id, weights);
   }
 
+  return { counts, total };
+}
+
+function weightsFromCounts(counts, total, entitySpans, spanId) {
+  const weights = new Map();
+
+  for (const [e, c] of counts) {
+    weights.set(e, c / total); // eq.4
+
+    if (!entitySpans.has(e)) entitySpans.set(e, new Set());
+    entitySpans.get(e).add(spanId);
+  }
+
+  return weights;
+}
+
+function hubEntities(entitySpans, spans) {
   // Entities present in a large share of spans (isString, path, …) carry no query signal; keep them out of propagation.
   const hubLimit = Math.max(HUB_MIN, Math.floor(spans.length * HUB_FRACTION));
   const hubs = new Set();
@@ -125,7 +125,20 @@ function buildGraph(spans) {
     if (ids.size > hubLimit) hubs.add(entity);
   }
 
-  return { entityNames, spanEntities, entitySpans, hubs, byId: new Map(spans.map((s) => [s.id, s])) };
+  return hubs;
+}
+
+function buildGraph(spans) {
+  const entityNames = new Set(spans.map((s) => s.name).filter((n) => n && n.length > 2));
+  const spanEntities = new Map(); // span.id → Map(entity → w(d,e))
+  const entitySpans = new Map();  // entity → Set(span.id)
+
+  for (const span of spans) {
+    const { counts, total } = countSpanEntities(span, entityNames);
+    spanEntities.set(span.id, weightsFromCounts(counts, total, entitySpans, span.id));
+  }
+
+  return { entityNames, spanEntities, entitySpans, hubs: hubEntities(entitySpans, spans), byId: new Map(spans.map((s) => [s.id, s])) };
 }
 
 // ---- eq.8 / eq.9: entity activation and one propagation step ----
@@ -378,7 +391,7 @@ function normalize(scores) {
 
 // ---- candidate files (boundary + topology + entity hits) ----
 
-function candidateFiles(files, profile, index, limit, overlayText) {
+function topologyScored(files, profile) {
   const scored = [];
 
   for (const f of files) {
@@ -388,27 +401,41 @@ function candidateFiles(files, profile, index, limit, overlayText) {
   }
 
   scored.sort((a, b) => b.s - a.s);
-  const chosen = new Set();
-  const anchors = (profile.subjects.length ? profile.subjects : profile.stems).map((a) => a.toLowerCase()).filter((a) => a.length > 2);
 
-  const pendingHits = files.filter(file => {
+  return scored;
+}
+
+function pendingAnchorHits(files, anchors, overlayText) {
+  return files.filter(file => {
     const pending = overlayText(file);
 
     return pending !== undefined && Buffer.byteLength(pending, "utf8") <= 512 * 1024 && anchors.some(anchor => pending.toLowerCase().includes(anchor));
   });
+}
 
-  const hits = anchors.length ? [...new Set([...pendingHits, ...index.filesContaining(files, anchors, true)])] : [];
-
+function chooseByHits(hits, profile, limit, chosen) {
   for (const f of hits) {
     if (chosen.size >= limit) break;
 
     if (profile.flags.wantsTest || scorePathTopology(f, profile.keywords, profile.flags) > -50) chosen.add(f);
   }
+}
 
+function fillFromScored(scored, limit, chosen) {
   for (const { f } of scored) {
     if (chosen.size >= limit) break;
     chosen.add(f);
   }
+}
+
+function candidateFiles(files, profile, index, limit, overlayText) {
+  const scored = topologyScored(files, profile);
+  const chosen = new Set();
+  const anchors = (profile.subjects.length ? profile.subjects : profile.stems).map((a) => a.toLowerCase()).filter((a) => a.length > 2);
+  const pendingHits = pendingAnchorHits(files, anchors, overlayText);
+  const hits = anchors.length ? [...new Set([...pendingHits, ...index.filesContaining(files, anchors, true)])] : [];
+  chooseByHits(hits, profile, limit, chosen);
+  fillFromScored(scored, limit, chosen);
 
   return { files: [...chosen], fileScores: new Map(scored.map(({ f, s }) => [f, s])) };
 }
@@ -495,6 +522,100 @@ function render(spans, picks, fused, opts, root) {
   return out;
 }
 
+function stagedInRoot(searchRoot, pendingPaths) {
+  return pendingPaths.filter(file => {
+    const relative = path.relative(searchRoot, file);
+
+    return relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative);
+  });
+}
+
+function statCatch(error) {
+  if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+  throw error;
+}
+
+async function diskFilesAt(searchRoot, index) {
+  const rootStat = await fs.stat(searchRoot).catch(statCatch);
+
+  if (rootStat?.isFile()) return [searchRoot];
+
+  if (rootStat) return index.files(searchRoot);
+
+  return [];
+}
+
+async function listedFiles(root, searchDir, pendingPaths, index) {
+  const searchRoot = path.resolve(searchDir || root);
+  const files = [...new Set([...await diskFilesAt(searchRoot, index), ...stagedInRoot(searchRoot, pendingPaths)])];
+
+  if (files.length === 0) throw new Error(`no files found to search in ${searchDir || root}`);
+
+  return files;
+}
+
+function overlayEntry(f, overlayText, index) {
+  const pending = overlayText(f);
+
+  return pending === undefined
+    ? index.entry(f)
+    : Buffer.byteLength(pending, "utf8") <= 512 * 1024 ? WorkspaceIndex.fromText(f, pending) : null;
+}
+
+function collectSpans(chosenFiles, overlayText, index, maxSpanLines) {
+  const spans = [];
+
+  for (const f of chosenFiles) {
+    const entry = overlayEntry(f, overlayText, index);
+
+    if (!entry) continue;
+    spans.push(...spansOf(entry, f, maxSpanLines));
+  }
+
+  return spans;
+}
+
+function fuseScores(profile, graphNorm, hierNorm, rho) {
+  const [primary, secondary] = profile.route === "relational" ? [graphNorm, hierNorm] : [hierNorm, graphNorm];
+
+  return primary.map((p, i) => rho * p + (1 - rho) * secondary[i]); // eq.13
+}
+
+function spanAdmissible(span, profile) {
+  const p = span.path;
+  const isDoc = /\.(md|mdx|rst|txt)$/i.test(p);
+
+  return span.support > 0
+    && (profile.flags.wantsTest || !isTestPath(p))
+    && (profile.flags.wantsDoc || !isDoc);
+}
+
+function compareFused(spans, fused) {
+  return (a, b) => fused[b] - fused[a] || spans[a].path.localeCompare(spans[b].path) || spans[a].start - spans[b].start;
+}
+
+function dampUsageDefiners(spans, profile, fused, admissible) {
+  const usage = profile.answerType === "usage";
+
+  for (const i of admissible) {
+    if (usage && profile.subjects.includes(spans[i].name)) fused[i] *= 0.5; // a usage question is answered by callers
+  }
+}
+
+function pickEvidence(spans, fileScores, profile, opts) {
+  const graph = buildGraph(spans);
+  const hierNorm = normalize(hierarchicalScores(spans, fileScores, profile));
+  const eta = propagate(activateEntities(profile, graph), spans, graph, profile);
+  const pi = pageRank(spans, graph, eta, hierNorm.map((s) => s * 0.5), opts);
+  const fused = fuseScores(profile, normalize([...pi]), hierNorm, opts.rho);
+  // eq.15 Filter: boundary/type hard constraints and lexical support; Rank_ϕ: answer-type compatibility.
+  const admissible = spans.flatMap((span, i) => spanAdmissible(span, profile) ? [i] : []);
+  dampUsageDefiners(spans, profile, fused, admissible);
+  const main = admissible.sort(compareFused(spans, fused)).slice(0, opts.k);
+
+  return { picks: closure(main, spans, graph, fused, opts.k), fused };
+}
+
 /**
  * R(q): top-K provenance-bearing source spans for a concept query, selected without any model call.
  * @returns {{ route: string, spans: Array<{path, lines, name, kind, why, text}> }}
@@ -504,68 +625,11 @@ export async function selectEvidence({ query, root, searchDir, index, overlayTex
   const profile = profileQuery(query);
 
   if (profile.keywords.length === 0) throw new Error("evidence requires at least one searchable concept keyword");
-  const searchRoot = path.resolve(searchDir || root);
-
-  const staged = pendingPaths.filter(file => {
-    const relative = path.relative(searchRoot, file);
-
-    return relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative);
-  });
-
-  const rootStat = await fs.stat(searchRoot).catch(error => {
-    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
-    throw error;
-  });
-  const diskFiles = rootStat?.isFile() ? [searchRoot] : rootStat ? await index.files(searchRoot) : [];
-  const files = [...new Set([...diskFiles, ...staged])];
-
-  if (files.length === 0) throw new Error(`no files found to search in ${searchDir || root}`);
-
-  const { files: chosenFiles, fileScores } = candidateFiles(files, profile, index, opts.maxCandidateFiles, overlayText);
-  const spans = [];
-
-  for (const f of chosenFiles) {
-    const pending = overlayText(f);
-    const entry = pending === undefined
-      ? index.entry(f)
-      : Buffer.byteLength(pending, "utf8") <= 512 * 1024 ? WorkspaceIndex.fromText(f, pending) : null;
-
-    if (!entry) continue;
-    spans.push(...spansOf(entry, f, opts.maxSpanLines));
-  }
+  const { files: chosenFiles, fileScores } = candidateFiles(await listedFiles(root, searchDir, pendingPaths, index), profile, index, opts.maxCandidateFiles, overlayText);
+  const spans = collectSpans(chosenFiles, overlayText, index, opts.maxSpanLines);
 
   if (spans.length === 0) return { route: profile.route, spans: [] };
-
-  const graph = buildGraph(spans);
-  const hier = hierarchicalScores(spans, fileScores, profile);
-  const hierNorm = normalize(hier);
-  const eta = propagate(activateEntities(profile, graph), spans, graph, profile);
-  const pi = pageRank(spans, graph, eta, hierNorm.map((s) => s * 0.5), opts);
-  const graphNorm = normalize([...pi]);
-
-  const [primary, secondary] = profile.route === "relational" ? [graphNorm, hierNorm] : [hierNorm, graphNorm];
-  const fused = primary.map((p, i) => opts.rho * p + (1 - opts.rho) * secondary[i]); // eq.13
-
-  // eq.15 Filter: boundary/type hard constraints and lexical support; Rank_ϕ: answer-type compatibility.
-  const usage = profile.answerType === "usage";
-
-  const admissible = spans.flatMap((span, i) => {
-    const p = span.path;
-    const isDoc = /\.(md|mdx|rst|txt)$/i.test(p);
-
-    return span.support > 0
-      && (profile.flags.wantsTest || !isTestPath(p))
-      && (profile.flags.wantsDoc || !isDoc)
-      ? [i] : [];
-  });
-
-  for (const i of admissible) {
-    if (usage && profile.subjects.includes(spans[i].name)) fused[i] *= 0.5; // a usage question is answered by callers
-  }
-
-  const ranked = admissible.sort((a, b) => fused[b] - fused[a] || spans[a].path.localeCompare(spans[b].path) || spans[a].start - spans[b].start);
-  const main = ranked.slice(0, opts.k);
-  const picks = closure(main, spans, graph, fused, opts.k);
+  const { picks, fused } = pickEvidence(spans, fileScores, profile, opts);
 
   return { route: profile.route, spans: render(spans, picks, fused, opts, root) };
 }

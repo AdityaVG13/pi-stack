@@ -18,25 +18,31 @@ import { formatValue } from "../output/format.js";
 
 export { measureWidth, hardTruncate, clampLine };
 
+function diffGut(theme, item) {
+	const num = item.lineNum || 0;
+
+	if (item.type === "remove") {
+		const gut = theme.fg("toolDiffRemoved", `-${num}`.padStart(5));
+
+		return `${gut}${theme.fg("borderMuted", " │ ")}${theme.fg("toolDiffRemoved", `- ${cleanInlineText(item.text)}`)}`;
+	}
+
+	if (item.type === "add") {
+		const gut = theme.fg("toolDiffAdded", `+${num}`.padStart(5));
+
+		return `${gut}${theme.fg("borderMuted", " │ ")}${theme.fg("toolDiffAdded", `+ ${cleanInlineText(item.text)}`)}`;
+	}
+
+	const gut = theme.fg("dim", ` ${num}`.padStart(5));
+
+	return `${gut}${theme.fg("borderMuted", " │ ")}${theme.fg("toolDiffContext", `  ${cleanInlineText(item.text)}`)}`;
+}
+
 function formatDiffRows(diff, theme, maxShown = 6) {
 	if (!diff || !Array.isArray(diff.lines) || diff.lines.length === 0) return [];
 	const body = [];
 
-	for (const item of diff.lines.slice(0, maxShown)) {
-		const num = item.lineNum || 0;
-
-		if (item.type === "remove") {
-			const gut = theme.fg("toolDiffRemoved", `-${num}`.padStart(5));
-			body.push(`${gut}${theme.fg("borderMuted", " │ ")}${theme.fg("toolDiffRemoved", `- ${cleanInlineText(item.text)}`)}`);
-		} else if (item.type === "add") {
-			const gut = theme.fg("toolDiffAdded", `+${num}`.padStart(5));
-			body.push(`${gut}${theme.fg("borderMuted", " │ ")}${theme.fg("toolDiffAdded", `+ ${cleanInlineText(item.text)}`)}`);
-		} else {
-			const gut = theme.fg("dim", ` ${num}`.padStart(5));
-			body.push(`${gut}${theme.fg("borderMuted", " │ ")}${theme.fg("toolDiffContext", `  ${cleanInlineText(item.text)}`)}`);
-		}
-	}
-
+	for (const item of diff.lines.slice(0, maxShown)) body.push(diffGut(theme, item));
 	const displayLineCount = Number.isInteger(diff.displayLineCount) ? diff.displayLineCount : diff.lines.length;
 
 	if (displayLineCount > maxShown) {
@@ -128,54 +134,71 @@ function contextFrom(opts, ctxOrArgs) {
 	return { state: opts.state, lastComponent: opts.lastComponent };
 }
 
+function hasContextShape(value) {
+	return "lastComponent" in value || "invalidate" in value;
+}
+
+function hasArgsShape(value) {
+	return "code" in value || "file" in value || "programs" in value || "timeoutMs" in value;
+}
+
 function detectResultHost(options, ctxOrArgs) {
 	if (isTheme(options)) return "pi";
 
 	if (!isObject(ctxOrArgs)) return "pi";
 
-	if ("lastComponent" in ctxOrArgs || "invalidate" in ctxOrArgs) return "pi";
+	if (hasContextShape(ctxOrArgs)) return "pi";
 
-	if ("code" in ctxOrArgs || "file" in ctxOrArgs || "programs" in ctxOrArgs || "timeoutMs" in ctxOrArgs) return "omp";
+	if (hasArgsShape(ctxOrArgs)) return "omp";
 
 	return "pi";
 }
 
+function ensureState(context) {
+	if (!isObject(context.state)) context.state = {};
+
+	return context;
+}
+
+function resultArgs(ctxOrArgs, context) {
+	return ctxOrArgs?.code || ctxOrArgs?.file || ctxOrArgs?.programs ? ctxOrArgs : context.args;
+}
+
+function piResultArgs(result, options, theme, ctxOrArgs) {
+	const opts = isObject(options) ? options : {};
+	const context = ensureState(contextFrom(opts, ctxOrArgs));
+
+	return {
+		result,
+		expanded: !!opts.expanded,
+		isPartial: !!opts.isPartial,
+		theme,
+		context,
+		args: resultArgs(ctxOrArgs, context),
+		host: detectResultHost(options, ctxOrArgs),
+		options: opts,
+	};
+}
+
+function oddballResultArgs(result, theme, themeOrCtx) {
+	const context = ensureState(isObject(themeOrCtx) ? themeOrCtx : {});
+
+	return {
+		result,
+		expanded: !!context.expanded,
+		isPartial: !!context.isPartial,
+		theme,
+		context,
+		args: context.args,
+		host: "pi",
+		options: {},
+	};
+}
+
 function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs) {
-	if (isTheme(themeOrCtx)) {
-		const opts = isObject(options) ? options : {};
-		const context = contextFrom(opts, ctxOrArgs);
+	if (isTheme(themeOrCtx)) return piResultArgs(result, options, themeOrCtx, ctxOrArgs);
 
-		if (!isObject(context.state)) context.state = {};
-
-		return {
-			result,
-			expanded: !!opts.expanded,
-			isPartial: !!opts.isPartial,
-			theme: themeOrCtx,
-			context,
-			args: ctxOrArgs?.code || ctxOrArgs?.file || ctxOrArgs?.programs ? ctxOrArgs : context.args,
-			host: detectResultHost(options, ctxOrArgs),
-			options: opts,
-		};
-	}
-
-	// Extremely defensive: (result, theme, context) oddball
-	if (isTheme(options)) {
-		const context = isObject(themeOrCtx) ? themeOrCtx : {};
-
-		if (!isObject(context.state)) context.state = {};
-
-		return {
-			result,
-			expanded: !!context.expanded,
-			isPartial: !!context.isPartial,
-			theme: options,
-			context,
-			args: context.args,
-			host: "pi",
-			options: {},
-		};
-	}
+	if (isTheme(options)) return oddballResultArgs(result, options, themeOrCtx);
 
 	throw new Error("supernova renderResult: theme missing (expected Pi or OMP signature)");
 }
@@ -233,6 +256,45 @@ let cachedDiffChars = 0;
 
 const MAX_CACHED_DIFF_CHARS = 1_000_000;
 
+function rememberDiff(diff, parsed) {
+	if (diff.length > MAX_CACHED_DIFF_CHARS) return parsed;
+
+	while (textDiffCache.size >= 24 || cachedDiffChars + diff.length > MAX_CACHED_DIFF_CHARS) {
+		const oldest = textDiffCache.keys().next().value;
+		textDiffCache.delete(oldest);
+		cachedDiffChars -= oldest.length;
+	}
+
+	textDiffCache.set(diff, parsed);
+	cachedDiffChars += diff.length;
+
+	return parsed;
+}
+
+function tallyDiffLine(parsed, counts) {
+	if (parsed.type === "add") counts.added += 1;
+	else if (parsed.type === "remove") counts.removed += 1;
+}
+
+function parseTraceDiffText(diff) {
+	const lines = [];
+	const counts = { added: 0, removed: 0, displayLineCount: 0 };
+
+	for (const rawLine of cleanBlockText(diff).split("\n")) {
+		const parsed = parseDiffLine(rawLine);
+
+		if (!parsed) continue;
+		tallyDiffLine(parsed, counts);
+		counts.displayLineCount++;
+
+		if (lines.length < 24) lines.push(parsed);
+	}
+
+	if (lines.length === 0) return undefined;
+
+	return { added: counts.added, removed: counts.removed, lines, displayLineCount: counts.displayLineCount };
+}
+
 function normalizeTraceDiff(item) {
 	const diff = item?.diff;
 
@@ -242,38 +304,9 @@ function normalizeTraceDiff(item) {
 	const cached = textDiffCache.get(diff);
 
 	if (cached) return cached;
-	const lines = [];
-	let displayLineCount = 0;
-	let added = 0;
-	let removed = 0;
+	const parsed = parseTraceDiffText(diff);
 
-	for (const rawLine of cleanBlockText(diff).split("\n")) {
-		const parsed = parseDiffLine(rawLine);
-
-		if (!parsed) continue;
-
-		if (parsed.type === "add") added += 1;
-		else if (parsed.type === "remove") removed += 1;
-		displayLineCount++;
-
-		if (lines.length < 24) lines.push(parsed);
-	}
-
-	if (lines.length === 0) return undefined;
-	const parsed = { added, removed, lines, displayLineCount };
-
-	if (diff.length <= MAX_CACHED_DIFF_CHARS) {
-		while (textDiffCache.size >= 24 || cachedDiffChars + diff.length > MAX_CACHED_DIFF_CHARS) {
-			const oldest = textDiffCache.keys().next().value;
-			textDiffCache.delete(oldest);
-			cachedDiffChars -= oldest.length;
-		}
-
-		textDiffCache.set(diff, parsed);
-		cachedDiffChars += diff.length;
-	}
-
-	return parsed;
+	return parsed ? rememberDiff(diff, parsed) : undefined;
 }
 
 function operationsFromTrace(trace) {
@@ -357,6 +390,34 @@ function opDuration(op, isPartial) {
 	return "";
 }
 
+function appendExit(theme, op) {
+	if (!Number.isInteger(op.exitCode)) return { text: "", width: 0 };
+	const exit = `exit ${op.exitCode}`;
+
+	return { text: theme.fg("error", exit) + "  ", width: exit.length + 2 };
+}
+
+function appendDiffCounts(theme, op) {
+	if (!(op.diff && isObject(op.diff))) return { text: "", width: 0 };
+	const added = `+${op.diff.added || 0}`;
+	const removed = `-${op.diff.removed || 0}`;
+
+	return {
+		text: theme.fg("toolDiffAdded", added) + theme.fg("dim", "/") + theme.fg("toolDiffRemoved", removed) + " ",
+		width: added.length + 1 + removed.length + 1,
+	};
+}
+
+function opRowSuffix(theme, op, prefix, budget) {
+	const target = formatTarget(op, budget);
+
+	if (target) return prefix + theme.fg("muted", target);
+
+	if (op.ok === false && op.error) return prefix + theme.fg("error", clampLine(cleanInlineText(op.error), budget));
+
+	return prefix.trimEnd();
+}
+
 /**
  * One aligned row: marker · tool · duration · [exit N] · [+a/-r] · target.
  * Fixed columns keep a ledger of mixed calls scannable at a glance.
@@ -367,30 +428,12 @@ function formatOpRow(theme, op, width, isPartial, isError) {
 	const tool = theme.fg("syntaxFunction", toolText);
 	const durationText = opDuration(op, isPartial).slice(-DURATION_COL);
 	const duration = theme.fg("dim", durationText.padStart(DURATION_COL));
-	let prefix = `${marker} ${tool} ${duration}  `;
-	let used = 2 + toolText.length + 1 + DURATION_COL + 2;
+	const exit = appendExit(theme, op);
+	const counts = appendDiffCounts(theme, op);
+	const prefix = `${marker} ${tool} ${duration}  ` + exit.text + counts.text;
+	const used = 2 + toolText.length + 1 + DURATION_COL + 2 + exit.width + counts.width;
 
-	if (Number.isInteger(op.exitCode)) {
-		const exit = `exit ${op.exitCode}`;
-		prefix += theme.fg("error", exit) + "  ";
-		used += exit.length + 2;
-	}
-
-	if (op.diff && isObject(op.diff)) {
-		const added = `+${op.diff.added || 0}`;
-		const removed = `-${op.diff.removed || 0}`;
-		prefix += theme.fg("toolDiffAdded", added) + theme.fg("dim", "/") + theme.fg("toolDiffRemoved", removed) + " ";
-		used += added.length + 1 + removed.length + 1;
-	}
-
-	const budget = Math.max(1, width - used);
-	const target = formatTarget(op, budget);
-
-	if (target) return prefix + theme.fg("muted", target);
-
-	if (op.ok === false && op.error) return prefix + theme.fg("error", clampLine(cleanInlineText(op.error), budget));
-
-	return prefix.trimEnd();
+	return opRowSuffix(theme, op, prefix, Math.max(1, width - used));
 }
 
 function traceFor(payload, context) {
@@ -417,37 +460,54 @@ function appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, is
 	if (ops.length > maxOps) lines.push(theme.fg("dim", `  … ${ops.length - maxOps} more calls`));
 }
 
+function appendError(lines, theme, payload, expanded, width) {
+	const error = "✗ " + (payload?.error ? cleanBlockText(payload.error) : "error");
+
+	for (const line of expanded ? resultLines(error, width) : error.split("\n")) lines.push(theme.fg("error", line));
+}
+
+function appendResult(lines, theme, payload, expanded, width) {
+	if (expanded) lines.push(theme.fg("dim", "── result ──"));
+	const wrapped = resultLines(payload.result, width);
+	const shown = expanded ? wrapped : wrapped.slice(0, 8);
+
+	for (const line of shown) lines.push(theme.fg("toolOutput", line));
+
+	if (!expanded && wrapped.length > shown.length) lines.push(theme.fg("dim", `  … ${wrapped.length - shown.length} more result lines`));
+}
+
+function appendLogs(lines, theme, payload, width) {
+	lines.push(theme.fg("dim", "── logs ──"));
+
+	for (const log of payload.logs) for (const line of resultLines(log, width)) lines.push(theme.fg("dim", line));
+}
+
 function appendTail(lines, theme, payload, expanded, isError, width) {
-	if (isError) {
-		const error = "✗ " + (payload?.error ? cleanBlockText(payload.error) : "error");
+	if (isError) appendError(lines, theme, payload, expanded, width);
+	else if (expanded && payload?.result !== undefined) appendResult(lines, theme, payload, expanded, width);
 
-		for (const line of expanded ? resultLines(error, width) : error.split("\n")) lines.push(theme.fg("error", line));
-	}
-	else if (expanded && payload?.result !== undefined) {
-		lines.push(theme.fg("dim", "── result ──"));
+	if (expanded && payload?.logs?.length) appendLogs(lines, theme, payload, width);
+}
 
-		for (const line of resultLines(payload.result, width)) lines.push(theme.fg("toolOutput", line));
-	}
+function bodyLimits(expanded, isPartial) {
+	return { maxOps: expanded ? 24 : 8, maxDiffLines: expanded ? 24 : isPartial ? 0 : 8 };
+}
 
-	if (expanded && payload?.logs?.length) {
-		lines.push(theme.fg("dim", "── logs ──"));
+function visibleTrace(trace, maxOps, isPartial) {
+	return isPartial ? trace.slice(-maxOps) : trace.slice(0, maxOps);
+}
 
-		for (const log of payload.logs) for (const line of resultLines(log, width)) lines.push(theme.fg("dim", line));
-	}
+function appendOverflow(lines, theme, trace, maxOps, isPartial) {
+	if (trace.length > maxOps) lines.push(theme.fg("dim", `  … ${trace.length - maxOps} ${isPartial ? "earlier" : "more"} calls`));
 }
 
 function buildBodyLines(theme, width, { payload, context, expanded, isPartial, isError }) {
 	const trace = traceFor(payload, context);
-	const maxOps = expanded ? 24 : 8;
-	const maxDiffLines = expanded ? 24 : isPartial ? 0 : 8;
-	// Select before parsing diffs: invisible history must not consume a frame.
-	// While running, show current activity rather than the first completed calls.
-	const visible = isPartial ? trace.slice(-maxOps) : trace.slice(0, maxOps);
-	const ops = operationsFromTrace(visible);
+	const { maxOps, maxDiffLines } = bodyLimits(expanded, isPartial);
+	const ops = operationsFromTrace(visibleTrace(trace, maxOps, isPartial));
 	const lines = [];
 	appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, isError);
-
-	if (trace.length > maxOps) lines.push(theme.fg("dim", `  … ${trace.length - maxOps} ${isPartial ? "earlier" : "more"} calls`));
+	appendOverflow(lines, theme, trace, maxOps, isPartial);
 	appendTail(lines, theme, payload, expanded, isError, width);
 
 	return { lines, opCount: trace.length };
@@ -459,6 +519,42 @@ function describeCard(model, opCount) {
 	const status = model.isError ? "failed" : model.isPartial ? "running" : calls ? "" : "complete";
 
 	return [calls, status, wall].filter(Boolean).join(" · ");
+}
+
+function cardIcon(model) {
+	if (model.isError) return "error";
+
+	if (model.isPartial) return "running";
+
+	return undefined;
+}
+
+function cardChrome(model) {
+	return {
+		state: model.isError ? "error" : model.isPartial ? "pending" : "success",
+		borderColor: model.isError ? "error" : "dim",
+	};
+}
+
+function renderCardLines(theme, model, width, view) {
+	const header = novaStatusLine(theme, {
+		icon: cardIcon(model),
+		title: "nova",
+		description: describeCard(model, view.opCount),
+	});
+
+	// Empty body: one status line, no framed box.
+	if (view.lines.length === 0) return [clampLine(header, width)];
+	const chrome = cardChrome(model);
+
+	return novaFramedBlock(theme, () => ({
+		header,
+		sections: [{ lines: view.lines }],
+		state: chrome.state,
+		// borderMuted is invisible on OMP's card background; dim matches the duration column.
+		borderColor: chrome.borderColor,
+		width,
+	})).render(width);
 }
 
 class UnifiedResultCard {
@@ -477,25 +573,7 @@ class UnifiedResultCard {
 
 		if (this.cache?.width === width) return this.cache.lines;
 		const view = buildBodyLines(theme, Math.max(1, width - 4), model);
-
-		const header = novaStatusLine(theme, {
-			icon: model.isError ? "error" : model.isPartial ? "running" : undefined,
-			title: "nova",
-			description: describeCard(model, view.opCount),
-		});
-
-		// A program with no host calls has nothing to frame: one status line, no empty box.
-		const lines = view.lines.length === 0
-			? [clampLine(header, width)]
-			: novaFramedBlock(theme, () => ({
-					header,
-					sections: [{ lines: view.lines }],
-					state: model.isError ? "error" : model.isPartial ? "pending" : "success",
-					// borderMuted is invisible on OMP's card background; dim matches the duration column.
-					borderColor: model.isError ? "error" : "dim",
-					width,
-				})).render(width);
-
+		const lines = renderCardLines(theme, model, width, view);
 		this.cache = { width, lines };
 
 		return lines;
@@ -510,6 +588,24 @@ function syncState(context, payload) {
 	if (payload.wallMs != null && context.state.wallMs !== payload.wallMs) context.state.wallMs = payload.wallMs;
 }
 
+function errorPayload(result) {
+	return result?.isError ? { ok: false, error: result.content?.filter(block => block.type === "text").map(block => block.text).join("\n") } : undefined;
+}
+
+function payloadFromResult(result) {
+	return result?.details ?? errorPayload(result);
+}
+
+function bindResultCard(host, options, context) {
+	const previous = host === "omp" ? options?.lastComponent : context?.lastComponent;
+	const comp = previous instanceof UnifiedResultCard ? previous : new UnifiedResultCard();
+
+	if (host === "omp" && options) options.lastComponent = comp;
+	else if (context) context.lastComponent = comp;
+
+	return comp;
+}
+
 export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextArg) {
 	const { result, expanded, isPartial, theme, context, args, options, host } = normalizeResultRenderArgs(
 		resultArg,
@@ -517,16 +613,10 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 		themeArg,
 		contextArg,
 	);
-
-	const payload = result?.details ?? (result?.isError ? { ok: false, error: result.content?.filter(block => block.type === "text").map(block => block.text).join("\n") } : undefined);
+	const payload = payloadFromResult(result);
 	syncState(context, payload);
-
 	const isError = result?.isError || payload?.ok === false;
-	const previous = host === "omp" ? options?.lastComponent : context?.lastComponent;
-	const comp = previous instanceof UnifiedResultCard ? previous : new UnifiedResultCard();
-
-	if (host === "omp" && options) options.lastComponent = comp;
-	else if (context) context.lastComponent = comp;
+	const comp = bindResultCard(host, options, context);
 	comp.set(theme, { payload, context, args, expanded, isPartial, isError });
 
 	return comp;

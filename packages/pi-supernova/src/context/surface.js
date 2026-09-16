@@ -116,15 +116,24 @@ function declarationItem(line, rawLine, lineNumber) {
   return null;
 }
 
+function skipJsNoise(line) {
+  return !line || line.startsWith("//") || line.startsWith("/*") || line.startsWith("*");
+}
+
+function jsItemAt(lines, i) {
+  const line = lines[i].trim();
+
+  if (skipJsNoise(line)) return null;
+  const indent = lines[i].length - lines[i].trimStart().length;
+
+  return declarationItem(line, lines[i], i + 1) || (indent > 0 && indent <= 8 ? methodItem(line, i + 1, Math.max(1, Math.floor(indent / 2))) : null);
+}
+
 function scanJavaScript(lines) {
   const items = [];
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-
-    if (!line || line.startsWith("//") || line.startsWith("/*") || line.startsWith("*")) continue;
-    const indent = lines[i].length - lines[i].trimStart().length;
-    const item = declarationItem(line, lines[i], i + 1) || (indent > 0 && indent <= 8 ? methodItem(line, i + 1, Math.max(1, Math.floor(indent / 2))) : null);
+    const item = jsItemAt(lines, i);
 
     if (item) items.push(item);
   }

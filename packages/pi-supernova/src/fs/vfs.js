@@ -60,6 +60,177 @@ function sameSignature(a, b) {
   return a === b || (a !== null && b !== null && a.size === b.size && a.sha256 === b.sha256);
 }
 
+function tooLargeRead(label, maxBytes) {
+  return new Error(label + " exceeds " + maxBytes + " bytes; use a streaming parser through bash");
+}
+
+function overlayOrThrow(overlay, maxBytes, label) {
+  if (maxBytes !== undefined && Buffer.byteLength(overlay, "utf8") > maxBytes) throw tooLargeRead(label, maxBytes);
+
+  return overlay;
+}
+
+function assertReadableFile(stat, target) {
+  if (stat.isDirectory()) throw new Error("read path is a directory, not a file: " + target);
+
+  if (!stat.isFile()) throw new Error("read requires a regular file: " + target);
+}
+
+async function readLimitedBytes(file, stat, maxBytes, label, signal) {
+  if (stat.size > maxBytes) throw tooLargeRead(label, maxBytes);
+  const chunks = [];
+  let size = 0;
+
+  for await (const chunk of file.createReadStream({ end: maxBytes, autoClose: false, signal })) {
+    size += chunk.length;
+
+    if (size > maxBytes) throw tooLargeRead(label, maxBytes);
+    chunks.push(chunk);
+  }
+
+  return Buffer.concat(chunks);
+}
+
+function remapReadError(err, target) {
+  if (err.code === "EISDIR") throw new Error("read path is a directory, not a file: " + target);
+
+  if (err.code === "ENOENT") {
+    const missing = new Error("no such file: " + target + ' (locate it with read using a directory path or source question)');
+    missing.code = "ENOENT";
+    throw missing;
+  }
+
+  throw err;
+}
+
+async function resolveExistingFile(logicalPath) {
+  const target = await fs.realpath(logicalPath);
+  const stat = await fs.stat(target);
+
+  if (!stat.isFile()) throw new Error("cannot write to a non-file: " + logicalPath);
+
+  return { target, stat };
+}
+
+async function resolveCommitTarget(logicalPath) {
+  try {
+    return await resolveExistingFile(logicalPath);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+
+    return { target: await canonicalNewPath(logicalPath), stat: undefined };
+  }
+}
+
+async function collectMissingAncestors(parent) {
+  const missing = [];
+  let probe = parent;
+
+  for (;;) {
+    try { await fs.stat(probe); break; } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      missing.push(probe);
+      probe = path.dirname(probe);
+    }
+  }
+
+  return missing;
+}
+
+async function writeTemporary(entry, content, stat) {
+  await fs.writeFile(entry.temporary, content, { encoding: "utf8", flag: "wx", mode: stat ? stat.mode & 0o7777 : 0o666 });
+
+  if (stat) await fs.chmod(entry.temporary, stat.mode & 0o7777);
+}
+
+async function stageReplacement(entry, content, stat, target) {
+  const replacement = writeTemporary(entry, content, stat);
+  // These touch separate staging files. Settle both before cleanup, even
+  // on failure: Promise.all could leave a late backup after rollback.
+  const staging = [replacement];
+
+  if (stat) staging.push(fs.copyFile(target, entry.backup, fs.constants.COPYFILE_EXCL));
+  const outcomes = await Promise.allSettled(staging);
+  const failure = outcomes.find(outcome => outcome.status === "rejected");
+
+  if (failure) throw failure.reason;
+}
+
+function makeStageEntry(logicalPath, target, content, parent, stat) {
+  const token = ".supernova-" + randomUUID();
+
+  return { logicalPath, target, content, temporary: path.join(parent, token + ".new"), backup: path.join(parent, token + ".bak"), existed: !!stat, replaced: false };
+}
+
+async function recoverReplaced(staged) {
+  const recoveryErrors = [];
+
+  for (const entry of staged.toReversed()) {
+    if (!entry.replaced) continue;
+
+    try {
+      if (entry.existed) await fs.rename(entry.backup, entry.target);
+      else await fs.unlink(entry.target);
+    } catch (err) {
+      // Keep the backup if recovery fails; never delete the remaining original.
+      entry.keepBackup = true;
+      recoveryErrors.push(entry.target + ": " + err.message + " (backup: " + entry.backup + ")");
+    }
+  }
+
+  return recoveryErrors;
+}
+
+async function cleanupStaged(staged, failed, createdDirs) {
+  for (const entry of staged) {
+    // A successful rename consumed the temporary path. These are known
+    // files, so unlink avoids rm's extra type probe; missing files stay benign.
+    if (!entry.replaced) await fs.unlink(entry.temporary).catch(() => {});
+
+    if (entry.existed && !entry.keepBackup) await fs.unlink(entry.backup).catch(() => {});
+  }
+
+  if (failed) for (const dir of createdDirs.toReversed()) await fs.rmdir(dir).catch(() => {});
+}
+
+async function assertExpectedSignature(vfs, logicalPath, target, stat) {
+  if (!vfs.expected.has(logicalPath)) return;
+  const current = stat ? await fileSignature(target, vfs.signal) : null;
+
+  if (!sameSignature(current, vfs.expected.get(logicalPath))) {
+    throw new Error("write conflict: file changed since it was read: " + logicalPath + "; read it again before retrying");
+  }
+}
+
+async function installStaged(vfs, staged) {
+  for (const entry of staged) {
+    vfs.signal?.throwIfAborted();
+    await fs.rename(entry.temporary, entry.target);
+    entry.replaced = true;
+  }
+
+  for (const entry of staged) {
+    vfs.setCache(entry.logicalPath, entry.content);
+    vfs.expected.set(entry.logicalPath, textSignature(entry.content));
+  }
+
+  // Canonical commit destinations must not rewrite established event paths
+  // for newly created files, whose callers supplied a logical cwd spelling.
+  if (staged.length) vfs.onNewFile?.(staged.map(entry => entry.existed ? entry.target : entry.logicalPath));
+}
+
+async function failCommit(vfs, staged, error) {
+  const recoveryErrors = await recoverReplaced(staged);
+  vfs.invalidateCache();
+
+  if (recoveryErrors.length) vfs.mutations.recoveryFailed = true;
+
+  if (recoveryErrors.length) vfs.onNewFile?.(null);
+
+  if (recoveryErrors.length) throw new AggregateError([error, ...recoveryErrors.map(message => new Error(message))], "commit failed: " + error.message + "; recovery failed: " + recoveryErrors.join("; "));
+  throw error;
+}
+
 export class CausalVfs {
   constructor(onNewFile, validateWrite) {
     this.validateWrite = validateWrite;
@@ -121,11 +292,7 @@ export class CausalVfs {
   async read(target, { preserveRead = false, maxBytes, label = "read input" } = {}) {
     const overlay = this.getOverlay(target);
 
-    if (overlay !== undefined) {
-      if (maxBytes !== undefined && Buffer.byteLength(overlay, "utf8") > maxBytes) throw new Error(label + " exceeds " + maxBytes + " bytes; use a streaming parser through bash");
-
-      return overlay;
-    }
+    if (overlay !== undefined) return overlayOrThrow(overlay, maxBytes, label);
 
     // External editors and captured tools can change a file between any two reads.
     // Open once with O_NONBLOCK so a FIFO or device cannot park a host I/O worker.
@@ -135,27 +302,10 @@ export class CausalVfs {
 
       try {
         const stat = await file.stat();
-
-        if (stat.isDirectory()) throw new Error("read path is a directory, not a file: " + target);
-        if (!stat.isFile()) throw new Error("read requires a regular file: " + target);
-
-        if (maxBytes === undefined) bytes = await file.readFile({ signal: this.signal });
-        else {
-          const tooLarge = () => new Error(label + " exceeds " + maxBytes + " bytes; use a streaming parser through bash");
-
-          if (stat.size > maxBytes) throw tooLarge();
-          const chunks = [];
-          let size = 0;
-
-          for await (const chunk of file.createReadStream({ end: maxBytes, autoClose: false, signal: this.signal })) {
-            size += chunk.length;
-
-            if (size > maxBytes) throw tooLarge();
-            chunks.push(chunk);
-          }
-
-          bytes = Buffer.concat(chunks);
-        }
+        assertReadableFile(stat, target);
+        bytes = maxBytes === undefined
+          ? await file.readFile({ signal: this.signal })
+          : await readLimitedBytes(file, stat, maxBytes, label, this.signal);
         if (!sameFileVersion(stat, await file.stat())) throw new Error("file changed while reading: " + target);
       } finally { await file.close(); }
 
@@ -167,16 +317,7 @@ export class CausalVfs {
       return text;
     } catch (err) {
       this.dropCache(target);
-
-      if (err.code === "EISDIR") throw new Error("read path is a directory, not a file: " + target);
-
-      if (err.code === "ENOENT") {
-        const missing = new Error("no such file: " + target + ' (locate it with read using a directory path or source question)');
-        missing.code = "ENOENT";
-        throw missing;
-      }
-
-      throw err;
+      remapReadError(err, target);
     }
   }
 
@@ -254,117 +395,28 @@ export class CausalVfs {
     try {
       for (const [logicalPath, content] of writes) {
         this.signal?.throwIfAborted();
-        let target = logicalPath;
-        let stat;
-
-        try {
-          target = await fs.realpath(logicalPath);
-          stat = await fs.stat(target);
-
-          if (!stat.isFile()) throw new Error("cannot write to a non-file: " + logicalPath);
-        } catch (err) {
-          if (err.code !== "ENOENT") throw err;
-          target = await canonicalNewPath(logicalPath);
-        }
-
+        const { target, stat } = await resolveCommitTarget(logicalPath);
         await this.validateWrite?.(logicalPath);
 
         if (targets.has(target)) throw new Error("conflicting write aliases: " + logicalPath);
         targets.add(target);
-
-        if (this.expected.has(logicalPath)) {
-          const current = stat ? await fileSignature(target, this.signal) : null;
-
-          if (!sameSignature(current, this.expected.get(logicalPath))) {
-            throw new Error("write conflict: file changed since it was read: " + logicalPath + "; read it again before retrying");
-          }
-        }
-
+        await assertExpectedSignature(this, logicalPath, target, stat);
         const parent = path.dirname(target);
-        const missing = [];
-        let probe = parent;
-
-        for (;;) {
-          try { await fs.stat(probe); break; } catch (err) {
-            if (err.code !== "ENOENT") throw err;
-            missing.push(probe);
-            probe = path.dirname(probe);
-          }
-        }
-
+        const missing = await collectMissingAncestors(parent);
         await fs.mkdir(parent, { recursive: true });
         createdDirs.push(...missing.reverse());
-        const token = ".supernova-" + randomUUID();
-        const entry = { logicalPath, target, content, temporary: path.join(parent, token + ".new"), backup: path.join(parent, token + ".bak"), existed: !!stat, replaced: false };
+        const entry = makeStageEntry(logicalPath, target, content, parent, stat);
         staged.push(entry);
-
-        const replacement = (async () => {
-          await fs.writeFile(entry.temporary, content, { encoding: "utf8", flag: "wx", mode: stat ? stat.mode & 0o7777 : 0o666 });
-
-          if (stat) await fs.chmod(entry.temporary, stat.mode & 0o7777);
-        })();
-
-        // These touch separate staging files. Settle both before cleanup, even
-        // on failure: Promise.all could leave a late backup after rollback.
-        const staging = [replacement];
-
-        if (stat) staging.push(fs.copyFile(target, entry.backup, fs.constants.COPYFILE_EXCL));
-        const outcomes = await Promise.allSettled(staging);
-        const failure = outcomes.find(outcome => outcome.status === "rejected");
-
-        if (failure) throw failure.reason;
+        await stageReplacement(entry, content, stat, target);
       }
 
-      for (const entry of staged) {
-        this.signal?.throwIfAborted();
-        await fs.rename(entry.temporary, entry.target);
-        entry.replaced = true;
-      }
-
-      for (const entry of staged) {
-        this.setCache(entry.logicalPath, entry.content);
-        this.expected.set(entry.logicalPath, textSignature(entry.content));
-      }
-
-      // Canonical commit destinations must not rewrite established event paths
-      // for newly created files, whose callers supplied a logical cwd spelling.
-      if (staged.length) this.onNewFile?.(staged.map(entry => entry.existed ? entry.target : entry.logicalPath));
+      await installStaged(this, staged);
       this.mutations.committed += staged.length;
     } catch (error) {
       failed = true;
-      const recoveryErrors = [];
-
-      for (const entry of staged.toReversed()) {
-        if (!entry.replaced) continue;
-
-        try {
-          if (entry.existed) await fs.rename(entry.backup, entry.target);
-          else await fs.unlink(entry.target);
-        } catch (err) {
-          // Keep the backup if recovery fails; never delete the remaining original.
-          entry.keepBackup = true;
-          recoveryErrors.push(entry.target + ": " + err.message + " (backup: " + entry.backup + ")");
-        }
-      }
-
-      this.invalidateCache();
-
-      if (recoveryErrors.length) this.mutations.recoveryFailed = true;
-
-      if (recoveryErrors.length) this.onNewFile?.(null);
-
-      if (recoveryErrors.length) throw new AggregateError([error, ...recoveryErrors.map(message => new Error(message))], "commit failed: " + error.message + "; recovery failed: " + recoveryErrors.join("; "));
-      throw error;
+      await failCommit(this, staged, error);
     } finally {
-      for (const entry of staged) {
-        // A successful rename consumed the temporary path. These are known
-        // files, so unlink avoids rm's extra type probe; missing files stay benign.
-        if (!entry.replaced) await fs.unlink(entry.temporary).catch(() => {});
-
-        if (entry.existed && !entry.keepBackup) await fs.unlink(entry.backup).catch(() => {});
-      }
-
-      if (failed) for (const dir of createdDirs.toReversed()) await fs.rmdir(dir).catch(() => {});
+      await cleanupStaged(staged, failed, createdDirs);
     }
   }
 

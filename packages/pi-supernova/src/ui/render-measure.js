@@ -11,6 +11,27 @@ let cachedWidthChars = 0;
 
 const MAX_WIDTH_CACHE_CHARS = 512_000;
 
+function asciiWidth(plain, normalized) {
+  return /^[\x20-\x7e\u2500-\u257f\u00b7\u00d7\u2026\u2713\u2717]*$/.test(plain)
+    ? plain.length
+    : stringWidth(normalized);
+}
+
+function rememberWidth(raw, width) {
+  if (raw.length > 4096) return width;
+
+  while (widthCache.size >= 4096 || cachedWidthChars + raw.length > MAX_WIDTH_CACHE_CHARS) {
+    const oldest = widthCache.keys().next().value;
+    widthCache.delete(oldest);
+    cachedWidthChars -= oldest.length;
+  }
+
+  widthCache.set(raw, width);
+  cachedWidthChars += raw.length;
+
+  return width;
+}
+
 export function measureWidth(text) {
   const raw = String(text ?? "");
   const cached = widthCache.get(raw);
@@ -22,24 +43,9 @@ export function measureWidth(text) {
 
   // ASCII and these single-column chrome glyphs need no Unicode segmentation.
   // Any other character/control/escape sequence uses the full oracle.
-  const width = /^[\x20-\x7e\u2500-\u257f\u00b7\u00d7\u2026\u2713\u2717]*$/.test(plain)
-    ? plain.length
-    : stringWidth(normalized);
-
   // Cache immutable text only, never host/theme/result objects. Bound both
   // bookkeeping and retained text; unusually long lines bypass retention.
-  if (raw.length <= 4096) {
-    while (widthCache.size >= 4096 || cachedWidthChars + raw.length > MAX_WIDTH_CACHE_CHARS) {
-      const oldest = widthCache.keys().next().value;
-      widthCache.delete(oldest);
-      cachedWidthChars -= oldest.length;
-    }
-
-    widthCache.set(raw, width);
-    cachedWidthChars += raw.length;
-  }
-
-  return width;
+  return rememberWidth(raw, asciiWidth(plain, normalized));
 }
 
 function takePrefix(text, width) {
@@ -76,6 +82,24 @@ export function clampLine(line, width) {
   return hardTruncate(line, width);
 }
 
+function pushWrapSegment(out, current, columns, segment, size, width) {
+  if (columns + size > width && current.text) {
+    out.push(current.text);
+    current.text = "";
+    columns = 0;
+  }
+
+  if (size > width) {
+    out.push(ELLIPSIS);
+
+    return columns;
+  }
+
+  current.text += segment;
+
+  return columns + size;
+}
+
 /** Wrap complete, already-sanitized result text without splitting graphemes. */
 export function wrapLine(line, width) {
   if (width <= 0) return [];
@@ -83,23 +107,23 @@ export function wrapLine(line, width) {
 
   if (measureWidth(text) <= width) return [text];
   const out = [];
-  let current = "";
+  const current = { text: "" };
   let columns = 0;
 
   for (const { segment } of segmenter.segment(text)) {
-    const size = measureWidth(segment);
-
-    if (columns + size > width && current) { out.push(current); current = ""; columns = 0; }
-
-    if (size > width) { out.push(ELLIPSIS); continue; }
-
-    current += segment;
-    columns += size;
+    columns = pushWrapSegment(out, current, columns, segment, measureWidth(segment), width);
   }
 
-  if (current) out.push(current);
+  if (current.text) out.push(current.text);
 
   return out;
+}
+
+function shortenedPath(text) {
+  const parts = text.split("/").filter(Boolean);
+  const base = parts.at(-1) ?? text;
+
+  return { base, suffix: parts.length > 1 ? "…/" + base : base };
 }
 
 export function fitPath(pathText, budget) {
@@ -107,9 +131,7 @@ export function fitPath(pathText, budget) {
   const text = String(pathText ?? "").replace(/\\/g, "/");
 
   if (measureWidth(text) <= width) return text;
-  const parts = text.split("/").filter(Boolean);
-  const base = parts.at(-1) ?? text;
-  const suffix = parts.length > 1 ? "…/" + base : base;
+  const { base, suffix } = shortenedPath(text);
 
   return measureWidth(suffix) <= width ? suffix : hardTruncate(base, width);
 }

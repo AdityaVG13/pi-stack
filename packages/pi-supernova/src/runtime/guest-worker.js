@@ -1,8 +1,10 @@
 import { parentPort } from "node:worker_threads";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { isString, isObject, isFunction, isNumber, toPlain, looksLikePath } from "../shared/decode.js";
+import { isString, isObject, toPlain, looksLikePath } from "../shared/decode.js";
 import { truncateChars } from "../output/format.js";
-import { sessionJsonArgs, validateJsonRead } from "../fs/json-read.js";
+import { gatherReadArgs, normalizeRead, decodeReadValue, assertReadPaths } from "../contract/read.js";
+import { classifyEdit } from "../contract/edit.js";
+import { normalizeBash } from "../contract/bash.js";
 
 // Guest programs run here, off the host thread. The host can terminate() this
 // worker mid-loop, so a runaway "while (true) {}" or process.exit() in guest
@@ -13,6 +15,10 @@ const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const PARAMS = ["console", "read", "edit", "write", "bash"];
 
 const BODY_LINE_OFFSET = 2;
+
+const QUERY_URI = /^(agent|artifact):\/\/.*\?/i;
+
+const PER_PATH_HINT = "; use Promise.allSettled(paths.map(path => read(path))) for per-path outcomes";
 
 /** Best-effort guest line:col from an error stack (V8 "<anonymous>:L:C", JSC "eval code").*/
 function guestLocation(err) {
@@ -94,13 +100,192 @@ function leanEnvelope(res) {
   return res;
 }
 
-function quoteShellArg(value) {
-  return "'" + String(value).replaceAll("'", "'\\''") + "'";
+function swallow(promise) {
+  promise.catch(() => {});
+
+  return promise;
+}
+
+function throwReadPathError(target, detail) {
+  throw new Error(`read failed for ${target}: ${detail}${PER_PATH_HINT}`);
+}
+
+function isQueryUri(item) {
+  return QUERY_URI.test(item);
+}
+
+function firstItemErrorIndex(res) {
+  return res?.itemErrors?.findIndex(error => error != null) ?? -1;
+}
+
+function missingResolvedIndex(values, paths) {
+  return values.findIndex((value, index) => value?.status === "not_found" && looksLikePath(paths[index]));
+}
+
+async function rpcReadWave(rpc, wave) {
+  if (wave.length === 1) {
+    const res = leanEnvelope(await rpc("call", ["read", wave[0].args]));
+
+    return { values: [unwrapRead(res, wave[0].args)], errors: [] };
+  }
+  const args = { ...wave[0].args, path: wave.map(job => job.args.path), _independent: true };
+  const res = leanEnvelope(await rpc("call", ["read", args]));
+  unwrapRead(res, args);
+
+  return { values: res.items, errors: res.itemErrors ?? [] };
+}
+
+function settleReadWave(wave, values, errors) {
+  if (!Array.isArray(values) || values.length !== wave.length) throw new Error("invalid batch read response");
+
+  for (let i = 0; i < wave.length; i++) {
+    if (errors[i]) wave[i].reject(new Error(errors[i]));
+    else wave[i].resolve(values[i]);
+  }
+}
+
+function rejectReadWave(wave, error) {
+  for (const job of wave) job.reject(error);
+}
+
+function dispatchReadWaves(pending, pendingReadWaves, enqueueHost, rpc) {
+  for (let start = 0; start < pending.length; start += 64) {
+    const wave = pending.slice(start, start + 64);
+    const delivery = enqueueHost(() => rpcReadWave(rpc, wave))
+      .then(({ values, errors }) => settleReadWave(wave, values, errors))
+      .catch(error => rejectReadWave(wave, error));
+
+    pendingReadWaves.add(delivery);
+    void delivery.finally(() => pendingReadWaves.delete(delivery));
+  }
+}
+
+function enqueueCompatibleRead(readState, flushReads, args, decode) {
+  const key = JSON.stringify({ ...args, path: undefined });
+
+  if (readState.queued.length && readState.queued[0].key !== key) flushReads();
+
+  const promise = new Promise((resolve, reject) => {
+    readState.queued.push({ args, key, resolve, reject });
+
+    if (readState.queued.length === 1) queueMicrotask(flushReads);
+  }).then(decode);
+
+  return swallow(promise);
+}
+
+async function readManyPaths(readOne, invoke, batchRead, args, paths, decode) {
+  assertReadPaths(paths);
+  const readEach = async () => {
+    const values = await Promise.all(paths.map(item => readOne({ ...args, path: item })));
+    const missing = args.resolve ? missingResolvedIndex(values, paths) : -1;
+
+    if (missing >= 0) throwReadPathError(paths[missing], "not_found");
+
+    return values;
+  };
+
+  const guardedReadEach = () => swallow(readEach());
+
+  if (!batchRead || args.resolve || paths.some(isQueryUri)) return guardedReadEach();
+  const res = await invoke("read", args);
+  const failed = firstItemErrorIndex(res);
+
+  if (failed >= 0) throwReadPathError(paths[failed], res.itemErrors[failed]);
+  unwrapRead(res, args);
+
+  if (Array.isArray(res?.items)) return res.items.map(decode);
+
+  return guardedReadEach();
+}
+
+function attachCallManyMeta(wave) {
+  const results = Array.isArray(wave?.results) ? wave.results : Array.isArray(wave) ? wave : [];
+  Object.defineProperties(results, {
+    mode: { value: wave?.mode, enumerable: false },
+    reason: { value: wave?.reason, enumerable: false },
+    results: { value: results, enumerable: false },
+  });
+
+  return results;
+}
+
+async function runSpeculation(fn, token, checkpointScope, drainReads, enqueueHost, rpc) {
+  let began = false;
+
+  try {
+    await drainReads();
+    await enqueueHost(() => rpc("speculateBegin", []));
+    began = true;
+    const value = await checkpointScope.run(token, fn);
+    await drainReads();
+    await enqueueHost(() => rpc("speculateCommit", []));
+
+    return { ok: true, committed: true, value };
+  } catch (err) {
+    await drainReads();
+
+    if (began) await enqueueHost(() => rpc("speculateRollback", []));
+
+    return { ok: false, committed: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function formatBashFailure(command, res) {
+  let exitCode;
+
+  try {
+    exitCode = JSON.parse(res.details).exitCode;
+  } catch {}
+
+  const output = String(res.value).trimEnd();
+  const suffix = Number.isInteger(exitCode) ? " (exit " + exitCode + ")" : "";
+
+  return "command failed" + suffix + ": " + command + (output ? "\n" + output : "");
+}
+
+function markTruncatedOutput(res, text) {
+  if (res?.truncated && isString(text) && !text.includes("truncated")) return text + "\n…[output truncated]…";
+
+  return text;
+}
+
+function encodeConsoleArg(a) {
+  if (isString(a)) return a;
+
+  try {
+    const plain = toPlain(a);
+    const encoded = JSON.stringify(plain);
+
+    return encoded === undefined ? String(plain) : encoded;
+  } catch {
+    return String(a);
+  }
+}
+
+function compileGuest(prepared, data) {
+  const bindings = data === undefined ? PARAMS : [...PARAMS, "data"];
+
+  return { fn: new AsyncFunction(...bindings, prepared.body), hasReturn: prepared.hasReturn };
+}
+
+function plainGuestValue(value) {
+  try { return toPlain(value); }
+  catch (err) { return "[unserializable: " + (err?.message || err) + "]"; }
+}
+
+function handleRpcResult(msg) {
+  const pending = pendingRpc.get(msg.id);
+
+  if (!pending) return;
+  pendingRpc.delete(msg.id);
+
+  if (msg.ok) pending.resolve(msg.value);
+  else pending.reject(new Error(msg.error));
 }
 
 function buildGuestApi(available, batchRead, runId, _nativeArgv) {
   const rpc = (method, args) => callRpc(runId, method, args);
-  const availableSet = new Set(available);
   const checkpointScope = new AsyncLocalStorage();
   let checkpoint = null;
 
@@ -122,97 +307,37 @@ function buildGuestApi(available, batchRead, runId, _nativeArgv) {
   const nova = {
     call(name, args) {
       assertScope(); flushReads();
-      const promise = enqueueHost(() => rpc("call", [name, args]).then(leanEnvelope));
 
-      promise.catch(() => {});
-
-      return promise;
+      return swallow(enqueueHost(() => rpc("call", [name, args]).then(leanEnvelope)));
     },
     callMany(calls) {
       assertScope(); flushReads();
-      const promise = enqueueHost(async () => {
-        const wave = await rpc("callMany", [calls]);
-        const results = Array.isArray(wave?.results) ? wave.results : Array.isArray(wave) ? wave : [];
-        Object.defineProperties(results, {
-          mode: { value: wave?.mode, enumerable: false },
-          reason: { value: wave?.reason, enumerable: false },
-          results: { value: results, enumerable: false },
-        });
 
-        return results;
-      });
-
-      promise.catch(() => {});
-
-      return promise;
+      return swallow(enqueueHost(async () => attachCallManyMeta(await rpc("callMany", [calls]))));
     },
     async speculate(fn) {
       if (checkpoint) throw new Error("edit checkpoints cannot overlap or nest; await the current checkpoint");
       const token = {};
       checkpoint = token;
-      let began = false;
 
-      try {
-        await drainReads();
-        await enqueueHost(() => rpc("speculateBegin", []));
-        began = true;
-        const value = await checkpointScope.run(token, fn);
-        await drainReads();
-        await enqueueHost(() => rpc("speculateCommit", []));
-
-        return { ok: true, committed: true, value };
-      } catch (err) {
-        await drainReads();
-
-        if (began) await enqueueHost(() => rpc("speculateRollback", []));
-
-        return { ok: false, committed: false, error: err instanceof Error ? err.message : String(err) };
-      } finally { checkpoint = null; }
+      try { return await runSpeculation(fn, token, checkpointScope, drainReads, enqueueHost, rpc); }
+      finally { checkpoint = null; }
     },
-    surface(filePath) { assertScope(); flushReads(); const promise = enqueueHost(() => rpc("call", ["surface", { path: filePath }]).then(unwrapJsonValue)); promise.catch(() => {}); return promise; },
-    evidence(query, opts) { assertScope(); flushReads(); const promise = enqueueHost(() => rpc("call", ["evidence", { query, ...opts }]).then(unwrapJsonValue)); promise.catch(() => {}); return promise; },
-    snap(query, targetPath) { assertScope(); flushReads(); const promise = enqueueHost(() => rpc("call", ["snap", { query, path: targetPath }]).then(unwrapJsonValue)); promise.catch(() => {}); return promise; },
-    has: (name) => availableSet.has(name),
   };
 
   // Coalesce already-started compatible reads without rewriting JS control flow.
-  let queuedReads = [];
-  const pendingReadWaves = new Set();
+  const readState = { queued: [], waves: new Set() };
 
   function flushReads() {
-    const pending = queuedReads;
-    queuedReads = [];
-
-    for (let start = 0; start < pending.length; start += 64) {
-      const wave = pending.slice(start, start + 64);
-      const args = { ...wave[0].args, path: wave.map(job => job.args.path), _independent: true };
-
-      const run = enqueueHost(() => wave.length === 1
-        ? rpc("call", ["read", wave[0].args]).then(leanEnvelope).then(res => ({ values: [unwrapRead(res, wave[0].args)], errors: [] }))
-        : rpc("call", ["read", args]).then(leanEnvelope).then(res => { unwrapRead(res, args);
-
- return { values: res.items, errors: res.itemErrors ?? [] }; }));
-
-      const delivery = run.then(({ values, errors }) => {
-        if (!Array.isArray(values) || values.length !== wave.length) throw new Error("invalid batch read response");
-
-        for (let i = 0; i < wave.length; i++) {
-          const value = values[i];
-
-          if (errors[i]) wave[i].reject(new Error(errors[i]));
-          else wave[i].resolve(value);
-        }
-      }).catch(error => { for (const job of wave) job.reject(error); });
-
-      pendingReadWaves.add(delivery);
-      void delivery.finally(() => pendingReadWaves.delete(delivery));
-    }
+    const pending = readState.queued;
+    readState.queued = [];
+    dispatchReadWaves(pending, readState.waves, enqueueHost, rpc);
   }
 
   async function drainReads() {
     for (;;) {
       flushReads();
-      const waves = [...pendingReadWaves];
+      const waves = [...readState.waves];
 
       if (!waves.length) return;
       await Promise.allSettled(waves);
@@ -221,211 +346,49 @@ function buildGuestApi(available, batchRead, runId, _nativeArgv) {
 
   const invoke = (name, args) => {
     assertScope(); flushReads();
-    const promise = nova.call(name, args);
 
-    promise.catch(() => {});
-
-    return promise;
-  };
-
-  const readArgs = (p, a, b) => {
-    if (isObject(p) && !Array.isArray(p)) {
-      const args = { ...p, path: p.path ?? p.target ?? p.query };
-
-      if (p.path === undefined && p.target !== undefined) delete args.target;
-
-      return args;
-    }
-
-    return isObject(a) && !Array.isArray(a) ? { path: p, ...a } : { path: p, offset: a, limit: b };
+    return swallow(nova.call(name, args));
   };
 
   const read = async (p, a, b) => {
     assertScope();
-    const args = sessionJsonArgs(readArgs(p, a, b));
-    if (isString(args.path) && args.resolve === undefined && args.complete !== true && args.json === undefined && args.about === undefined && args.query === undefined && !looksLikePath(args.path) && !/^(?:agent|artifact):\/\//i.test(args.path)) {
-      args.resolve = true;
-    }
-    validateJsonRead(args);
-
-    for (const [key, value] of [["resolve", args.resolve], ["complete", args.complete], ["outline", args.outline], ["evidence", args.evidence]]) {
-      if (value !== undefined && typeof value !== "boolean") throw new Error("read " + key + " must be a boolean");
-    }
-
-    if (args.about !== undefined && !isString(args.about)) throw new Error("read about must be a string");
-    if (args.query !== undefined && !isString(args.query)) throw new Error("read query must be a string");
-    const focusModes = [args.about !== undefined, args.query !== undefined, args.outline === true].filter(Boolean).length;
-
-    if (focusModes > 1 || (args.outline === true && args.evidence === true)) throw new Error("read accepts only one of about, query, outline, or evidence");
-    if (args.resolve === true && args.complete === true) throw new Error("read accepts either resolve or complete, not both");
-    const decode = value => {
-      if ((!args.resolve && args.json === undefined) || !isString(value)) return value;
-
-      try {
-        return JSON.parse(value);
-      } catch (error) {
-        const selector = args.json === undefined ? "" : " (" + (Array.isArray(args.json) ? args.json.join(", ") : String(args.json)) + ")";
-        throw new Error("JSON read failed for " + String(args.path ?? args.target ?? "resource") + selector + ": " + (error instanceof Error ? error.message : String(error)));
-      }
-    };
-
-    if (args.complete === true && (args.outline || args.evidence || args.about || args.query)) throw new Error("complete:true requires a raw file read, not a source view");
-    const evidencePath = isObject(p) && !Array.isArray(p) ? p.path : (isString(p) && looksLikePath(p) ? p : undefined);
+    const args = normalizeRead(gatherReadArgs(p, a, b));
+    const decode = value => decodeReadValue(args, value);
     p = args.path;
 
-    if (args.evidence) {
-      const query = args.about ?? args.query ?? (isString(p) ? p : undefined);
-      return unwrapJsonValue(await invoke("evidence", { ...args, path: evidencePath, query }));
-    }
-
-    if (args.outline) return unwrapJsonValue(await invoke("surface", args));
-
     if (Array.isArray(p)) {
-      if (p.length > 64) throw new Error("read accepts at most 64 paths per batch");
-
-      for (const item of p) if (!isString(item) || !item.trim()) throw new Error("read paths must be non-empty strings");
-      const readEach = async () => {
-        const values = await Promise.all(p.map(item => read({ ...args, path: item })));
-        const missing = args.resolve ? values.findIndex((value, index) => value?.status === "not_found" && looksLikePath(p[index])) : -1;
-
-        if (missing >= 0) throw new Error(`read failed for ${p[missing]}: not_found; use Promise.allSettled(paths.map(path => read(path))) for per-path outcomes`);
-
-        return values;
-      };
-
-      const guardedReadEach = () => {
-        const promise = readEach();
-
-        promise.catch(() => {});
-
-        return promise;
-      };
-
-      if (!batchRead || args.resolve || p.some(item => /^(agent|artifact):\/\/.*\?/i.test(item))) return guardedReadEach();
-      const res = await invoke("read", args);
-      const failed = res?.itemErrors?.findIndex(error => error != null) ?? -1;
-
-      if (failed >= 0) throw new Error(`read failed for ${p[failed]}: ${res.itemErrors[failed]}; use Promise.allSettled(paths.map(path => read(path))) for per-path outcomes`);
-      unwrapRead(res, args);
-
-      if (Array.isArray(res?.items)) return res.items.map(decode);
-
-      // Captured host executor without batch support: fan out.
-      return guardedReadEach();
+      return await readManyPaths(read, invoke, batchRead, args, p, decode);
     }
 
-    if (!batchRead) {
-      const res = await invoke("read", args);
-      unwrapRead(res, args);
+    const readValue = !batchRead
+      ? decode(unwrapRead(await invoke("read", args), args))
+      : await enqueueCompatibleRead(readState, flushReads, args, decode);
 
-      return decode(unwrapRead(res, args));
-    }
-
-    const key = JSON.stringify({ ...args, path: undefined });
-
-    if (queuedReads.length && queuedReads[0].key !== key) flushReads();
-
-    const promise = new Promise((resolve, reject) => {
-      queuedReads.push({ args, key, resolve, reject });
-
-      if (queuedReads.length === 1) queueMicrotask(flushReads);
-    }).then(decode);
-
-    promise.catch(() => {});
-
-    return promise;
+    return readValue;
   };
 
-  const write = async (p, content) => unwrapValue(await invoke("write", isObject(p) ? p : { path: p, content }));
+  const write = async (p, content) => {
+    const args = isObject(p) ? p : { path: p, content };
 
-  const viewSpan = (value) => {
-    const start = isNumber(value.start) ? value.start : Array.isArray(value.lines) ? value.lines[0] : value.line;
-    const end = isNumber(value.end) ? value.end : Array.isArray(value.lines) && value.lines.length > 1 ? value.lines[1] : start;
-
-    if (!isNumber(start) || !isNumber(end) || start < 1 || end < start) return null;
-
-    return { start: Math.floor(start), end: Math.floor(end) };
+    return unwrapValue(await invoke("write", args));
   };
-
-  const isView = (value) => isObject(value) && !Array.isArray(value) && isString(value.path) && value.path.trim() && isString(value.text) && (value.status === undefined || value.status === "found") && viewSpan(value);
 
   const edit = async (p, oldText, newText) => {
-    if (isFunction(p)) return nova.speculate(p);
-    const usage = 'invalid edit signature; use edit(path,oldText,newText), edit({path,edits:[{oldText,newText}]}), or edit({path,patch:"@@ -1 +1 @@\n-old\n+new\n"})';
+    const classified = classifyEdit(p, oldText, newText);
 
-    if (isView(p) && isString(oldText) && (newText === undefined || isString(newText))) {
-      if (isNumber(p.nextOffset)) throw new Error("edit view is incomplete");
-      const span = viewSpan(p);
-      const args = { path: p.path, viewStart: span.start, viewEnd: span.end, viewText: p.text, newText: newText === undefined ? oldText : newText };
+    if (classified.kind === "checkpoint") return nova.speculate(classified.fn);
 
-      if (newText !== undefined) args.oldText = oldText;
-
-      return unwrapValue(await invoke("edit", args));
-    }
-
-    if (isObject(p) && (Array.isArray(p) || oldText !== undefined || newText !== undefined)) throw new Error(usage);
-
-    if (!isObject(p) && isObject(oldText) && !Array.isArray(oldText)) throw new Error(usage);
-    const args = isObject(p) ? p : Array.isArray(oldText) ? { path: p, edits: oldText } : { path: p, oldText, newText };
-
-    if (!isString(args.path) || !args.path.trim()) throw new Error(usage);
-    const modes = Number(args.patch !== undefined) + Number(args.edits !== undefined) + Number(args.oldText !== undefined || args.newText !== undefined);
-
-    if (modes !== 1 || (Array.isArray(oldText) && newText !== undefined)) throw new Error(usage);
-
-    if (args.patch !== undefined) {
-      if (!isString(args.patch) || !args.patch.trim()) throw new Error(usage);
-    } else {
-      const edits = args.edits === undefined ? [args] : args.edits;
-
-      if (!Array.isArray(edits) || !edits.length) throw new Error(usage);
-
-      for (const e of edits) if (!isString(e?.oldText) || !e.oldText.length || !isString(e?.newText)) throw new Error(usage + "; replacements require non-empty oldText and string newText");
-    }
-
-    return unwrapValue(await invoke(args.patch === undefined ? "edit" : "apply_patch", args));
+    return unwrapValue(await invoke(classified.command, classified.args));
   };
 
   const bash = async (command, opts) => {
-    const args = isObject(command) ? { ...command } : { command, ...opts };
-
-    if (args.args !== undefined) {
-      if (!isString(args.command) || !Array.isArray(args.args)) throw new Error("bash argv requires a command string and an array of string args");
-
-      for (let i = 0; i < args.args.length; i++) if (!isString(args.args[i])) throw new Error("bash argv requires a command string and an array of string args");
-      args.args = args.args.map(String);
-
-      // Literal argv is a Supernova-owned contract. Host bash tools often ignore
-      // `args` and would run only `command` (bare `ssh`). Windows still needs a shell.
-      if (process.platform === "win32") {
-        delete args._directArgv;
-        args.command = [args.command, ...args.args].map(quoteShellArg).join(" ");
-        delete args.args;
-      } else args._directArgv = true;
-    }
-
+    const args = normalizeBash(command, opts);
     command = args.command;
-
-    if (args.timeout !== undefined && args.timeoutMs === undefined) args.timeoutMs = args.timeout * 1000;
     const res = await invoke("bash", args);
 
-    if (res?.ok === false) {
-      let exitCode;
+    if (res?.ok === false) throw new Error(formatBashFailure(command, res));
 
-      try {
-        exitCode = JSON.parse(res.details).exitCode;
-      } catch {}
-
-      const output = String(res.value).trimEnd();
-      const suffix = Number.isInteger(exitCode) ? " (exit " + exitCode + ")" : "";
-      throw new Error("command failed" + suffix + ": " + command + (output ? "\n" + output : ""));
-    }
-
-    let text = unwrapValue(res);
-
-    if (res?.truncated && isString(text) && !text.includes("truncated")) text += "\n…[output truncated]…";
-
-    return text;
+    return markTruncatedOutput(res, unwrapValue(res));
   };
 
   return { read, write, edit, bash, nova };
@@ -446,22 +409,7 @@ function makeConsole(runId, limits) {
  return; }
 
     count++;
-
-    const line = args
-      .map((a) => {
-        if (isString(a)) return a;
-
-        try {
-          const plain = toPlain(a);
-          const encoded = JSON.stringify(plain);
-
-          return encoded === undefined ? String(plain) : encoded;
-        } catch {
-          return String(a);
-        }
-      })
-      .join(" ");
-
+    const line = args.map(encodeConsoleArg).join(" ");
     const clipped = truncateChars(line, limits.maxLogLineChars, "log");
 
     if (clipped.truncated) markTruncated();
@@ -485,8 +433,7 @@ async function handleRun(msg) {
 
   try {
     // Existing programs may declare their own data variable; bind it only when supplied.
-    const bindings = msg.data === undefined ? PARAMS : [...PARAMS, "data"];
-    compiled = { fn: new AsyncFunction(...bindings, prepared.body), hasReturn: prepared.hasReturn };
+    compiled = compileGuest(prepared, msg.data);
   } catch (err) {
     postFailure(runId, new Error("JavaScript syntax error: " + err.message + "; no commands ran. When passing data, do not redeclare its binding."));
 
@@ -502,14 +449,7 @@ async function handleRun(msg) {
     );
 
     if (runId !== activeRunId) return;
-    let plain;
-
-    try {
-      plain = toPlain(value);
-    } catch (err) {
-      plain = "[unserializable: " + (err?.message || err) + "]";
-    }
-
+    const plain = plainGuestValue(value);
     runActive = false;
     post({ op: "done", runId, value: plain, undefinedReturn: value === undefined && !compiled.hasReturn, hasReturn: compiled.hasReturn });
   } catch (err) {
@@ -522,13 +462,7 @@ parentPort.on("message", (msg) => {
   if (!isObject(msg)) return;
 
   if (msg.op === "rpc:result") {
-    const pending = pendingRpc.get(msg.id);
-
-    if (!pending) return;
-    pendingRpc.delete(msg.id);
-
-    if (msg.ok) pending.resolve(msg.value);
-    else pending.reject(new Error(msg.error));
+    handleRpcResult(msg);
 
     return;
   }

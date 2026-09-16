@@ -60,60 +60,82 @@ function plainFromCollection(value, seen, depth) {
   return out;
 }
 
+function withSeen(value, seen, fn) {
+  seen.add(value);
+
+  try { return fn(); }
+  finally { seen.delete(value); }
+}
+
+function functionLabel(value) {
+  return "[Function" + (value.name ? " " + value.name : "") + "]";
+}
+
+function plainByTag(value, tag) {
+  if (tag === "[object String]") return { hit: true, out: value.valueOf() };
+
+  if (tag === "[object Number]" || tag === "[object Boolean]") return { hit: true, out: value.valueOf() };
+
+  if (tag === "[object BigInt]") return { hit: true, out: value.toString() + "n" };
+
+  if (tag === "[object Symbol]") return { hit: true, out: value.toString() };
+
+  return { hit: false };
+}
+
+function plainAtom(value) {
+  if (value === null || value === undefined) return { hit: true, out: value };
+  const tagged = plainByTag(value, toStr.call(value));
+
+  if (tagged.hit) return tagged;
+
+  if (isFunction(value)) return { hit: true, out: functionLabel(value) };
+
+  return { hit: false };
+}
+
+function plainDate(value) {
+  return Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString();
+}
+
+function plainHosted(value) {
+  if (value instanceof Date) return { hit: true, out: plainDate(value) };
+
+  if (value instanceof RegExp) return { hit: true, out: value.toString() };
+
+  if (value instanceof Promise) return { hit: true, out: "[Promise]" };
+
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return { hit: true, out: plainFromBinary(value) };
+
+  return { hit: false };
+}
+
+function plainError(value, seen, depth) {
+  const out = { name: value.name, message: value.message };
+
+  if (value.cause !== undefined) out.cause = withSeen(value, seen, () => toPlain(value.cause, seen, depth + 1));
+
+  return out;
+}
+
 /** Convert any guest value to structured-clone-safe, JSON-shaped data. */
 export function toPlain(value, seen = new Set(), depth = 0) {
-  if (value === null || value === undefined) return value;
-  const tag = toStr.call(value);
+  const atom = plainAtom(value);
 
-  if (tag === "[object String]") return value.valueOf();
-
-  if (tag === "[object Number]" || tag === "[object Boolean]") return value.valueOf();
-
-  if (tag === "[object BigInt]") return value.toString() + "n";
-
-  if (isFunction(value)) return "[Function" + (value.name ? " " + value.name : "") + "]";
-
-  if (tag === "[object Symbol]") return value.toString();
+  if (atom.hit) return atom.out;
 
   if (depth > MAX_DEPTH) return "[Depth]";
 
   if (seen.has(value)) return "[Circular]";
 
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString();
+  if (value instanceof Error) return plainError(value, seen, depth);
+  const hosted = plainHosted(value);
 
-  if (value instanceof RegExp) return value.toString();
+  if (hosted.hit) return hosted.out;
 
-  if (value instanceof Error) {
-    const out = { name: value.name, message: value.message };
+  if (isFunction(value.toJSON)) return withSeen(value, seen, () => toPlain(value.toJSON(), seen, depth + 1));
 
-    if (value.cause !== undefined) {
-      seen.add(value);
-
-      try { out.cause = toPlain(value.cause, seen, depth + 1); }
-      finally { seen.delete(value); }
-    }
-
-    return out;
-  }
-
-  if (value instanceof Promise) return "[Promise]";
-
-  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return plainFromBinary(value);
-
-  if (isFunction(value.toJSON)) {
-    seen.add(value);
-
-    try { return toPlain(value.toJSON(), seen, depth + 1); }
-    finally { seen.delete(value); }
-  }
-  seen.add(value);
-
-  try {
-    return plainFromCollection(value, seen, depth);
-  } finally {
-    seen.delete(value);
-  }
+  return withSeen(value, seen, () => plainFromCollection(value, seen, depth));
 }
 
 // ---- RPC to the host thread ----
-

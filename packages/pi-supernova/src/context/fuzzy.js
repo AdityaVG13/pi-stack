@@ -122,13 +122,20 @@ function scoreAlignment(needle, nCmp, hay, hayCmp, start) {
   return score;
 }
 
-/** Best match allowing up to maxTypos skipped needle characters. */
-export function fuzzyMatch(needle, hay, { maxTypos = 0, caseSensitive = false } = {}) {
-  const direct = matchOnce(needle, hay, caseSensitive);
+function considerShorter(part, typosLeft, visit, best) {
+  for (let i = 0; i < part.length; i++) {
+    const m = visit(part.slice(0, i) + part.slice(i + 1), typosLeft - 1);
 
-  if (direct) return { ...direct, typos: 0, exact: hay.toLowerCase() === needle.toLowerCase() };
+    if (!m) continue;
+    const scored = { ...m, score: m.score - 12, typos: m.typos + 1, exact: false };
 
-  if (maxTypos <= 0 || needle.length < 3 || needle.length > 128) return null;
+    if (!best || scored.score > best.score) best = scored;
+  }
+
+  return best;
+}
+
+function matchWithTypos(needle, hay, maxTypos, caseSensitive) {
   const memo = new Map();
 
   const visit = (part, typosLeft) => {
@@ -139,24 +146,24 @@ export function fuzzyMatch(needle, hay, { maxTypos = 0, caseSensitive = false } 
 
     if (best) best = { ...best, typos: 0, exact: hay.toLowerCase() === part.toLowerCase() };
 
-    if (typosLeft > 0) {
-      for (let i = 0; i < part.length; i++) {
-        const shorter = part.slice(0, i) + part.slice(i + 1);
-        const m = visit(shorter, typosLeft - 1);
-
-        if (!m) continue;
-        const scored = { ...m, score: m.score - 12, typos: m.typos + 1, exact: false };
-
-        if (!best || scored.score > best.score) best = scored;
-      }
-    }
-
+    if (typosLeft > 0) best = considerShorter(part, typosLeft, visit, best);
     memo.set(key, best);
 
     return best;
   };
 
   return visit(needle, maxTypos);
+}
+
+/** Best match allowing up to maxTypos skipped needle characters. */
+export function fuzzyMatch(needle, hay, { maxTypos = 0, caseSensitive = false } = {}) {
+  const direct = matchOnce(needle, hay, caseSensitive);
+
+  if (direct) return { ...direct, typos: 0, exact: hay.toLowerCase() === needle.toLowerCase() };
+
+  if (maxTypos <= 0 || needle.length < 3 || needle.length > 128) return null;
+
+  return matchWithTypos(needle, hay, maxTypos, caseSensitive);
 }
 
 export function smartCase(query) {
@@ -180,23 +187,34 @@ function distancePenalty(currentDir, candidateDir) {
  * Rank file paths for a query the fff way. paths are workspace-relative "/"-joined.
  * ctx: { frecency: Frecency, mtimeOf: (path) => sec, modified: Set(path), currentFile?: string, maxTypos }
  */
+function partTypos(parts, ctx) {
+  return ctx.maxTypos ?? (parts[0].length >= 6 ? 2 : parts[0].length >= 4 ? 1 : 0);
+}
+
+function scoredPath(rel, parts, maxTypos, caseSensitive, ctx, currentDir) {
+  const matched = matchParts(parts, rel, maxTypos, caseSensitive);
+
+  if (!matched) return null;
+  const { base, first, exact } = matched;
+  const filenameStart = rel.lastIndexOf("/") + 1;
+  const boosts = filenameBonus(base, rel, filenameStart, first, parts[0]) + contextBoost(base, rel, ctx) + distancePenalty(currentDir, rel.slice(0, filenameStart));
+
+  return { path: rel, score: base + boosts, exact, typos: first.typos };
+}
+
 export function rankPaths(query, paths, ctx = {}) {
   const parts = query.trim().split(/\s+/).filter((p) => p.length >= 2);
 
   if (parts.length === 0 || parts.length > 16) return [];
   const caseSensitive = smartCase(query);
-  const maxTypos = ctx.maxTypos ?? (parts[0].length >= 6 ? 2 : parts[0].length >= 4 ? 1 : 0);
+  const maxTypos = partTypos(parts, ctx);
   const currentDir = ctx.currentFile ? ctx.currentFile.slice(0, ctx.currentFile.lastIndexOf("/") + 1) : "";
   const out = [];
 
   for (const rel of paths) {
-    const matched = matchParts(parts, rel, maxTypos, caseSensitive);
+    const scored = scoredPath(rel, parts, maxTypos, caseSensitive, ctx, currentDir);
 
-    if (!matched) continue;
-    const { base, first, exact } = matched;
-    const filenameStart = rel.lastIndexOf("/") + 1;
-    const boosts = filenameBonus(base, rel, filenameStart, first, parts[0]) + contextBoost(base, rel, ctx) + distancePenalty(currentDir, rel.slice(0, filenameStart));
-    out.push({ path: rel, score: base + boosts, exact, typos: first.typos });
+    if (scored) out.push(scored);
   }
 
   out.sort((a, b) => b.score - a.score || a.path.length - b.path.length || a.path.localeCompare(b.path));

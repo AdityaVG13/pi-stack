@@ -37,10 +37,10 @@ function rel(p) {
 function layerOf(file) {
   if (file === "index.js") return 5;
   if (file.startsWith("src/ui/")) return 4;
-  if (file.startsWith("src/bridge/")) return 3;
+  if (file.startsWith("src/bridge/") || file.startsWith("src/adapters/")) return 3;
   if (file.startsWith("src/runtime/")) return 2;
   if (file.startsWith("src/context/")) return 2;
-  if (file.startsWith("src/fs/") || file.startsWith("src/output/")) return 1;
+  if (file.startsWith("src/fs/") || file.startsWith("src/output/") || file.startsWith("src/contract/")) return 1;
   if (file.startsWith("src/shared/") || file.startsWith("src/config/")) return 0;
   return 9;
 }

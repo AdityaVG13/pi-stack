@@ -89,20 +89,17 @@ function wrapBg(paint) {
 	};
 }
 
-function bgFnForState(theme, state) {
-	if (!state || !theme) return undefined;
-	const key = bgKeyFor(state);
-
-	if (isFunction(theme.bg)) {
-		try {
-			if (!isString(theme.bg(key, "x"))) return undefined;
-		} catch {
-			return undefined;
-		}
-
-		return wrapBg((text) => theme.bg(key, text));
+function probeThemeBg(theme, key) {
+	try {
+		if (!isString(theme.bg(key, "x"))) return undefined;
+	} catch {
+		return undefined;
 	}
 
+	return wrapBg((text) => theme.bg(key, text));
+}
+
+function themeAnsiBgFn(theme, key) {
 	if (!isFunction(theme.getBgAnsi)) return undefined;
 
 	try {
@@ -116,47 +113,56 @@ function bgFnForState(theme, state) {
 	}
 }
 
-function frameBodyLines(sections, contentWidth, box, border, bgFn, w, paintBar) {
+function bgFnForState(theme, state) {
+	if (!state || !theme) return undefined;
+	const key = bgKeyFor(state);
+
+	if (isFunction(theme.bg)) return probeThemeBg(theme, key);
+
+	return themeAnsiBgFn(theme, key);
+}
+
+function frameSectionLines(section, contentWidth, box, border, bgFn, w, paintBar) {
 	const lines = [];
-	const normalized = sections.length > 0 ? sections : [{ lines: [] }];
-	const v = box.vertical;
 
-	for (const section of normalized) {
-		if (section.label) lines.push(paintBar(box.teeRight || "├", box.teeLeft || "┤", section.label));
+	if (section.label) lines.push(paintBar(box.teeRight || "├", box.teeLeft || "┤", section.label));
 
-		for (const raw of section.lines || []) {
-			for (const piece of String(raw).split("\n")) {
-				const body = clampLine(piece, contentWidth);
-				const pad = Math.max(0, contentWidth - measureWidth(body));
-				lines.push(padLine(`${border(v)} ${body}${" ".repeat(pad)} ${border(v)}`, w, bgFn));
-			}
+	for (const raw of section.lines || []) {
+		for (const piece of String(raw).split("\n")) {
+			const body = clampLine(piece, contentWidth);
+			const pad = Math.max(0, contentWidth - measureWidth(body));
+			lines.push(padLine(`${border(box.vertical)} ${body}${" ".repeat(pad)} ${border(box.vertical)}`, w, bgFn));
 		}
 	}
 
 	return lines;
 }
 
-function renderPortableFrame(theme, { header, sections = [], state = "pending", borderColor, width }) {
-	const w = Math.max(1, width | 0);
+function frameBodyLines(sections, contentWidth, box, border, bgFn, w, paintBar) {
+	const normalized = sections.length > 0 ? sections : [{ lines: [] }];
+	const lines = [];
 
-	if (w < 8) {
-		const rawLines = [header];
+	for (const section of normalized) lines.push(...frameSectionLines(section, contentWidth, box, border, bgFn, w, paintBar));
 
-		for (const section of sections) {
-			if (section.label) rawLines.push(section.label);
-			rawLines.push(...(section.lines || []));
-		}
+	return lines;
+}
 
-		return rawLines.flatMap((line) => line ? [clampLine(line, w)] : []);
+function collapseNarrowFrame(header, sections, w) {
+	const rawLines = [header];
+
+	for (const section of sections) {
+		if (section.label) rawLines.push(section.label);
+		rawLines.push(...(section.lines || []));
 	}
 
-	const box = boxOf(theme);
-	const border = borderPaint(theme, state, borderColor);
-	const bgFn = bgFnForState(theme, state);
+	return rawLines.flatMap((line) => line ? [clampLine(line, w)] : []);
+}
+
+function paintBarFor(box, border, bgFn, w) {
 	const h = box.horizontal;
 	const cap = h.repeat(3);
 
-	const paintBar = (leftChar, rightChar, label) => {
+	return (leftChar, rightChar, label) => {
 		const left = `${leftChar}${cap}`;
 		const right = rightChar;
 
@@ -173,14 +179,22 @@ function renderPortableFrame(theme, { header, sections = [], state = "pending", 
 
 		return padLine(`${border(left)}${trimmed}${border(h.repeat(fill))}${border(right)}`, w, bgFn);
 	};
+}
 
-	const contentWidth = Math.max(1, w - 2 - 2);
-	const lines = [];
-	lines.push(paintBar(box.topLeft, box.topRight, header));
-	lines.push(...frameBodyLines(sections, contentWidth, box, border, bgFn, w, paintBar));
-	lines.push(paintBar(box.bottomLeft, box.bottomRight, null));
+function renderPortableFrame(theme, { header, sections = [], state = "pending", borderColor, width }) {
+	const w = Math.max(1, width | 0);
 
-	return lines;
+	if (w < 8) return collapseNarrowFrame(header, sections, w);
+	const box = boxOf(theme);
+	const border = borderPaint(theme, state, borderColor);
+	const bgFn = bgFnForState(theme, state);
+	const paintBar = paintBarFor(box, border, bgFn, w);
+
+	return [
+		paintBar(box.topLeft, box.topRight, header),
+		...frameBodyLines(sections, Math.max(1, w - 2 - 2), box, border, bgFn, w, paintBar),
+		paintBar(box.bottomLeft, box.bottomRight, null),
+	];
 }
 
 function createPortableFramedComponent(theme, build) {
