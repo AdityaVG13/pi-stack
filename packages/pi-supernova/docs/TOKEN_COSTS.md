@@ -86,7 +86,7 @@ as the original workload: removing a decision boundary cannot satisfy this gate.
 
 ### Definition and result accounting
 
-The current serialized definition is 631 tokens with o200k_base and 626 with
+The current serialized definition is 602 tokens with o200k_base and 595 with
 cl100k_base, versus 908 and 901 in the frozen non-batched baseline. It retains
 command signatures, complete-read and JSON limits, array-read failure rules,
 transaction boundaries, batch defaults and edit/view guidance on every request.
@@ -117,8 +117,8 @@ this is not a comparison against a hypothetical request that could never run.
 
 | Tokenizer | Repeated-input traffic | Shared-input traffic | Reduction | Arguments before / after | Unchanged result tokens |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| o200k_base | 16,309 | 5,499 | **66.28%** | 6,461 / 1,043 | 2,151 |
-| cl100k_base | 14,649 | 5,197 | **64.52%** | 5,684 / 945 | 2,055 |
+| o200k_base | 16,309 | 5,441 | **66.64%** | 6,461 / 1,043 | 2,151 |
+| cl100k_base | 14,649 | 5,135 | **64.95%** | 5,684 / 945 | 2,055 |
 
 Each arm has one tool invocation followed by the final answer request:
 
@@ -127,8 +127,9 @@ Total = 2*D + 2*A + R
 ~~~
 
 Arguments are charged when generated and when replayed; the complete result is
-charged on handoff. The new standing guidance adds 13 definition tokens per
-request (618 to 631 / 613 to 626), and that cost is included in the after totals.
+charged on handoff. The standing guidance measures 602 definition tokens per
+request with o200k_base (595 with cl100k_base), and that cost is included in
+the after totals.
 There is no source compression, result elision, hidden output or lost decision
 boundary. Programs receive fresh data copies, not a shared mutable heap.
 

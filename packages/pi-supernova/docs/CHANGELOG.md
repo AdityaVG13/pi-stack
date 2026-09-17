@@ -56,6 +56,13 @@
   commands and surface needles. Wording compression plus dropped peripheral
   clauses; the JSON/about signatures, prefer-edit rule, and batching nudge
   stay. Ablation family verified live over 12 green gpt-6-astra runs.
+- Standing tool reference trimmed by 120 more tokens per request (o200k_base),
+  below the previous release baseline: limits and failure patterns already
+  taught by engine errors are no longer repeated proactively, and the batching
+  nudge, guest-confinement rule, and checkpoint clause are compressed. All
+  surface needles, the prefer-edit rule, and the oversize-JSON routing line
+  stay. Live-verified over 2 green gpt-6-astra runs against 2 task-matched
+  controls with no strategy change.
 
 ## [0.6.0] - 2026-09-15
 
