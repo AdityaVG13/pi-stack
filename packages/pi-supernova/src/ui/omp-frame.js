@@ -181,13 +181,16 @@ function paintBarFor(box, border, bgFn, w) {
 	};
 }
 
-function renderPortableFrame(theme, { header, sections = [], state = "pending", borderColor, width }) {
+function renderPortableFrame(theme, { header, sections = [], state = "pending", borderColor, width, paintBg = true }) {
 	const w = Math.max(1, width | 0);
 
 	if (w < 8) return collapseNarrowFrame(header, sections, w);
 	const box = boxOf(theme);
 	const border = borderPaint(theme, state, borderColor);
-	const bgFn = bgFnForState(theme, state);
+	// Hosts that tint the whole tool block themselves (OMP's contentBox) must
+	// get unpainted rows: a second bg wrap here would clear the outer bg with
+	// \x1b[49m and strand the host's right pad as an unpainted bar.
+	const bgFn = paintBg ? bgFnForState(theme, state) : undefined;
 	const paintBar = paintBarFor(box, border, bgFn, w);
 
 	return [

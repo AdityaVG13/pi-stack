@@ -559,6 +559,7 @@ function renderCardLines(theme, model, width, view) {
 		// borderMuted is invisible on OMP's card background; dim matches the duration column.
 		borderColor: chrome.borderColor,
 		width,
+		paintBg: model.host !== "omp",
 	})).render(width);
 }
 
@@ -622,7 +623,7 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 	syncState(context, payload);
 	const isError = result?.isError || payload?.ok === false;
 	const comp = bindResultCard(host, options, context);
-	comp.set(theme, { payload, context, args, expanded, isPartial, isError });
+	comp.set(theme, { payload, context, args, expanded, isPartial, isError, host });
 
 	return comp;
 }
