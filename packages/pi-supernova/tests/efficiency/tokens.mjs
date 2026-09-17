@@ -40,6 +40,10 @@ const candidate = await runWorkload(workload,{batch:!!parameters.properties.prog
 // single explicit correction is derived from the frozen input, not the candidate.
 // Historical traffic still uses the untouched v1 outputs/definition below.
 const contractEvents = structuredClone(baseline.events);
+// Contract v3 reports write receipts relative to the workspace, matching the
+// long-standing `edited <rel>` form; the frozen absolute marker is the
+// normalizer's /workspace/ prefix, stripped here rather than regenerated.
+for (const event of contractEvents) event.output = event.output.replaceAll("wrote /workspace/", "wrote ");
 const line = workload.files["src/fs/json-read.js"].split("\n")[2];
 const oldField = "text:" + JSON.stringify(line);
 assert.equal(contractEvents[0].output.split(oldField).length, 2);

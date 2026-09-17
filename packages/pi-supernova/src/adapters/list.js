@@ -31,7 +31,7 @@ function fileListing(dirPath, size) {
 }
 
 export function createList(ctx) {
-  const { getCwd, vfs, config, index, ledger, hooks } = ctx;
+  const { getCwd, vfs, index } = ctx;
 
   async function listFromCache(searchDir, cwd, globPattern, pending) {
     const fuzzy = await fuzzyFind(index, searchDir, cwd, globPattern, 20, pending);

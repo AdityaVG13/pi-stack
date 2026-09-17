@@ -134,11 +134,11 @@ function contextFrom(opts, ctxOrArgs) {
 	return { state: opts.state, lastComponent: opts.lastComponent };
 }
 
-function hasContextShape(value) {
+function isRenderContext(value) {
 	return "lastComponent" in value || "invalidate" in value;
 }
 
-function hasArgsShape(value) {
+function isToolArgs(value) {
 	return "code" in value || "file" in value || "programs" in value || "timeoutMs" in value;
 }
 
@@ -147,9 +147,9 @@ function detectResultHost(options, ctxOrArgs) {
 
 	if (!isObject(ctxOrArgs)) return "pi";
 
-	if (hasContextShape(ctxOrArgs)) return "pi";
+	if (isRenderContext(ctxOrArgs)) return "pi";
 
-	if (hasArgsShape(ctxOrArgs)) return "omp";
+	if (isToolArgs(ctxOrArgs)) return "omp";
 
 	return "pi";
 }
@@ -595,7 +595,7 @@ function syncState(context, payload) {
 }
 
 function errorPayload(result) {
-	return result?.isError ? { ok: false, error: result.content?.filter(block => block.type === "text").map(block => block.text).join("\n") } : undefined;
+	return result?.isError ? { ok: false, error: result.content?.flatMap(block => block.type === "text" ? [block.text] : []).join("\n") } : undefined;
 }
 
 function payloadFromResult(result) {

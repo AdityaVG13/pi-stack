@@ -63,6 +63,18 @@
   surface needles, the prefer-edit rule, and the oversize-JSON routing line
   stay. Live-verified over 2 green gpt-6-astra runs against 2 task-matched
   controls with no strategy change.
+- An acquired guest worker pipelines its successor while the run executes, so
+  back-to-back programs share construction cost: sequential batches run ~2x
+  faster (22.4ms to 10.5ms per realistic program). Isolated cold starts are
+  unchanged apart from the deferred successor spawn.
+- Multi-edit receipts render the first 32 matches with exact totals and an
+  `…N more matches` note instead of unbounded lines.
+- Write receipts report workspace-relative paths, matching `edited <rel>`.
+- Evidence and outline reads return compact JSON instead of pretty-printed.
+- Refused bridge calls (unknown or excluded tools) no longer consume the host
+  call budget; routing validation runs before charging.
+- The VFS body cache is gone: every read hits disk or its overlay, and CAS
+  baselines are the only retained per-file state.
 
 ### Fixed
 
@@ -76,9 +88,17 @@
   raw and selection routing at the same token cost; live-verified over 3
   green runs (top-level keys now answer in 1 call instead of 2).
 - Memory-limit failures now report the RSS growth, the in-flight operation,
-  host-call count, and tracked host bytes (VFS cache, index entries,
-  overlays), splitting tracked from untracked growth so host-side pressure
+  host-call count, and tracked host bytes (index entries, overlays),
+  splitting tracked from untracked growth so host-side pressure
   is distinguishable from tool-side growth.
+- `process.kill` is sealed out of the guest realm: signals are process-wide
+  and could terminate the host. Stop processes with `bash`.
+- Patch hunks that drift report their relocation per hunk, and a hunk whose
+  context matches more than one location fails with a disambiguation error
+  instead of applying at the first candidate.
+- A failed commit keeps CAS baselines for files it never touched, so a later
+  write to a diverged path fails loudly instead of re-capturing unknown
+  bytes as the new truth.
 - The workspace index reuses one scratch read buffer instead of allocating
   512 KiB per file, bounding transient RSS on large-tree scans.
 

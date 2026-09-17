@@ -51,7 +51,7 @@ export function createBash(ctx) {
         if (!signal?.aborted) error.message += await sourceForReferences(cwd, targetCwd, error.message, signal, ledger);
         throw error;
       } finally {
-        vfs.invalidateCache();
+        vfs.invalidateObserved();
         index.invalidate();
         clearPathCache();
         hooks.workspaceChanged();

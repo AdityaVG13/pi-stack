@@ -1,4 +1,5 @@
 /** Custom loader: guest programs cannot import host I/O modules. */
+import { isString } from "../shared/decode.js";
 
 const DENY = new Set([
   "fs", "node:fs", "fs/promises", "node:fs/promises",
@@ -16,7 +17,7 @@ export function guestImportMessage(specifier) {
 }
 
 export function isDeniedGuestImport(specifier) {
-  if (typeof specifier !== "string") return false;
+  if (!isString(specifier)) return false;
   const key = specifier.replace(/^node:/, "");
 
   return DENY.has(specifier) || DENY.has("node:" + key) || DENY.has(key);

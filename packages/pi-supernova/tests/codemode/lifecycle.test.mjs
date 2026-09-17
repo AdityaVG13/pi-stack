@@ -2,7 +2,7 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { warmGuestWorker, formatMemoryAttribution } from "../../src/runtime/runtime.js";
+import { warmGuestWorker, stopWarmGuestWorker, formatMemoryAttribution } from "../../src/runtime/runtime.js";
 import { engineFixture, limits } from "../helpers/engine.mjs";
 import { runCommand } from "../../src/fs/workspace.js";
 
@@ -49,6 +49,29 @@ it("a prewarmed worker never inherits a previous program's global mutations", as
   await warmGuestWorker(limits);
   const result = await f.execute('return typeof globalThis.supernovaPollution;');
   assert.equal(result.details.result, "undefined");
+});
+
+it("an acquired worker pipelines its successor while the run still holds it", { timeout: 20000 }, async t => {
+  const f = await engineFixture(t);
+  await warmGuestWorker(limits);
+  const run = f.execute('await write("started.txt", "x"); await bash("sleep 0.7"); return "done";');
+  // The guest's own write proves acquisition; no timing assumption beyond the
+  // shell sleep outlasting a filesystem poll.
+  const started = path.join(f.root, "started.txt");
+  const deadline = Date.now() + 8000;
+
+  while (Date.now() < deadline) {
+    try { await fs.access(started); break; }
+    catch { await new Promise(resolve => setTimeout(resolve, 20)); }
+  }
+
+  await fs.access(started);
+  // stopWarmGuestWorker returns a promise only when an idle worker exists: the
+  // run's own worker must be untouched, so the run still completes.
+  const stopped = stopWarmGuestWorker();
+  assert.ok(stopped, "expected a pipelined successor worker mid-run");
+  await stopped;
+  assert.equal((await run).details.result, "done");
 });
 
 it("a non-yielding program fails at its deadline without poisoning the next program", {timeout:4000}, async t => {

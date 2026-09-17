@@ -87,8 +87,8 @@ function deniedSpecifier(node) {
 
 function assertGuestImports(ast) {
   function walk(node) {
-    if (!node || typeof node !== "object") return;
     if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (!isObject(node)) return;
     if (node.type === "ImportDeclaration" || node.type === "ImportExpression") {
       const spec = deniedSpecifier(node.source);
       throw new Error((spec && isDeniedGuestImport(spec) ? guestImportMessage(spec) : "guest cannot import modules; use read, edit, write, or bash") + "; no commands ran");
@@ -175,6 +175,13 @@ function acquireWorker(config) {
   if (candidate && !reusable) void killWorker(candidate);
   const handle = reusable ? candidate : spawnWorker(config);
   handle.worker.ref?.();
+
+  // Pipeline the successor while this run executes. A consumed worker's
+  // replacement starts at once; a cold start's replacement waits for ready,
+  // so the two constructions never overlap. The finish-time warm usually
+  // becomes a no-op, so steady-state spawn count is unchanged.
+  if (reusable) warmGuestWorker(config).catch(() => {});
+  else handle.ready.then(() => warmGuestWorker(config).catch(() => {}), () => {});
 
   return handle;
 }

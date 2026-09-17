@@ -16,7 +16,7 @@ function assertWriteAppendFlag(append) {
 }
 
 function assertWriteArtifactsFlag(allowReadArtifacts) {
-  if (allowReadArtifacts !== undefined && typeof allowReadArtifacts !== "boolean") throw new Error("write allowReadArtifacts must be a boolean");
+  if (allowReadArtifacts !== undefined && allowReadArtifacts !== true && allowReadArtifacts !== false) throw new Error("write allowReadArtifacts must be a boolean");
 }
 
 function writeDiffFor(target, prevText, content, removedLines) {
@@ -34,11 +34,11 @@ function writeCheckWarning(content, target) {
   return check && !check.ok ? "\ncheck: " + check.message : "";
 }
 
-function writeOutcome(target, content, speculative, prevText, removedLines) {
+function writeOutcome(rel, target, content, speculative, prevText, removedLines) {
   const diff = writeDiffFor(target, prevText, content, removedLines);
   const tag = speculative ? " (speculative)" : "";
 
-  return textResult(`wrote ${target}${tag}${writeCheckWarning(content, target)}`, { path: target, speculative, diff });
+  return textResult(`wrote ${rel}${tag}${writeCheckWarning(content, target)}`, { path: target, speculative, diff });
 }
 
 export function createWrite(ctx) {
@@ -57,7 +57,7 @@ export function createWrite(ctx) {
     return content;
   }
 
-  async function applyAppend(target, content, snap, signal) {
+  async function applyAppend(target, content, snap) {
     let { previous: prevText, overlay, existingBytes } = snap;
 
     if (existingBytes > WRITE_APPEND_MAX_READ_BYTES) throw new Error("append input exceeds " + WRITE_APPEND_MAX_READ_BYTES + " bytes; stream it with bash redirection instead");
@@ -80,7 +80,7 @@ export function createWrite(ctx) {
       let { previous: prevText, removedLines } = snap;
 
       if (params.append === true) {
-        const appended = await applyAppend(target, content, snap, signal);
+        const appended = await applyAppend(target, content, snap);
         content = appended.content;
         prevText = appended.prevText;
         removedLines = appended.removedLines;
@@ -89,7 +89,7 @@ export function createWrite(ctx) {
       const { speculative } = await vfs.write(target, content);
       index.touch(relativeSlash(cwd, target));
 
-      return writeOutcome(target, content, speculative, prevText, removedLines);
+      return writeOutcome(relativeSlash(cwd, target), target, content, speculative, prevText, removedLines);
   }
 
   return { write };

@@ -1,5 +1,5 @@
 // Standing tool description: sent on every request. One nova call, four commands inside.
-export const REFERENCE = `JavaScript async body or arrow with read, write, edit, bash. file rereads that program. Put Markdown/scripts/argv in data. Guest has no fs/import/require; bash mutates but never reads files.
+export const REFERENCE = `JavaScript async body or arrow with read, write, edit, bash. file:path runs that program file instead. Put Markdown/scripts/argv in data. Guest has no fs/import/require.
 
 read(path|paths, offset?, limit?) → raw text or text[]; read(directory) → entries[]
 read(imagePath) → image (PNG/JPEG/GIF/WebP/BMP)

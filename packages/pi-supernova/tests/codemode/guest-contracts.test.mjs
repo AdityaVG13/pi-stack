@@ -266,3 +266,14 @@ it("a program that mutates without returning still delivers the write and edit r
   assert.match(silentText, /no return statement/);
   assert.doesNotMatch(silentText, /gamma-SENTINEL/);
 });
+
+it("a 40-edit program applies every match but receipts only the first 32", async t => {
+  const f = await engineFixture(t);
+  const body = Array.from({ length: 40 }, (_, i) => `key-${i}=0`).join("\n") + "\n";
+  await f.write("many.txt", body);
+  const edits = Array.from({ length: 40 }, (_, i) => ({ oldText: `key-${i}=0`, newText: `key-${i}=1` }));
+  const out = await f.execute(`return await edit({path:"many.txt", edits:${JSON.stringify(edits)}});`);
+  assert.match(out.details.result, /…8 more matches \(receipt shows the first 32\)/);
+  const after = await fs.readFile(path.join(f.root, "many.txt"), "utf8");
+  assert.equal(after, body.replaceAll("=0", "=1"));
+});

@@ -45,12 +45,12 @@ function namedEditPositional(p, oldText, newText) {
   return Array.isArray(oldText) ? { path: p, edits: oldText } : { path: p, oldText, newText };
 }
 
-function namedEditShape(p, oldText, newText) {
+function normalizeEditArgs(p, oldText, newText) {
   return isObject(p) ? namedEditObject(p, oldText, newText) : namedEditPositional(p, oldText, newText);
 }
 
 function namedEditArgs(p, oldText, newText) {
-  const args = namedEditShape(p, oldText, newText);
+  const args = normalizeEditArgs(p, oldText, newText);
 
   if (!isString(args.path) || !args.path.trim()) throw new Error(EDIT_USAGE);
 

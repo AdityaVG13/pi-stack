@@ -3,10 +3,6 @@ import * as path from "node:path";
 import { isString } from "../shared/decode.js";
 import { createHash, randomUUID } from "node:crypto";
 
-const VFS_CACHE_MAX = 1024;
-
-const VFS_CACHE_MAX_BYTES = 64 * 1024 * 1024;
-
 // Serialize validation + replacement across Supernova transactions in this host.
 let commitTail = Promise.resolve();
 
@@ -210,7 +206,6 @@ async function installStaged(vfs, staged) {
   }
 
   for (const entry of staged) {
-    vfs.setCache(entry.logicalPath, entry.content);
     vfs.expected.set(entry.logicalPath, textSignature(entry.content));
   }
 
@@ -221,7 +216,10 @@ async function installStaged(vfs, staged) {
 
 async function failCommit(vfs, staged, error) {
   const recoveryErrors = await recoverReplaced(staged);
-  vfs.invalidateCache();
+  // Keep CAS baselines: a failed commit must not forgive conflicts on files it
+  // never touched. If recovery left disk diverging from a baseline, the next
+  // write to that path fails loudly and forces a re-read instead of silently
+  // re-capturing unknown bytes as the new truth.
 
   if (recoveryErrors.length) vfs.mutations.recoveryFailed = true;
 
@@ -234,11 +232,9 @@ async function failCommit(vfs, staged, error) {
 export class CausalVfs {
   constructor(onNewFile, validateWrite) {
     this.validateWrite = validateWrite;
-    // Optional receipt bodies, never the authority for CAS. Signatures survive
-    // body eviction. Explicit reads hit disk and replace the observed snapshot;
-    // internal receipt reads preserve it until an external-mutation boundary.
-    this.cache = new Map();
-    this.cacheBytes = 0;
+    // No body cache: every read hits disk (or its overlay) so observed bytes
+    // are never stale. CAS baselines in `expected` are the only retained
+    // per-file state, cleared only at external-mutation boundaries.
     this.overlays = [];
     this.expected = new Map();
     this.onNewFile = onNewFile;
@@ -250,33 +246,6 @@ export class CausalVfs {
   assertWritable() {
     if (this.closed) throw new Error("program is already complete");
     this.signal?.throwIfAborted();
-  }
-
-  dropCache(target) {
-    const previous = this.cache.get(target);
-
-    if (previous !== undefined && this.cache.delete(target)) this.cacheBytes -= Buffer.byteLength(previous, "utf8");
-  }
-
-  setCache(target, content) {
-    const bytes = Buffer.byteLength(content, "utf8");
-
-    if (bytes > VFS_CACHE_MAX_BYTES) {
-      this.dropCache(target);
-      return;
-    }
-
-    this.dropCache(target);
-
-    while ((this.cache.size >= VFS_CACHE_MAX || this.cacheBytes + bytes > VFS_CACHE_MAX_BYTES) && this.cache.size) {
-      const oldest = this.cache.keys().next().value;
-
-      this.cacheBytes -= Buffer.byteLength(this.cache.get(oldest), "utf8");
-      this.cache.delete(oldest);
-    }
-
-    this.cache.set(target, content);
-    this.cacheBytes += bytes;
   }
 
   getOverlay(target) {
@@ -311,12 +280,9 @@ export class CausalVfs {
 
       // Hash the actual bytes, not a lossy UTF-8 decode/re-encode.
       if (!preserveRead || !this.expected.has(target)) this.expected.set(target, textSignature(bytes));
-      const text = bytes.toString("utf8");
-      this.setCache(target, text);
 
-      return text;
+      return bytes.toString("utf8");
     } catch (err) {
-      this.dropCache(target);
       remapReadError(err, target);
     }
   }
@@ -465,9 +431,8 @@ export class CausalVfs {
     return pending.size > 0;
   }
 
-  invalidateCache() { this.cache.clear(); this.cacheBytes = 0; this.expected.clear(); }
-  getCacheSize() { return this.cache.size; }
-  getCacheBytes() { return this.cacheBytes; }
+  /** External-mutation boundary: drop CAS baselines so the next access re-observes disk. */
+  invalidateObserved() { this.expected.clear(); }
   getOverlayDepth() { return this.overlays.length; }
   describeOverlays() {
     let files = 0, bytes = 0;

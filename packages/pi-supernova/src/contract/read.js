@@ -31,7 +31,7 @@ export function assertReadPaths(targetParam) {
 
 function assertReadFlags(args) {
   for (const key of BOOL_KEYS) {
-    if (args[key] !== undefined && typeof args[key] !== "boolean") throw new Error("read " + key + " must be a boolean");
+    if (args[key] !== undefined && args[key] !== true && args[key] !== false) throw new Error("read " + key + " must be a boolean");
   }
 
   if (args.about !== undefined && !isString(args.about)) throw new Error("read about must be a string");

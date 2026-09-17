@@ -128,8 +128,10 @@ error: ${outcome.error}${logsBlock(outcome)}`;
 function successText(outcome, call) {
   const truncated = outcome.returnTruncated ? " [return truncated]" : "";
   const hint = outcome.undefinedReturn ? " (no return statement; add `return` to get a value)" : "";
+  const m = outcome.mutations;
+  const showMutations = m && (m.committed || m.rolledBack || m.external || m.pendingCommits || m.recoveryFailed) ? mutationText(outcome) : "";
 
-  return `ok #${call} ${outcome.wallMs}ms${truncated}${outcome.mutations?.committed || outcome.mutations?.rolledBack || outcome.mutations?.external ? mutationText(outcome) : ""}${splitTurnHint(outcome)}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
+  return `ok #${call} ${outcome.wallMs}ms${truncated}${showMutations}${splitTurnHint(outcome)}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
 }
 
 function fitOutput(outcome, call, limit, format) {

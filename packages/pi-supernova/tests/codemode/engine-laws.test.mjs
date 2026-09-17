@@ -25,6 +25,12 @@ it("guest programs cannot import fs or child_process", async t => {
   assert.match(cpMsg, /guest cannot import node:child_process/);
 });
 
+it("process.kill throws inside guest programs", async t => {
+  const f = await engineFixture(t);
+  const msg = await rejection(f.execute("process.kill(process.pid);"));
+  assert.match(msg, /process\.kill is not available in guest programs/);
+});
+
 it("write after read of the same path requires edit or replace:true", async t => {
   const f = await engineFixture(t);
   await f.write("a.js", "export const n = 1;\n");

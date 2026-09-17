@@ -327,7 +327,7 @@ async function rankedSpanCandidates(ranked, root, overlayText, signal) {
     if (large) out.push(location(candidate, root));
     else {
       try { out.push(...await spanCandidates(candidate.path, lines, root, overlayText, signal)); }
-      catch (error) { signal?.throwIfAborted(); out.push(location(candidate, root)); }
+      catch { signal?.throwIfAborted(); out.push(location(candidate, root)); }
     }
     if (out.length >= MAX_ALTERNATIVES) break;
   }

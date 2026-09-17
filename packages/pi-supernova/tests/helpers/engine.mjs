@@ -64,6 +64,49 @@ export function modelText(result) {
   return result.content.filter(block => block.type === "text").map(block => block.text).join("\n");
 }
 
+// Deterministic guest/host rendezvous for interference tests. Sleep windows
+// skew under parallel load: the guest may start late or the host's timer may
+// fire late, silently reordering setup and interference. Instead the
+// host resolves `gate` when a completed trace record matches, performs the
+// interference, then writes go.txt; the guest polls for go.txt after its
+// setup step. Both sides time out loudly instead of hanging.
+export function traceGate(predicate, timeoutMs = 10000) {
+  let release;
+  let fail;
+  const promise = new Promise((resolve, reject) => { release = resolve; fail = reject; });
+  const timer = setTimeout(() => fail(new Error("test handshake timeout waiting for gated trace record")), timeoutMs);
+  timer.unref?.();
+  const onUpdate = update => {
+    const trace = update?.details?.trace;
+
+    if (Array.isArray(trace) && trace.some(predicate)) { clearTimeout(timer); release(); }
+  };
+
+  return { onUpdate, promise };
+}
+
+export function gatedExecute(f, code, predicate) {
+  const gate = traceGate(predicate);
+  const pending = f.tool.execute("red-contract", { code, timeoutMs: 2000 }, undefined, gate.onUpdate, { cwd: f.root });
+
+  return { pending, gate: gate.promise };
+}
+
+// Guest-side wait for the host's go.txt. Only ENOENT retries; any other read
+// failure is a real bug and propagates. Polling reads touch only go.txt's own
+// CAS baseline, never the file under test.
+export const GUEST_GATE_POLL = `{
+  const gateStart = Date.now();
+  while (true) {
+    try { await read("go.txt"); break; }
+    catch (error) {
+      if (!/no such file/.test(error.message)) throw error;
+      if (Date.now() - gateStart > 8000) throw new Error("test handshake timeout waiting for go.txt");
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}`;
+
 // Explicit research configuration, never an implicit shipping default. Registration
 // reads synchronously, so the environment override cannot leak across async calls.
 export function registerExperimentalLedger(pi) {

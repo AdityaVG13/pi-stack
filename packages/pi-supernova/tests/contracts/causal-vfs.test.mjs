@@ -43,16 +43,28 @@ it("a staged overlay hides disk until commit, then disk matches the overlay", as
   assert.equal(await fs.readFile(file, "utf8"), "cccc");
 });
 
-// Intent: evicting a performance cache must not discard a correctness snapshot.
-it("byte-cache eviction retains the original CAS expectation", async () => {
+// Intent: a read pins the CAS baseline; an external change after it must conflict.
+it("an external change after a read still conflicts on write", async () => {
   const file = path.join(await scratch(), "a.txt");
   await fs.writeFile(file, "old");
   const vfs = new CausalVfs();
   await vfs.read(file);
-  vfs.setCache("large-receipt", "x".repeat(64 * 1024 * 1024));
-  assert.equal(vfs.cache.has(file), false, "the probe must actually evict the body");
-  assert.equal(vfs.cacheBytes, [...vfs.cache.values()].reduce((sum, text) => sum + Buffer.byteLength(text), 0));
   await fs.writeFile(file, "new");
   await assert.rejects(vfs.write(file, "stale"), /write conflict/);
   assert.equal(await fs.readFile(file, "utf8"), "new");
+});
+
+// Intent: a failed commit must not forgive conflicts on files it never touched.
+it("a failed commit keeps CAS baselines for unrelated files", async () => {
+  const root = await scratch();
+  const a = path.join(root, "a.txt");
+  const b = path.join(root, "b.txt");
+  await fs.writeFile(a, "a-old");
+  await fs.writeFile(b, "b-old");
+  const vfs = new CausalVfs(undefined, async target => { if (target === b) throw new Error("boom"); });
+  await vfs.read(a);
+  await fs.writeFile(a, "a-external");
+  await assert.rejects(vfs.write(b, "b-new"), /boom/);
+  await assert.rejects(vfs.write(a, "stale"), /write conflict/);
+  assert.equal(await fs.readFile(a, "utf8"), "a-external");
 });

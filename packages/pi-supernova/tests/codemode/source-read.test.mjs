@@ -5,12 +5,13 @@ import path from "node:path";
 import { engineFixture } from "../helpers/engine.mjs";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
+import { isObject, isString } from "../../src/shared/decode.js";
 
 it("a source question without resolve is a view, not a file dump", async t => {
   const f = await engineFixture(t);
   await f.write("padded.js", `${"// header\n".repeat(8)}export function gravityToken() {\n  return 1;\n}\n`);
   const source = (await f.execute('return await read("gravityToken");')).details.result;
-  assert.equal(typeof source, "object");
+  assert.equal(isObject(source), true);
   assert.equal(source.status, "found");
   assert.equal(source.path, "padded.js");
   assert.equal(source.complete, false);
@@ -23,7 +24,7 @@ it("a path read stays raw text after gravity", async t => {
   const f = await engineFixture(t);
   await f.write("note.txt", "plain file body\n");
   const source = (await f.execute('return await read("note.txt");')).details.result;
-  assert.equal(typeof source, "string");
+  assert.equal(isString(source), true);
   assert.equal(source, "plain file body\n");
 });
 

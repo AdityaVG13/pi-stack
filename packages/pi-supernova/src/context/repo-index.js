@@ -169,7 +169,7 @@ function parseRgFiles(res, root) {
   const truncated = res.outputTruncated === true;
   const output = truncated && !res.stdout.endsWith("\n") ? res.stdout.slice(0, res.stdout.lastIndexOf("\n") + 1) : res.stdout;
 
-  return { files: output.split("\n").filter(Boolean).map(f => path.resolve(root, f)).sort(), error, truncated, missing: false };
+  return { files: output.split("\n").flatMap(f => f ? [path.resolve(root, f)] : []).sort(), error, truncated, missing: false };
 }
 
 function addPorcelainRow(rows, i, set) {

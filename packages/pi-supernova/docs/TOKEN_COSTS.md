@@ -165,6 +165,13 @@ untouched; programs, arguments, failures and decision boundaries are unchanged.
 The shared-input comparison separately requires equal complete result text in
 both arms, after only run-metadata normalization.
 
+Contract v3 reports write receipts relative to the workspace (`wrote rel/path`,
+matching the long-standing `edited <rel>` form) instead of absolute paths. The
+runner strips the frozen `/workspace/` prefix from baseline outputs; the
+historical fixture and its traffic counts stay untouched. Temporary workspace
+prefixes no longer appear in live receipts, so that normalization only applies
+to the frozen baseline side.
+
 The README and these docs ship in the npm tarball. Benchmarks and test fixtures
 remain in the GitHub checkout, so their links above use GitHub URLs.
 

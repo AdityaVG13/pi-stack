@@ -181,7 +181,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     callCount = 0;
     trace = [];
     // Files may change between programs (editor, git); never serve a stale run.
-    vfs.invalidateCache();
+    vfs.invalidateObserved();
     clearPathCache();
   }
 
@@ -213,8 +213,15 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     } catch {}
   }
 
-  function checkCallBudget(name) {
+  function assertRunOpen(name) {
     if (closed) throw new Error("program is already complete");
+
+    if (activeSignal?.aborted) throw new Error("aborted");
+
+    if (!isString(name) || !name) throw new Error("tool name required");
+  }
+
+  function chargeCallBudget() {
     const maxCalls = config.maxBridgeCalls ?? 256;
 
     if (budget && ++budget.calls > maxCalls) throw new Error("host call budget exceeded (" + maxCalls + " calls per program batch): split the batch");
@@ -225,10 +232,6 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
         `host call budget exceeded (${maxCalls} calls per program): split the work across programs`,
       );
     }
-
-    if (activeSignal?.aborted) throw new Error("aborted");
-
-    if (!isString(name) || !name) throw new Error("tool name required");
   }
 
   function assertCallableTarget(name) {
@@ -266,6 +269,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
       const value = args[key];
 
       if (isString(value)) out[key] = truncateChars(value, 240, "trace").text;
+      // eslint-disable-next-line anti-slop/no-runtime-typeof -- display-only label: the value is already handled, this names its kind for the trace.
       else if (Array.isArray(value)) out[key] = value.slice(0, 128).map(item => isString(item) ? truncateChars(item, 240, "trace").text : typeof item);
     }
 
@@ -299,12 +303,12 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
 
       return res;
     } finally {
-      if (mutating) { vfs.invalidateCache(); index.invalidate(); clearPathCache(); notifyWorkspaceChanged(); }
+      if (mutating) { vfs.invalidateObserved(); index.invalidate(); clearPathCache(); notifyWorkspaceChanged(); }
     }
   }
 
   async function invokeNative(target, args, record) {
-    const res = await target.native(target.argvOwned ? { ...(args || {}), args: args.args.map(String) } : args || {}, activeSignal);
+    const res = await target.native(target.argvOwned ? { ...args, args: args.args.map(String) } : args || {}, activeSignal);
     completeRecord(record, res);
 
     return res;
@@ -318,11 +322,13 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
   }
 
   async function invokeRaw(name, args) {
-    checkCallBudget(name);
+    assertRunOpen(name);
     const callId = ++sharedRegistry.callSeq;
     assertCallableTarget(name);
 
     if (!isCallable(name)) throw new Error(unknownToolMessage(name, [...definitions.keys(), ...Object.keys(natives)].filter(isCallable)));
+    // Refused calls are free: only charge the budget once a target will run.
+    chargeCallBudget();
 
     const command = { apply_patch: "edit", surface: "read", evidence: "read", snap: "read" }[name] ?? name;
     const record = { name: command, adapter: name, args: traceArgs(args), time: Date.now() };
@@ -401,11 +407,12 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     // Windows command shims need shell handling; preserve the existing route there.
     supportsNativeArgv: () => process.platform !== "win32" && !hostTool("bash") && !executors.has("bash"),
     summarizeEdit: (target, before, after, diff) => hooks.summarizeEdit(getCwd(), target, before, after, diff),
-    invalidateFiles() { vfs.invalidateCache(); index.invalidate(); clearPathCache(); },
+    invalidateFiles() { vfs.invalidateObserved(); index.invalidate(); clearPathCache(); },
     describeMemory() {
       const overlays = vfs.describeOverlays();
 
-      return { vfsCacheBytes: vfs.getCacheBytes(), indexBytes: index.getEntryBytes(), overlayFiles: overlays.files, overlayBytes: overlays.bytes };
+      // No body cache: reads always hit disk, so retained VFS bytes are always zero.
+      return { vfsCacheBytes: 0, indexBytes: index.getEntryBytes(), overlayFiles: overlays.files, overlayBytes: overlays.bytes };
     },
     fileOperations: {
       access: (target, mode) => fs.access(target, mode),
@@ -431,7 +438,6 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     beginSpeculation,
     commitSpeculation,
     rollbackSpeculation,
-    getVfsCacheSize: () => vfs.getCacheSize(),
     getOverlayDepth: () => vfs.getOverlayDepth(),
     call,
     callMany,

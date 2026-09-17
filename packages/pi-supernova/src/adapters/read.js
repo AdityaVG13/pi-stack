@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isString, isNumber, isObject, looksLikePath } from "../shared/decode.js";
+import { isString, isNumber } from "../shared/decode.js";
 import { extractStructuralSurface } from "../context/surface.js";
 import { pickSpan } from "../context/spans.js";
 import { executeSnap, tokenizeQuery, stem } from "../context/snap.js";
@@ -239,14 +239,11 @@ export function createRead(ctx) {
     const satisfied = (scan.done && scan.startByte + scan.collected >= scan.doneByte) || scan.startByte + scan.collected >= stat.size;
     const whole = startLine === 1 && scan.startByte === 0 && scan.startByte + scan.collected >= stat.size;
     await vfs.recordExpected(targetPath, stat);
-    if (whole) vfs.setCache(targetPath, text);
 
     return { text, satisfied, whole };
   }
 
   function emptyWindow(targetPath, stat) {
-    if (stat.size === 0) vfs.setCache(targetPath, "");
-
     return { text: "", satisfied: true, whole: stat.size === 0 };
   }
 
@@ -758,7 +755,7 @@ export function createRead(ctx) {
         signal,
       });
 
-      return textResult(JSON.stringify(res, null, 2), res);
+      return textResult(JSON.stringify(res), res);
   }
 
   function evidenceOptions(params) {
@@ -795,7 +792,7 @@ export function createRead(ctx) {
       const ext = path.extname(target);
       const outline = extractStructuralSurface(text, ext);
 
-      return textResult(JSON.stringify(outline, null, 2), { path: target, count: outline.items.length });
+      return textResult(JSON.stringify(outline), { path: target, count: outline.items.length });
   }
 
   return {

@@ -2,7 +2,7 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { engineFixture } from "../helpers/engine.mjs";
+import { engineFixture, gatedExecute, GUEST_GATE_POLL } from "../helpers/engine.mjs";
 
 it("patch deletions retain post-edit coordinates after earlier hunks shift source", async t => {
   const f = await engineFixture(t);
@@ -30,10 +30,11 @@ it("commit rejects a previously checked symlink retargeted outside the workspace
   await assert.rejects(f.execute('await write("link/item.txt","inside"); await bash({command:process.execPath,args:["-e",'+JSON.stringify(swap)+']}); await write("link/item.txt","escaped");'),/escapes workspace/);
   assert.equal(await fs.readFile(path.join(outside,"item.txt"),"utf8"),"outside");
   await fs.symlink("inside",path.join(f.root,"commit-link"));
-  const pending = f.execute('await write("commit-link/item.txt","staged"); await new Promise(resolve => setTimeout(resolve, 400));');
-  await new Promise(resolve => setTimeout(resolve, 80));
+  const { pending, gate } = gatedExecute(f, `await write("commit-link/item.txt","staged"); ${GUEST_GATE_POLL}`, record => record.name === "write" && record.ok === true);
+  await gate;
   await fs.rename(path.join(f.root,"commit-link"), path.join(f.root,"old-commit-link"));
   await fs.symlink(outside, path.join(f.root,"commit-link"));
+  await f.write("go.txt", "go");
   await assert.rejects(pending,/escapes workspace/);
   assert.equal(await fs.readFile(path.join(outside,"item.txt"),"utf8"),"outside");
 });
@@ -41,10 +42,10 @@ it("commit rejects a previously checked symlink retargeted outside the workspace
 it("write preserves the original explicit-read expectation across its internal diff read", async t => {
   const f = await engineFixture(t);
   await f.write("state.txt","left=old\nright=old\n");
-  const external=JSON.stringify(path.join(f.root,"state.txt"));
-  const pending = f.execute('const previous=await read("state.txt"); await new Promise(resolve => setTimeout(resolve, 400)); await write({path:"state.txt",content:previous.replace("left=old","left=new"),replace:true});');
-  await new Promise(resolve => setTimeout(resolve, 80));
+  const { pending, gate } = gatedExecute(f, 'const previous=await read("state.txt"); ' + GUEST_GATE_POLL + ' await write({path:"state.txt",content:previous.replace("left=old","left=new"),replace:true});', record => record.name === "read" && record.ok === true);
+  await gate;
   await fs.writeFile(path.join(f.root,"state.txt"),"left=old\nright=external\n");
+  await f.write("go.txt", "go");
   await assert.rejects(pending,/write conflict/);
   assert.equal(await fs.readFile(path.join(f.root,"state.txt"),"utf8"),"left=old\nright=external\n");
 });

@@ -2,7 +2,7 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { engineFixture, limits } from "../helpers/engine.mjs";
+import { engineFixture, gatedExecute, limits, GUEST_GATE_POLL } from "../helpers/engine.mjs";
 import { createHostBridge } from "../../src/bridge/host-bridge.js";
 
 // Intent: every successful read owns a byte snapshot until a fresh read or an
@@ -10,14 +10,14 @@ import { createHostBridge } from "../../src/bridge/host-bridge.js";
 for (const append of [false, true]) it(`partial-read CAS rejects external changes before ${append ? "append" : "overwrite"}`, async t => {
   const f = await engineFixture(t);
   await f.write("state.txt", "old\ntail\n");
-  const absolute = JSON.stringify(path.join(f.root, "state.txt"));
-  const pending = f.execute(`
+  const { pending, gate } = gatedExecute(f, `
     const previous = await read("state.txt", 1, 1);
-    await new Promise(resolve => setTimeout(resolve, 400));
+    ${GUEST_GATE_POLL}
     await write({path:"state.txt",content:previous,append:${append},replace:true});
-  `);
-  await new Promise(resolve => setTimeout(resolve, 80));
+  `, record => record.name === "read" && record.ok === true);
+  await gate;
   await fs.writeFile(path.join(f.root, "state.txt"), "external\ntail\n");
+  await f.write("go.txt", "go");
   await assert.rejects(pending, /write conflict/);
   assert.equal(await fs.readFile(path.join(f.root, "state.txt"), "utf8"), "external\ntail\n");
 });
@@ -25,16 +25,16 @@ for (const append of [false, true]) it(`partial-read CAS rejects external change
 it("a fresh partial reread replaces the old full-read CAS snapshot", async t => {
   const f = await engineFixture(t);
   await f.write("state.txt", "old\ntail\n");
-  const absolute = JSON.stringify(path.join(f.root, "state.txt"));
-  const pending = f.execute(`
+  const { pending, gate } = gatedExecute(f, `
     await read("state.txt");
-    await new Promise(resolve => setTimeout(resolve, 400));
+    ${GUEST_GATE_POLL}
     const fresh = await read("state.txt", 1, 1);
     if (fresh !== "new\\n") throw Error("reread was stale");
     await write({path:"state.txt",content:fresh + "tail\\n",replace:true});
-  `);
-  await new Promise(resolve => setTimeout(resolve, 80));
+  `, record => record.name === "read" && record.ok === true);
+  await gate;
   await fs.writeFile(path.join(f.root, "state.txt"), "new\ntail\n");
+  await f.write("go.txt", "go");
   await pending;
   assert.equal(await fs.readFile(path.join(f.root, "state.txt"), "utf8"), "new\ntail\n");
 });
@@ -43,15 +43,15 @@ it("a read window above 16 MiB still protects against a lost update", async t =>
   const f = await engineFixture(t);
   const body = "old\n" + "x".repeat(17 * 1024 * 1024);
   await f.write("large.txt", body);
-  const absolute = JSON.stringify(path.join(f.root, "large.txt"));
-  const pending = f.execute(`
+  const { pending, gate } = gatedExecute(f, `
     const previous = await read("large.txt", 1, 1);
-    await new Promise(resolve => setTimeout(resolve, 400));
+    ${GUEST_GATE_POLL}
     await write({path:"large.txt",content:previous,replace:true});
-  `);
-  await new Promise(resolve => setTimeout(resolve, 80));
+  `, record => record.name === "read" && record.ok === true);
+  await gate;
   const handle = await fs.open(path.join(f.root, "large.txt"), "r+");
   try { await handle.write("NEW", 0, "utf8"); } finally { await handle.close(); }
+  await f.write("go.txt", "go");
   await assert.rejects(pending, /write conflict/);
   assert.equal(await fs.readFile(path.join(f.root, "large.txt"), "utf8"), "NEW" + body.slice(3));
 });
@@ -200,16 +200,16 @@ it("additional: large focused disk reads retain a CAS snapshot", async t => {
   const f = await engineFixture(t);
   const body = "old\n" + "noise\n".repeat(90000) + "needle\n";
   await f.write("focus.log", body);
-  const absolute = JSON.stringify(path.join(f.root, "focus.log"));
-  const pending = f.execute(`
+  const { pending, gate } = gatedExecute(f, `
     const view = await read("focus.log", {about:"needle"});
     if (!view.includes("needle")) throw Error("focus failed to open source");
-    await new Promise(resolve => setTimeout(resolve, 400));
+    ${GUEST_GATE_POLL}
     await write({path:"focus.log",content:"replacement\\n",replace:true});
-  `);
-  await new Promise(resolve => setTimeout(resolve, 80));
+  `, record => record.name === "read" && record.ok === true);
+  await gate;
   const handle = await fs.open(path.join(f.root, "focus.log"), "r+");
   try { await handle.write("NEW", 0, "utf8"); } finally { await handle.close(); }
+  await f.write("go.txt", "go");
   await assert.rejects(pending, /write conflict/);
   assert.equal(await fs.readFile(path.join(f.root, "focus.log"), "utf8"), "NEW" + body.slice(3));
 });
@@ -221,4 +221,20 @@ it("additional: new-file symlink aliases cannot silently overwrite one another",
   await assert.rejects(f.execute('await write("real/new.txt","first"); await write("alias/new.txt","second");'), /conflicting write aliases/);
   await assert.rejects(fs.access(path.join(f.root, "real/new.txt")), {code:"ENOENT"});
   assert.equal((await fs.lstat(path.join(f.root, "alias"))).isSymbolicLink(), true);
+});
+
+// Intent: routing validation runs before budget charging, so refused calls are
+// free and an exhausted budget never masks an unknown or excluded tool name.
+it("refused tool calls do not consume the host call budget", async t => {
+  const f = await engineFixture(t);
+  await f.write("a.txt", "raw\n");
+  const bridge = createHostBridge({ pi: null, config: { ...limits, maxBridgeCalls: 2 }, getCwd: () => f.root });
+
+  try {
+    for (let i = 0; i < 3; i++) await assert.rejects(bridge.call("no-such-tool", {}), /unknown tool/);
+    await assert.rejects(bridge.call("supernova", {}), /blocked/);
+    assert.equal((await bridge.call("read", { path: "a.txt" })).ok, true);
+    assert.equal((await bridge.call("read", { path: "a.txt" })).ok, true);
+    await assert.rejects(bridge.call("read", { path: "a.txt" }), /budget exceeded/);
+  } finally { bridge.close(); }
 });

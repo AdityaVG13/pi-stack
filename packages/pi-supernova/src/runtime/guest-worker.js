@@ -95,16 +95,6 @@ function unwrapRead(res, args) {
   return value;
 }
 
-function unwrapJsonValue(res) {
-  const value = unwrapValue(res);
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
-  }
-}
-
 /** Keep details/truncated reachable but out of the returned literal unless they carry signal. */
 function leanEnvelope(res) {
   if (!isObject(res)) return res;
@@ -485,6 +475,14 @@ function sealGuestRealm() {
   if (isFunction(process.dlopen)) {
     process.dlopen = () => {
       throw new Error("guest cannot load native modules; use read, edit, write, or bash");
+    };
+  }
+
+  if (isFunction(process.kill)) {
+    // Signals are process-wide: process.kill escapes the worker thread and can
+    // terminate the host, so it stays out of the guest. Stop things with bash.
+    process.kill = () => {
+      throw new Error("process.kill is not available in guest programs; stop processes with bash");
     };
   }
 }

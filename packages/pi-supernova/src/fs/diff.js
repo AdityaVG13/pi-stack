@@ -1,6 +1,9 @@
 
 import { isString } from "../shared/decode.js";
 
+/** Receipts render at most this many matches; totals still cover every match. */
+export const MAX_DIFF_MATCHES = 32;
+
 export function buildEditDiff(filePath, originalText, oldText, newText) {
   const fileLines = contentLines(originalText);
   const idx = isString(originalText) ? originalText.indexOf(oldText) : -1;
@@ -39,7 +42,8 @@ export function buildEditDiff(filePath, originalText, oldText, newText) {
 }
 
 export function buildMultiEditDiff(filePath, originalText, replacements) {
-  const parts = replacements.map(({ oldText, newText }) =>
+  const rendered = replacements.slice(0, MAX_DIFF_MATCHES);
+  const parts = rendered.map(({ oldText, newText }) =>
     buildEditDiff(filePath, originalText, oldText, newText),
   );
 
@@ -53,15 +57,16 @@ export function buildMultiEditDiff(filePath, originalText, replacements) {
         : { ...line, newLineNum: Math.max(1, line.lineNum + shift) });
     }
 
-    shift += replacements[index].newText.split("\n").length - replacements[index].oldText.split("\n").length;
+    shift += rendered[index].newText.split("\n").length - rendered[index].oldText.split("\n").length;
   }
 
   return {
     path: filePath,
     op: "edit",
-    added: parts.reduce((sum, part) => sum + part.added, 0),
-    removed: parts.reduce((sum, part) => sum + part.removed, 0),
+    added: replacements.reduce((sum, r) => sum + contentLines(r.newText).length, 0),
+    removed: replacements.reduce((sum, r) => sum + contentLines(r.oldText).length, 0),
     lines,
+    omittedMatches: replacements.length - rendered.length,
   };
 }
 
@@ -71,22 +76,28 @@ function classifyPatchLine(line) {
   return PATCH_LINE_KINDS[line[0]] || null;
 }
 
-export function buildPatchDiff(filePath, patchText) {
+export function buildPatchDiff(filePath, patchText, relocations = []) {
   const patchLines = isString(patchText) ? patchText.replace(/\r\n/g, "\n").split("\n") : [];
+  const shiftByHunk = new Map(relocations.map(entry => [entry.hunk, entry.offset]));
   const lines = [];
   let added = 0;
   let removed = 0;
   let oldLineNum = 1;
   let newLineNum = 1;
   let inHunk = false;
+  let hunkIndex = 0;
+  let relocatedBy = 0;
 
   for (const patchLine of patchLines) {
     const headerMatch = (/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?/).exec(patchLine);
 
     if (headerMatch) {
+      // Headers already carry length deltas, so only drift relocates the receipt.
+      hunkIndex += 1;
+      relocatedBy += shiftByHunk.get(hunkIndex) ?? 0;
       // A zero-length range names the line before the insertion/deletion point.
-      oldLineNum = Number(headerMatch[1]) + Number(headerMatch[2] === "0");
-      newLineNum = Number(headerMatch[3]) + Number(headerMatch[4] === "0");
+      oldLineNum = Number(headerMatch[1]) + Number(headerMatch[2] === "0") + relocatedBy;
+      newLineNum = Number(headerMatch[3]) + Number(headerMatch[4] === "0") + relocatedBy;
       inHunk = true;
       continue;
     }

@@ -140,7 +140,7 @@ class ProgramBatch {
 
   async runParallel() {
     const limit = Math.min(this.programs.length, MAX_PARALLEL_PROGRAMS);
-    const settled = new Array(this.programs.length);
+    const settled = Array.from({ length: this.programs.length });
     let next = 0;
 
     await Promise.all(Array.from({length: limit}, async () => {

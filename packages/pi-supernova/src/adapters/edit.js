@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { isString, isNumber } from "../shared/decode.js";
-import { buildEditDiff, buildMultiEditDiff, buildPatchDiff } from "../fs/diff.js";
+import { buildEditDiff, buildMultiEditDiff, buildPatchDiff, MAX_DIFF_MATCHES } from "../fs/diff.js";
 import { declaredName, WorkspaceIndex } from "../context/repo-index.js";
 import { quickCheck } from "../fs/check.js";
 import { applyPatchToText } from "../fs/patch.js";
@@ -12,7 +12,7 @@ import {
 } from "../fs/text-ops.js";
 
 export function createEdit(ctx) {
-  const { getCwd, vfs, config, index, ledger, hooks } = ctx;
+  const { getCwd, vfs, index, ledger } = ctx;
   function lineAt(updated, newLines, n) {
     if (newLines) return newLines[n - 1] ?? "";
     const { start, end } = lineTextRange(updated, n);
@@ -68,6 +68,8 @@ export function createEdit(ctx) {
     const newLines = updated.length <= 512 * 1024 ? updated.split("\n") : null;
     const lineCount = newLines ? newLines.length : contentLineInfo(updated).count;
     let out = formatEditBlocks(rel, updated, newLines, collectEditRanges(span, diff, lineCount));
+
+    if (diff?.omittedMatches) out += `\n…${diff.omittedMatches} more matches (receipt shows the first ${MAX_DIFF_MATCHES})`;
     const check = updated.length <= QUICK_CHECK_MAX_CHARS ? quickCheck(updated, path.extname(target)) : null;
 
     if (check && !check.ok) out += `\ncheck: ${check.message}`;
@@ -226,17 +228,20 @@ export function createEdit(ctx) {
       if (signal?.aborted) throw new Error("aborted");
       const original = await readPatchOriginal(target);
       if (original.length > 2 * 1024 * 1024) throw new Error("apply_patch input exceeds 2 MiB; use edit() for targeted replacements");
-      const { resultText, hunkCount } = applyPatchToText(original, params.patch);
+      const { resultText, hunkCount, relocations } = applyPatchToText(original, params.patch);
       const { speculative } = await vfs.write(target, resultText);
-      const diff = buildPatchDiff(target, params.patch);
+      const diff = buildPatchDiff(target, params.patch, relocations);
       index.touch(relativeSlash(cwd, target));
-      const summary = await editSummary(cwd, target, original, resultText, diff, signal);
+      let summary = await editSummary(cwd, target, original, resultText, diff, signal);
+
+      if (relocations.length) summary += "\nrelocated " + relocations.map(entry => "#" + entry.hunk + " " + (entry.offset > 0 ? "+" : "") + entry.offset + " lines").join(", ");
 
       return textResult(summary, {
         path: target,
         hunks: hunkCount,
         speculative,
         diff,
+        relocated: relocations,
       });
   }
 

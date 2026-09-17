@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { homedir } from "node:os";
 import { isString, isNumber, isObject } from "../shared/decode.js";
 import { assertFilesystemPath } from "./workspace.js";
+import { MAX_DIFF_MATCHES } from "./diff.js";
 
 const JSON_TWO_BYTE = new Set([0x22, 0x5c, 8, 9, 10, 12, 13]);
 
@@ -449,19 +450,22 @@ export function contentLineInfo(text, previewLimit = 0) {
 }
 
 export function boundedEditDiff(target, original, matches) {
+  const rendered = matches.slice(0, MAX_DIFF_MATCHES);
   const lines = [];
   let shift = 0;
   let added = 0;
   let removed = 0;
 
   for (const match of matches) {
+    removed += contentLineInfo(match.oldText).count;
+    added += contentLineInfo(match.newText).count;
+  }
+
+  for (const match of rendered) {
     const oldInfo = contentLineInfo(match.oldText, 32);
     const newInfo = contentLineInfo(match.newText, 32);
     const start = lineNumberAt(original, match.index);
     const nextStart = start + shift;
-
-    removed += oldInfo.count;
-    added += newInfo.count;
 
     for (let i = 0; i < oldInfo.preview.length; i++) lines.push({ type: "remove", lineNum: start + i, newLineNum: nextStart + i, text: oldInfo.preview[i] });
     for (let i = 0; i < newInfo.preview.length; i++) lines.push({ type: "add", lineNum: nextStart + i, newLineNum: nextStart + i, text: newInfo.preview[i] });
@@ -469,7 +473,7 @@ export function boundedEditDiff(target, original, matches) {
     shift += newInfo.newlines - oldInfo.newlines;
   }
 
-  return { path: target, op: "edit", added, removed, lines };
+  return { path: target, op: "edit", added, removed, lines, omittedMatches: matches.length - rendered.length };
 }
 
 export function boundedWriteDiff(target, content, removed) {

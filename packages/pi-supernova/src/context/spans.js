@@ -1,7 +1,8 @@
 import { truncateChars } from "../output/format.js";
+import { isString } from "../shared/decode.js";
 
 export function pickSpan(spans, { line, name } = {}) {
-  const needle = typeof name === "string" && /^[A-Za-z_$][\w$]*$/.test(name.trim()) ? name.trim().toLowerCase() : "";
+  const needle = isString(name) && /^[A-Za-z_$][\w$]*$/.test(name.trim()) ? name.trim().toLowerCase() : "";
   const named = needle ? spans.filter(item => item.name.toLowerCase() === needle) : [];
 
   if (named.length === 1) return named[0];
