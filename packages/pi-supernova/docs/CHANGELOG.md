@@ -20,8 +20,9 @@
   BIND DAG unchanged.
 - Guest isolate: no `fs` / `child_process` / `import` / `require`. After `read()`
   of a path, `write()` of that path throws (use `edit`, or `replace:true`).
-  Raw reads of large JSON/source require `json` / `about` / offset or
-  `complete:true`.
+  Raw reads of large source require `about` / offset or `complete:true`;
+  large JSON returns a shape routing value (top-level keys, or length for
+  arrays) instead of throwing.
 - Standing reference stays one nova invocation: prefer `edit` after `read`,
   `json`/about/`complete:true` for large files, no guest `fs`, and
   `programs`/`parallel:true` for independent work *inside* one call. Overlapping
@@ -38,6 +39,11 @@
 - JSON selectors accept array `.length` (for example `.items.length`) so a
   catalog count does not require dumping the array. String `.length` is still
   rejected; this is not jq.
+- Raw reads of JSON above the bound return a shape routing value instead of
+  throwing: `{status:"too_large", path, chars, keys}` for objects (`length`
+  for top-level arrays), so the same program can project with `json:".field"`
+  and array reads survive one oversize member. Malformed JSON still throws;
+  non-JSON text still returns verbatim.
 
 ### Changed
 

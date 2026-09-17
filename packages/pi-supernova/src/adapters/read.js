@@ -8,7 +8,7 @@ import { selectEvidence } from "../context/evidence.js";
 import { WorkspaceIndex } from "../context/repo-index.js";
 import { outlineFile } from "../context/outline.js";
 import { MAX_JSON_BYTES, jsonProjector } from "../fs/json-read.js";
-import { normalizeRead, classifyRead, needsProbe, SESSION_URI } from "../contract/read.js";
+import { normalizeRead, classifyRead, needsProbe, SESSION_URI, buildJsonRouting, routingText } from "../contract/read.js";
 import { resolveWorkspacePath, runCommand, relativeSlash } from "../fs/workspace.js";
 import {
   textResult, sliceLinesRawInfo, sliceLinesRaw,
@@ -17,7 +17,7 @@ import {
   formatDirectoryEntry, formatLsEntry, MAX_DIRECTORY_ENTRIES,
   jsonStringLength, maxJsonStringPrefix,
 } from "../fs/text-ops.js";
-import { imageTooLarge, missingFile, IMAGE_MAX_BYTES, LARGE_FILE_BYTES, ABOUT_TOKEN_MAX, IMAGE_MIME, RAW_JSON_CHARS, RAW_SOURCE_CHARS, RAW_SOURCE_LINES } from "./errors.js";
+import { imageTooLarge, missingFile, IMAGE_MAX_BYTES, LARGE_FILE_BYTES, ABOUT_TOKEN_MAX, IMAGE_MIME, RAW_JSON_CHARS, RAW_SOURCE_CHARS, RAW_SOURCE_LINES, ROUTING_MAX_CHARS } from "./errors.js";
 import { outlineOptions, recordOutlineOrigins, createReferenceFinder } from "./refs.js";
 
 export function createRead(ctx) {
@@ -585,8 +585,26 @@ export function createRead(ctx) {
     return jsonStringLength(sliced) <= budget;
   }
 
-  function clipToBudget(rel, targetPath, sliced, firstLine, budget, explicit, params) {
+  function jsonRoutingResult(rel, targetPath, text) {
+    const routing = routingText(buildJsonRouting(rel, text));
+
+    if (routing.length > ROUTING_MAX_CHARS) throw new Error("routing response exceeds its budget");
+
+    return textResult(routing, { path: targetPath, routed: true, complete: false });
+  }
+
+  async function routeWindowedJson(rel, targetPath) {
+    try {
+      return jsonRoutingResult(rel, targetPath, await vfs.read(targetPath, { maxBytes: MAX_JSON_BYTES, label: "JSON input" }));
+    } catch { return null; }
+  }
+
+  async function clipToBudget(rel, targetPath, sliced, firstLine, budget, explicit, params) {
     if (!explicit && !params.resolve && path.extname(targetPath).toLowerCase() === ".json") {
+      const routed = await routeWindowedJson(rel, targetPath);
+
+      if (routed) return routed;
+
       throw new Error("incomplete JSON read of " + rel + "; use the json selector option to parse the whole document before projection, or explicit offset/limit for raw text windows");
     }
 
@@ -613,15 +631,16 @@ export function createRead(ctx) {
       || isNumber(params.offset) || isNumber(params.limit) || params.resolve === true || params.evidence === true;
   }
 
-  function assertRawSize(rel, targetPath, loaded, params) {
-    if (rawReadSelected(params)) return;
-    if (SESSION_URI.test(rel)) return;
-    if (loaded.windowed && loaded.windowWhole !== true) return;
+  function checkRawSize(rel, targetPath, loaded, params) {
+    if (rawReadSelected(params)) return null;
+    if (SESSION_URI.test(rel)) return null;
+    if (loaded.windowed && loaded.windowWhole !== true) return null;
     const n = loaded.text.length;
     const ext = path.extname(targetPath).toLowerCase();
 
     if (ext === ".json" && n > RAW_JSON_CHARS) {
-      throw new Error("raw JSON read of " + rel + " is " + n + " chars; use json:\".field\" (or .length), offset/limit, or complete:true");
+      try { return jsonRoutingResult(rel, targetPath, loaded.text); }
+      catch { throw new Error("raw JSON read of " + rel + " is " + n + " chars; use json:\".field\" (or .length), offset/limit, or complete:true"); }
     }
 
     const lines = contentLineInfo(loaded.text).count;
@@ -629,6 +648,8 @@ export function createRead(ctx) {
     if (n > RAW_SOURCE_CHARS || lines > RAW_SOURCE_LINES) {
       throw new Error("raw read of " + rel + " is " + lines + " lines; use about, offset/limit, or complete:true");
     }
+
+    return null;
   }
 
   async function maybeImage(rel, targetPath, signal) {
@@ -679,7 +700,9 @@ export function createRead(ctx) {
     const explicit = isNumber(params?.offset) || isNumber(params?.limit);
     const budget = readBudget(params.resolve);
     const loaded = await loadText(targetPath, params, query, budget, signal);
-    assertRawSize(rel, targetPath, loaded, params);
+    const routed = checkRawSize(rel, targetPath, loaded, params);
+
+    if (routed) return routed;
     index.touch(rel);
     const needsIndex = isString(params?.about) || (params.resolve && isString(query));
     const entry = needsIndex ? WorkspaceIndex.fromText(targetPath, loaded.text) : null;
@@ -690,7 +713,7 @@ export function createRead(ctx) {
     const view = fileView(loaded, span, sourceLine, budget, params);
     assertComplete(rel, view.sliced, loaded, budget, params);
 
-    if (view.overBudget) return clipToBudget(rel, targetPath, view.sliced, view.firstLine, budget, explicit, params);
+    if (view.overBudget) return await clipToBudget(rel, targetPath, view.sliced, view.firstLine, budget, explicit, params);
 
     return textFileResult(rel, targetPath, loaded, span, view, explicit);
   }

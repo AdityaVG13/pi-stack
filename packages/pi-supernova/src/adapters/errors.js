@@ -7,6 +7,9 @@ export const RAW_JSON_CHARS = 4096;
 export const RAW_SOURCE_CHARS = 8192;
 
 export const RAW_SOURCE_LINES = 160;
+
+/** Routing responses above this fall back to the bound error instead of dumping. */
+export const ROUTING_MAX_CHARS = 4096;
 export const ABOUT_TOKEN_MAX = 16;
 export const IMAGE_MIME = {
   ".png": "image/png",

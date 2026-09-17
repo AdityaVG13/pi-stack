@@ -1,4 +1,4 @@
-import { isString, isObject, looksLikePath } from "../shared/decode.js";
+import { isString, isObject, isNumber, looksLikePath } from "../shared/decode.js";
 import { sessionJsonArgs, validateJsonRead } from "../fs/json-read.js";
 
 export const SESSION_URI = /^(?:agent|artifact):\/\//i;
@@ -141,16 +141,63 @@ function jsonSelectorNote(args) {
   return args.json === undefined ? "" : " (" + (Array.isArray(args.json) ? args.json.join(", ") : String(args.json)) + ")";
 }
 
-function shouldDecodeRead(args, value) {
+export const ROUTING_STATUS = "too_large";
+
+const ROUTING_PREFIX = '{"status":"too_large",';
+
+export const ROUTING_KEYS_MAX = 32;
+
+export function isRoutingPayload(value) {
+  return isString(value) && value.startsWith(ROUTING_PREFIX);
+}
+
+function isRoutingObject(parsed) {
+  return isObject(parsed) && parsed.status === ROUTING_STATUS && isString(parsed.path)
+    && isNumber(parsed.chars) && (Array.isArray(parsed.keys) || isNumber(parsed.length));
+}
+
+/** Shape of an over-bound JSON document for in-band routing. Throws when text is not JSON. */
+export function buildJsonRouting(rel, text) {
+  const document = JSON.parse(text);
+  const base = { status: ROUTING_STATUS, path: rel, chars: text.length };
+
+  if (Array.isArray(document)) return { ...base, length: document.length };
+
+  if (isObject(document)) {
+    const keys = Object.keys(document);
+
+    return keys.length > ROUTING_KEYS_MAX
+      ? { ...base, keys: keys.slice(0, ROUTING_KEYS_MAX), keysTruncated: true }
+      : { ...base, keys };
+  }
+
+  return base;
+}
+
+export function routingText(routing) {
+  const text = JSON.stringify(routing);
+
+  if (!isRoutingPayload(text)) throw new Error("routing payload must start with the shared marker");
+
+  return text;
+}
+
+function decodeByArgs(args, value) {
   return (args.resolve || args.json !== undefined || args.outline || args.evidence) && isString(value);
 }
 
 export function decodeReadValue(args, value) {
-  if (!shouldDecodeRead(args, value)) return value;
+  const sniffed = isRoutingPayload(value);
+
+  if (!sniffed && !decodeByArgs(args, value)) return value;
 
   try {
-    return JSON.parse(value);
+    const parsed = JSON.parse(value);
+
+    return sniffed && !isRoutingObject(parsed) ? value : parsed;
   } catch (error) {
+    if (sniffed && !decodeByArgs(args, value)) return value;
+
     throw new Error("JSON read failed for " + String(args.path ?? args.target ?? "resource") + jsonSelectorNote(args) + ": " + (error instanceof Error ? error.message : String(error)));
   }
 }

@@ -42,8 +42,11 @@ it("raw reads of large JSON and source require a selector", async t => {
   const f = await engineFixture(t);
   const json = JSON.stringify({ version: 3, items: Array.from({ length: 200 }, (_, i) => ({ id: i, blob: "x".repeat(40) })) });
   await f.write("catalog.json", json);
-  const jsonMsg = await rejection(f.execute('return await read("catalog.json");'));
-  assert.match(jsonMsg, /raw JSON read.*json:/);
+  const routed = (await f.execute('return await read("catalog.json");')).details.result;
+  assert.equal(routed.status, "too_large");
+  assert.equal(routed.path, "catalog.json");
+  assert.equal(routed.chars, json.length);
+  assert.deepEqual(routed.keys, ["version", "items"]);
   assert.equal((await f.execute('return await read({path:"catalog.json",json:".version"});')).details.result, 3);
   const lines = Array.from({ length: 200 }, (_, i) => `export const k${i} = ${i};`);
   lines[137] = "export function ledgerAt(i) { return i; }";
@@ -52,4 +55,27 @@ it("raw reads of large JSON and source require a selector", async t => {
   assert.match(srcMsg, /raw read of ledger.js.*about/);
   const about = (await f.execute('return await read("ledger.js",{about:"ledgerAt"});')).details.result;
   assert.match(about, /function ledgerAt/);
+});
+
+it("JSON routing covers arrays and windowed reads, and falls back verbatim", async t => {
+  const f = await engineFixture(t);
+  const json = JSON.stringify({ version: 3, items: Array.from({ length: 200 }, (_, i) => ({ id: i, blob: "x".repeat(40) })) });
+  await f.write("catalog.json", json);
+  await f.write("note.txt", "hello");
+  const slots = (await f.execute('return await read(["note.txt","catalog.json"]);')).details.result;
+  assert.equal(slots[0], "hello");
+  assert.equal(slots[1].status, "too_large");
+  assert.deepEqual(slots[1].keys, ["version", "items"]);
+  const huge = JSON.stringify({ token: "t", rows: Array.from({ length: 3000 }, (_, i) => ({ id: i, blob: "y".repeat(40) })) });
+  assert.ok(huge.length > 130000);
+  await f.write("huge.json", huge);
+  const win = (await f.execute('return await read("huge.json");')).details.result;
+  assert.equal(win.status, "too_large");
+  assert.deepEqual(win.keys, ["token", "rows"]);
+  await f.write("broken.json", '{"version": 3, oops ' + "x".repeat(5000));
+  const brokenMsg = await rejection(f.execute('return await read("broken.json");'));
+  assert.match(brokenMsg, /raw JSON read of broken\.json is \d+ chars; use json:"\.field" \(or \.length\), offset\/limit, or complete:true/);
+  await f.write("marker.txt", '{"status":"too_large", oops ' + "z".repeat(5000));
+  const marker = (await f.execute('return await read("marker.txt");')).details.result;
+  assert.ok(marker.startsWith('{"status":"too_large",')); // verbatim string, not a routing object
 });
