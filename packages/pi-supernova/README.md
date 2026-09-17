@@ -21,6 +21,15 @@ transactional file operations, batching, bounded results and the grouped nova UI
   length without dumping the array.
 - Prefer `edit` for a file you already read; `write` still replaces the file.
 
+## What is new in 0.7.0
+
+- **Faster batches:** guest workers pipeline their successor, so sequential
+  programs run about twice as fast with no token cost.
+- **Hardened guest:** `process.kill` is sealed out; patch hunks report
+  relocation and ambiguous hunks fail instead of misapplying.
+- **Leaner receipts:** multi-edit output caps at 32 matches with exact totals,
+  write receipts go workspace-relative, evidence/outline reads go compact.
+
 ## What is new in 0.6.0
 
 - **Shared batch input:** supply top-level `data` once; each program gets an
@@ -52,12 +61,12 @@ pi install /path/to/pi-stack/packages/pi-supernova
 
 Git pushes do not update npm installations. Publish the new npm version first;
 then reinstall it in the host. Reinstall explicitly when an existing version
-range excludes the new minor version (`^0.5.0` excludes `0.6.0`). After 0.6.0 is
+range excludes the new minor version (`^0.6.0` excludes `0.7.0`). After 0.7.0 is
 published, pin that release with:
 
 ```bash
-pi install npm:pi-supernova@0.6.0
-omp install npm:pi-supernova@0.6.0
+pi install npm:pi-supernova@0.7.0
+omp install npm:pi-supernova@0.7.0
 ```
 
 In Pi, `pi list` shows the configured package sources. A local path uses that

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.7.0] - 2026-09-17
+
 ### Internals
 
 - Shared `src/contract/` for read/edit/bash shapes. Guest and host classify once;
