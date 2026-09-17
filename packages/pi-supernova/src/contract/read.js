@@ -182,6 +182,23 @@ export function routingText(routing) {
   return text;
 }
 
+/** Shape of one over-budget selection for in-band routing; value is already parsed. */
+export function buildSelectionRouting(rel, selector, value, chars) {
+  const base = { status: ROUTING_STATUS, path: rel, selector, chars };
+
+  if (Array.isArray(value)) return { ...base, length: value.length };
+
+  if (isObject(value)) {
+    const keys = Object.keys(value);
+
+    return keys.length > ROUTING_KEYS_MAX
+      ? { ...base, keys: keys.slice(0, ROUTING_KEYS_MAX), keysTruncated: true }
+      : { ...base, keys };
+  }
+
+  return base;
+}
+
 function decodeByArgs(args, value) {
   return (args.resolve || args.json !== undefined || args.outline || args.evidence) && isString(value);
 }

@@ -2,7 +2,7 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { warmGuestWorker } from "../../src/runtime/runtime.js";
+import { warmGuestWorker, formatMemoryAttribution } from "../../src/runtime/runtime.js";
 import { engineFixture, limits } from "../helpers/engine.mjs";
 import { runCommand } from "../../src/fs/workspace.js";
 
@@ -88,4 +88,26 @@ it("shell session environment comes from the current execution context", async t
   });
 
   assert.equal(result.details.result, "fixture-session|fixture-model|high");
+});
+
+it("a memory-limit trip names the operation and splits tracked from untracked growth", () => {
+  const message = formatMemoryAttribution({
+    limitMb: 512, rssBytes: 1200 * 1048576, startBytes: 400 * 1048576, ms: 432, op: "edit", calls: 3,
+    tracked: { vfsCacheBytes: 1048576, indexBytes: 2097152, overlayFiles: 2, overlayBytes: 1048576 },
+  });
+
+  assert.match(message, /guest exceeded memory limit \(maxHeapMb=512\)/);
+  assert.match(message, /\+800\.0MB in 432ms during edit \(3 host calls\)/);
+  assert.match(message, /vfs cache 1\.0MB, index entries 2\.0MB, overlays 1\.0MB in 2 overlay files/);
+  assert.match(message, /~796\.0MB untracked/);
+});
+
+it("a memory-limit trip without tracked structures still reports the RSS delta", () => {
+  const message = formatMemoryAttribution({
+    limitMb: 256, rssBytes: 500 * 1048576, startBytes: 100 * 1048576, ms: 100, op: null, calls: 0, tracked: null,
+  });
+
+  assert.match(message, /guest exceeded memory limit \(maxHeapMb=256\)/);
+  assert.match(message, /\+400\.0MB in 100ms \(0 host calls\)/);
+  assert.match(message, /~400\.0MB untracked/);
 });

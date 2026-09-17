@@ -4,7 +4,7 @@ export const REFERENCE = `JavaScript async body or arrow with read, write, edit,
 read(path|paths, offset?, limit?) → raw text or text[]; read(directory) → entries[]
 read(imagePath) → image (PNG/JPEG/GIF/WebP/BMP)
 read({path,json:".field"}) → parsed JSON; .items[0:3], .items.length, quoted keys, or true; 16 MiB cap; no jq
-raw JSON over the bound returns {status:"too_large",path,keys} (length for top-level arrays); project it with json:".field"
+raw JSON or selections over budget return {status:"too_large",path,keys} (length for arrays); narrow with json:".field" or slices
 read("symbol or question") → same view as resolve:true
 read({query,resolve:true}) → {status,path,line,text,...}
 read(path,{about}) → matching windows; read({query,evidence:true}) → ranked evidence; read({path,outline:true}) → declarations

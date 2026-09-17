@@ -22,7 +22,7 @@ function normalizeArgv(args) {
 }
 
 export function normalizeBash(command, opts) {
-  const args = isObject(command) ? { ...command } : { command, ...opts };
+  const args = isObject(command) ? { ...opts, ...command } : { command, ...opts };
   normalizeArgv(args);
 
   if (args.timeout !== undefined && args.timeoutMs === undefined) args.timeoutMs = args.timeout * 1000;

@@ -35,8 +35,13 @@ it("JSON projection parses the full report before selecting fields and array sli
   assert.deepEqual(both.details.result,[false,false]);
   const array = await f.execute('return await read(["report.json","report.json"],{json:".values[2]"});');
   assert.deepEqual(array.details.result,[null,null]);
-  await assert.rejects(f.execute('return await read({path:"report.json",json:".padding"});'), /JSON selection exceeds.*budget/);
-  await assert.rejects(f.execute('return await read({path:"report.json",json:true});'), /JSON selection exceeds.*budget/);
+  const padded = (await f.execute('return await read({path:"report.json",json:".padding"});')).details.result;
+  assert.ok(padded.startsWith('{"status":"too_large",')); // primitive routing stays a marked string, not an object
+  assert.match(padded, /"selector":"\.padding"/);
+  const whole = (await f.execute('return await read({path:"report.json",json:true});')).details.result;
+  assert.equal(whole.status, "too_large");
+  assert.equal(whole.selector, ".");
+  assert.deepEqual(whole.keys, ["padding", "verdict", "values", "a.b"]);
 
   const keys = "\"padding\", \"verdict\", \"values\", \"a.b\"";
   const rejected = {
@@ -64,6 +69,27 @@ it("JSON projection parses the full report before selecting fields and array sli
   await assert.rejects(f.execute('return await read({path:"invalid.json",json:".verdict"});'), /invalid JSON/);
   await f.write("oversize.json", JSON.stringify({padding:"x".repeat(16*1024*1024)}));
   await assert.rejects(f.execute('return await read({path:"oversize.json",json:".padding"});'), /JSON input exceeds/);
+});
+
+it("over-budget nested selections route keys in-band while small siblings flow through", async t => {
+  const f = await engineFixture(t);
+  const files = Object.fromEntries(Array.from({ length: 10 }, (_, i) => ["probe" + i + ".json", { blob: "y".repeat(5000) }]));
+  await f.write("probe.json", JSON.stringify({ version: 7, files }));
+  const routed = (await f.execute('return await read({path:"probe.json",json:".files"});')).details.result;
+  assert.equal(routed.status, "too_large");
+  assert.equal(routed.selector, ".files");
+  assert.deepEqual(routed.keys, Object.keys(files));
+  assert.ok(routed.chars > 50000);
+  const mixed = (await f.execute('return await read({path:"probe.json",json:[".version",".files"]});')).details.result;
+  assert.deepEqual(mixed[0], 7);
+  assert.equal(mixed[1].status, "too_large");
+  assert.deepEqual(mixed[1].keys, Object.keys(files));
+  const wide = Object.fromEntries(Array.from({ length: 40 }, (_, i) => ["k" + i, "v".repeat(2000)]));
+  await f.write("wide.json", JSON.stringify(wide));
+  const capped = (await f.execute('return await read({path:"wide.json",json:true});')).details.result;
+  assert.equal(capped.status, "too_large");
+  assert.equal(capped.keys.length, 32);
+  assert.equal(capped.keysTruncated, true);
 });
 
 it("projected reads see staged JSON and session URI queries without losing isolation", async t => {
@@ -141,7 +167,7 @@ it("JSON reads reject a FIFO without waiting for a writer or occupying an I/O wo
   } finally { await release; }
 });
 
-it("64 oversized JSON slice selections fail within a bounded host heap and leave it usable", {skip:process.platform === "win32"}, async t => {
+it("64 oversized JSON slice selections route in-band within a bounded host heap and leave it usable", {skip:process.platform === "win32"}, async t => {
   const f = await engineFixture(t);
   await f.write("large.json",JSON.stringify({items:Array(400000).fill(0)}));
   const entry = fileURLToPath(new URL("../../index.js",import.meta.url));
@@ -151,13 +177,15 @@ it("64 oversized JSON slice selections fail within a bounded host heap and leave
     'import {registerCodeMode} from ' + JSON.stringify(entry) + ';',
     'let tool; registerCodeMode({registerTool:t=>{tool=t},getAllTools:()=>[tool],registerCommand(){},on(){}});',
     'const ctx={cwd:' + JSON.stringify(f.root) + '};',
-    'await assert.rejects(tool.execute("expansion",{code:\'return await read({path:"large.json",json:Array(64).fill(".items[0:400000]")});\'},undefined,undefined,ctx),/JSON selection exceeds/);',
+    'const routed=await tool.execute("expansion",{code:\'return await read({path:"large.json",json:Array(64).fill(".items[0:400000]")});\'},undefined,undefined,ctx);',
+    'assert.equal(routed.details.result.length,64);',
+    'assert.ok(routed.details.result.every(r=>r.status==="too_large"&&r.length===400000&&r.selector===".items[0:400000]"));',
     'const result=await tool.execute("healthy",{code:\'return await read({path:"large.json",json:".items[0:2]"});\'},undefined,undefined,ctx);',
-    'assert.deepEqual(result.details.result,[0,0]);console.log("budget rejected; host healthy");',
+    'assert.deepEqual(result.details.result,[0,0]);console.log("budget routed; host healthy");',
   ].join("\n");
 
   const result = await promisify(execFile)("bash",["-c",'ulimit -c 0; exec "$@"',"json-budget",process.execPath,"--max-old-space-size=128","--input-type=module","-e",program],{timeout:10000,maxBuffer:1024*1024});
-  assert.match(result.stdout,/budget rejected; host healthy/);
+  assert.match(result.stdout,/budget routed; host healthy/);
 });
 
 

@@ -64,6 +64,24 @@
   stay. Live-verified over 2 green gpt-6-astra runs against 2 task-matched
   controls with no strategy change.
 
+### Fixed
+
+- `bash({command, args}, opts)` no longer drops the second options argument:
+  `cwd` (and `timeoutMs`) merge in, with the params object's own keys winning
+  on conflict. Covered by argv-form tests.
+- Over-budget JSON selections return an in-band routing value
+  (`{status:"too_large", path, selector, chars}` with `keys` or `length`)
+  instead of throwing, so one oversize field no longer kills the read and
+  small sibling selections flow through. The standing reference line covers
+  raw and selection routing at the same token cost; live-verified over 3
+  green runs (top-level keys now answer in 1 call instead of 2).
+- Memory-limit failures now report the RSS growth, the in-flight operation,
+  host-call count, and tracked host bytes (VFS cache, index entries,
+  overlays), splitting tracked from untracked growth so host-side pressure
+  is distinguishable from tool-side growth.
+- The workspace index reuses one scratch read buffer instead of allocating
+  512 KiB per file, bounding transient RSS on large-tree scans.
+
 ## [0.6.0] - 2026-09-15
 
 ### Added

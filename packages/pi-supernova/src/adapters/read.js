@@ -8,7 +8,7 @@ import { selectEvidence } from "../context/evidence.js";
 import { WorkspaceIndex } from "../context/repo-index.js";
 import { outlineFile } from "../context/outline.js";
 import { MAX_JSON_BYTES, jsonProjector } from "../fs/json-read.js";
-import { normalizeRead, classifyRead, needsProbe, SESSION_URI, buildJsonRouting, routingText } from "../contract/read.js";
+import { normalizeRead, classifyRead, needsProbe, SESSION_URI, buildJsonRouting, buildSelectionRouting, routingText } from "../contract/read.js";
 import { resolveWorkspacePath, runCommand, relativeSlash } from "../fs/workspace.js";
 import {
   textResult, sliceLinesRawInfo, sliceLinesRaw,
@@ -486,7 +486,11 @@ export function createRead(ctx) {
         const encoded = JSON.stringify(value);
 
         if (encoded.length > remaining) {
-          throw new Error("JSON selection exceeds the read budget for " + rel + " (" + (selectors[index] ?? "selector") + ": " + encoded.length + " chars, " + remaining + " remaining of " + budget + "); select narrower fields or an array slice such as .items[0:10]");
+          const routed = routingText(buildSelectionRouting(rel, selectors[index] ?? "selector", value, encoded.length));
+          remaining = Math.max(0, remaining - routed.length);
+          parts.push(routed);
+          index++;
+          continue;
         }
 
         remaining -= encoded.length;
@@ -494,7 +498,6 @@ export function createRead(ctx) {
         index++;
       }
     } catch (error) {
-      if (error instanceof Error && error.message.startsWith("JSON selection exceeds the read budget")) throw error;
       throw new Error("JSON selection failed for " + rel + " (" + selectors.join(", ") + "): " + (error instanceof Error ? error.message : String(error)));
     }
 

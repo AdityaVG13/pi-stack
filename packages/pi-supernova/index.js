@@ -201,6 +201,7 @@ export function registerCodeMode(pi) {
       speculateCommit: () => runBridge.barrier(() => runBridge.commitSpeculation()),
       speculateRollback: () => runBridge.barrier(() => runBridge.rollbackSpeculation()),
       names: () => ["read", "edit", "write", "bash"],
+      describeMemory: () => runBridge.describeMemory?.() ?? null,
       batchRead: runBridge.supportsBatchRead(),
       nativeArgv: runBridge.supportsNativeArgv?.() === true,
       cancel,

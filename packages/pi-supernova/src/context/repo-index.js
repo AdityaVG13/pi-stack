@@ -253,6 +253,8 @@ export class WorkspaceIndex {
     this.lastTouched = relPath;
   }
 
+  getEntryBytes() { return this.entryBytes; }
+
   watch(root) {
     if (this.watchers.has(root)) return this.watchers.get(root);
     let ok = false;
@@ -383,15 +385,17 @@ export class WorkspaceIndex {
     let actual = fs.fstatSync(fd);
 
     if (!actual.isFile() || actual.size > MAX_FILE_BYTES) return this.rejectEntry(filePath);
-    const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
-    const offset = readFdBuffer(fd, buffer);
+    // One reusable scratch read per index: allocating 512 KiB per file lets
+    // thousands of dead buffers pile up as RSS before a major GC notices.
+    this.scratchRead ??= Buffer.alloc(MAX_FILE_BYTES + 1);
+    const offset = readFdBuffer(fd, this.scratchRead);
 
     if (offset > MAX_FILE_BYTES) return this.rejectEntry(filePath);
     actual = fs.fstatSync(fd);
 
     if (!actual.isFile() || actual.size !== offset) return this.rejectEntry(filePath);
 
-    return { text: buffer.subarray(0, offset).toString("utf8"), actual };
+    return { text: this.scratchRead.subarray(0, offset).toString("utf8"), actual };
   }
 
   readIndexedText(filePath) {

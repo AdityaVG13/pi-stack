@@ -402,6 +402,11 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     supportsNativeArgv: () => process.platform !== "win32" && !hostTool("bash") && !executors.has("bash"),
     summarizeEdit: (target, before, after, diff) => hooks.summarizeEdit(getCwd(), target, before, after, diff),
     invalidateFiles() { vfs.invalidateCache(); index.invalidate(); clearPathCache(); },
+    describeMemory() {
+      const overlays = vfs.describeOverlays();
+
+      return { vfsCacheBytes: vfs.getCacheBytes(), indexBytes: index.getEntryBytes(), overlayFiles: overlays.files, overlayBytes: overlays.bytes };
+    },
     fileOperations: {
       access: (target, mode) => fs.access(target, mode),
       readFile: async target => Buffer.from(await vfs.read(target), "utf8"),

@@ -17,6 +17,25 @@ const MEMORY_SLACK = 1.5;
 
 const rssBytes = isFunction(process.memoryUsage?.rss) ? () => process.memoryUsage.rss() : () => process.memoryUsage().rss;
 
+const toMb = bytes => Math.max(0, bytes / 1048576);
+
+/** Pure attribution for a memory-limit trip: which operation, and how much of the RSS growth supernova can account for. */
+export function formatMemoryAttribution({ limitMb, rssBytes: now, startBytes, ms, op, calls, tracked }) {
+  const deltaMb = toMb(now - startBytes);
+  const parts = tracked
+    ? [["vfs cache", tracked.vfsCacheBytes], ["index entries", tracked.indexBytes], ["overlays", tracked.overlayBytes]]
+    : [];
+  const trackedMb = parts.reduce((sum, [, bytes]) => sum + toMb(Number(bytes) || 0), 0);
+  const untrackedMb = Math.max(0, deltaMb - trackedMb);
+  const where = op ? ` during ${op} (${calls} host calls)` : ` (${calls} host calls)`;
+  const seen = parts.length
+    ? `; supernova-tracked host bytes: ${parts.map(([name, bytes]) => `${name} ${toMb(Number(bytes) || 0).toFixed(1)}MB`).join(", ")} in ${tracked.overlayFiles ?? 0} overlay files`
+    : "";
+
+  return `guest exceeded memory limit (maxHeapMb=${limitMb}): process RSS +${deltaMb.toFixed(1)}MB in ${Math.round(ms)}ms${where}${seen}; `
+    + `~${untrackedMb.toFixed(1)}MB untracked (worker heap, transient buffers, or host/concurrent growth outside supernova)`;
+}
+
 let idleWorker = null;
 
 let runSeq = 0;
@@ -231,7 +250,7 @@ function admitGuest({ code, file, data, config }) {
 }
 
 class GuestRun {
-  constructor({ code, file, cwd, data, nova, config, signal, onTimeout, runId, timeoutMs, rssLimit }) {
+  constructor({ code, file, cwd, data, nova, config, signal, onTimeout, runId, timeoutMs, rssLimit, rssStart }) {
     this.code = code;
     this.file = file;
     this.cwd = cwd;
@@ -243,6 +262,7 @@ class GuestRun {
     this.runId = runId;
     this.timeoutMs = timeoutMs;
     this.rssLimit = rssLimit;
+    this.rssStart = rssStart;
     this.started = performance.now();
     this.logs = [];
     this.logTruncated = false;
@@ -255,6 +275,8 @@ class GuestRun {
     this.aborting = false;
     this.pending = new Set();
     this.inputController = new AbortController();
+    this.rpcCount = 0;
+    this.lastRpcMethod = null;
   }
 
   wall() {
@@ -345,6 +367,8 @@ class GuestRun {
 
   onRpc(msg) {
     const method = Object.hasOwn(RPC_METHODS, msg.method) && RPC_METHODS[msg.method];
+    this.rpcCount++;
+    this.lastRpcMethod = isString(msg.method) ? msg.method : null;
     const work = Promise.resolve().then(() => {
       if (!method) throw new Error("unknown nova method: " + msg.method);
 
@@ -446,9 +470,17 @@ class GuestRun {
       this.resolve = resolve;
       this.timer = setTimeout(() => this.abort(), Math.min(this.timeoutMs, 2147483647));
       this.memTimer = setInterval(() => {
-        if (rssBytes() <= this.rssLimit) return;
+        const now = rssBytes();
+
+        if (now <= this.rssLimit) return;
         this.cancelHost();
-        this.finish(this.fail("guest exceeded memory limit (maxHeapMb=" + (this.config.maxHeapMb ?? 512) + ")"));
+        let tracked = null;
+
+        try { tracked = isFunction(this.nova?.describeMemory) ? this.nova.describeMemory() : null; } catch {}
+        this.finish(this.fail(formatMemoryAttribution({
+          limitMb: this.config.maxHeapMb ?? 512, rssBytes: now, startBytes: this.rssStart ?? now,
+          ms: this.wall(), op: this.lastRpcMethod, calls: this.rpcCount, tracked,
+        })));
       }, MEMORY_POLL_MS);
       this.signal?.addEventListener("abort", this.signalAbort, { once: true });
       void this.boot();
@@ -462,11 +494,12 @@ export async function runGuestProgram({ code, file, cwd = process.cwd(), data, n
 
   if (admitted.error) return fail(admitted.error);
   if (signal?.aborted) return fail(ABORT_MESSAGE);
+  const rssStart = rssBytes();
 
   return new GuestRun({
     code, file, cwd, data: admitted.data, nova, config, signal, onTimeout,
     runId: ++runSeq,
     timeoutMs: admitted.timeoutMs,
-    rssLimit: rssBytes() + (config.maxHeapMb ?? 512) * MEMORY_SLACK * 1048576,
+    rssLimit: rssStart + (config.maxHeapMb ?? 512) * MEMORY_SLACK * 1048576, rssStart,
   }).start();
 }

@@ -467,5 +467,18 @@ export class CausalVfs {
 
   invalidateCache() { this.cache.clear(); this.cacheBytes = 0; this.expected.clear(); }
   getCacheSize() { return this.cache.size; }
+  getCacheBytes() { return this.cacheBytes; }
   getOverlayDepth() { return this.overlays.length; }
+  describeOverlays() {
+    let files = 0, bytes = 0;
+
+    for (const layer of this.overlays) {
+      for (const content of layer.values()) {
+        files++;
+        bytes += Buffer.byteLength(content, "utf8");
+      }
+    }
+
+    return { files, bytes };
+  }
 }

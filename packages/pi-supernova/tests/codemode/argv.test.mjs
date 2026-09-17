@@ -57,3 +57,19 @@ it("literal argv bypasses shell startup while string commands retain it", {skip:
     }
   }
 });
+
+it("literal-argv bash honors cwd from a second options argument", {skip:process.platform === "win32"}, async t => {
+  const f = await engineFixture(t);
+  await fs.mkdir(path.join(f.root, "sub"));
+  const result = await f.execute(`return await bash({command:"pwd",args:[]},{cwd:"sub"});`);
+
+  assert.equal(result.details.result.trim(), await fs.realpath(path.join(f.root, "sub")));
+});
+
+it("object-form bash keeps its own cwd over a second options argument", {skip:process.platform === "win32"}, async t => {
+  const f = await engineFixture(t);
+  await fs.mkdir(path.join(f.root, "sub"));
+  const result = await f.execute(`return await bash({command:"pwd",args:[],cwd:"sub"},{cwd:"."});`);
+
+  assert.equal(result.details.result.trim(), await fs.realpath(path.join(f.root, "sub")));
+});
