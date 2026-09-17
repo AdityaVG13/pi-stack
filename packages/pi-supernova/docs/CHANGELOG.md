@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## [0.7.1] - 2026-09-17
+
+### Fixed
+
+- Guest worker links on hosts without `module.registerHooks` (Bun, Node <22.15):
+  `node:module` is now a namespace import with runtime feature detection, so the
+  `register` fallback — and hosts with neither hook mechanism — no longer fail at
+  module-eval time. Previously every program failed before its first command with
+  "Export named 'registerHooks' not found", e.g. under OMP/Bun.
+
 ## [0.7.0] - 2026-09-17
 
 ### Internals

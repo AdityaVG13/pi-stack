@@ -1,12 +1,14 @@
 import { parentPort } from "node:worker_threads";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { register, registerHooks } from "node:module";
+import * as nodeModule from "node:module";
 import { isString, isObject, isFunction, toPlain, looksLikePath } from "../shared/decode.js";
 import { truncateChars } from "../output/format.js";
 import { gatherReadArgs, normalizeRead, decodeReadValue, assertReadPaths } from "../contract/read.js";
 import { classifyEdit } from "../contract/edit.js";
 import { normalizeBash } from "../contract/bash.js";
 import { guestImportMessage, isDeniedGuestImport } from "./guest-deny-imports.js";
+
+const { register, registerHooks } = nodeModule;
 
 if (isFunction(registerHooks)) {
   registerHooks({
@@ -20,8 +22,13 @@ if (isFunction(registerHooks)) {
       return nextResolve(specifier, context);
     },
   });
-} else {
-  register("./guest-deny-imports.js", import.meta.url);
+} else if (isFunction(register)) {
+  try {
+    register("./guest-deny-imports.js", import.meta.url);
+  } catch {
+    // Hosts whose module.register cannot run loader hooks lose the deny list;
+    // the guest remains trusted code, not a sandbox boundary.
+  }
 }
 
 // Guest programs run here, off the host thread. The host can terminate() this
