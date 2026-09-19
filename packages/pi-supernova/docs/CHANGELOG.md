@@ -2,6 +2,59 @@
 
 ## Unreleased
 
+## [0.8.0] - 2026-09-19
+
+### Added
+
+- Program batches accept a top-level `code` OR `file` as a source default, so a
+  shared program is sent once instead of in every entry. Entries may still
+  override it, defaults count once against the 48,000-character admission cap,
+  and every entry keeps its own fresh guest and its own commit.
+- `mergeData: true` opts into a shallow object overlay of the top-level `data`
+  object and each entry's own object data (entry keys win; nested objects are
+  replaced, not merged). Whole-input replacement stays the default.
+
+### Changed
+
+- Standing reference now states the read limits and their recovery forms
+  (path-only `160 lines / 8192 characters`, `offset`/`about`/`complete:true`,
+  one-based windows, the complete-read budget) and the optional-read contract
+  (`Promise.allSettled` keeps successful siblings): +35/+38 definition tokens per
+  request versus 0.7.1, paid back many times over on repeated-source batches.
+- `bash()` inherits the program's `timeoutMs` instead of an independent 60s
+  default; explicit per-command limits still win.
+- Missing-file errors point at directory/source-question recovery and
+  `Promise.allSettled`.
+- Result packaging reuses decoded result branches and skips escaped rendering
+  when the complete raw framing is provably shorter; settled programs no longer
+  arm a 250 ms drain timer.
+
+### Fixed
+
+- Failed `edit(async () => {...})` checkpoints roll back and rethrow the original
+  cause instead of reporting success; an explicit `catch` still recovers.
+- Pi failure cards render as failures: the renderer reads the host's error flag
+  from render context, shows the original cause, prints `committed`/`rolledBack`
+  totals, marks writes whose persistence cannot be attributed as attempted, and
+  labels pure JavaScript execution instead of "complete".
+- Unsupported image formats (for example BMP) fail before model delivery or
+  commit with PNG-conversion guidance instead of attaching unusable data.
+- Oversized image sets report aggregate sizes instead of silently dropping
+  attachments; pending writes roll back.
+- Rust lifetimes and loop labels no longer produce false edit/write warnings;
+  genuinely broken strings, brackets and character literals still warn.
+- Markdown/MDX/RST/TXT edits skip declaration-reference searches for fenced code
+  and capital labels; usage evidence ignores declarations, generic calls and
+  prefix-only matches.
+- Missing argv data identifies the offending argument index; oversized `data`
+  reports its serialized size and a lossless chunked-write recovery.
+
+### Internals
+
+- 243 package tests, actual Pi and OMP host smoke, isolated Spark run, a
+  536-program stress pass, and both frozen token gates. `docs/TOKEN_COSTS.md`
+  records the traffic baselines, their limits and the measured 0.7.1 comparisons.
+
 ## [0.7.1] - 2026-09-17
 
 ### Fixed
