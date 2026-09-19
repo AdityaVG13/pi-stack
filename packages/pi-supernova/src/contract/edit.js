@@ -1,6 +1,6 @@
 import { isString, isObject, isFunction, isNumber } from "../shared/decode.js";
 
-export const EDIT_USAGE = 'invalid edit signature; use edit(path,oldText,newText), edit({path,edits:[{oldText,newText}]}), or edit({path,patch:"@@ -1 +1 @@\n-old\n+new\n"})';
+export const EDIT_USAGE = 'invalid edit signature; use edit(path,oldText,newText), edit(path,{oldText,newText}), edit({path,edits:[{oldText,newText}]}), or edit({path,patch:"@@ -1 +1 @@\n-old\n+new\n"})';
 
 function spanStart(value) {
   return isNumber(value.start) ? value.start : Array.isArray(value.lines) ? value.lines[0] : value.line;
@@ -40,9 +40,17 @@ function namedEditObject(p, oldText, newText) {
 }
 
 function namedEditPositional(p, oldText, newText) {
-  if (isObject(oldText) && !Array.isArray(oldText)) throw new Error(EDIT_USAGE);
+  if (Array.isArray(oldText)) return { path: p, edits: oldText };
 
-  return Array.isArray(oldText) ? { path: p, edits: oldText } : { path: p, oldText, newText };
+  if (isObject(oldText)) {
+    // edit(path,{oldText,newText}|{edits}|{patch}): the path rides in either
+    // argument, but a conflicting path or third argument is still rejected.
+    if (newText !== undefined || (oldText.path !== undefined && oldText.path !== p)) throw new Error(EDIT_USAGE);
+
+    return { ...oldText, path: p };
+  }
+
+  return { path: p, oldText, newText };
 }
 
 function normalizeEditArgs(p, oldText, newText) {

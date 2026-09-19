@@ -235,6 +235,22 @@ function duplicateEditError(target, content, index, second) {
   return new Error("edit target is not unique in " + target + ": lines " + a + " and " + b + "; include more surrounding lines in oldText, or pass edits:[{oldText,newText},…]\n" + formatNumberedLine(a, lineAt(content, a)) + "\n" + formatNumberedLine(b, lineAt(content, b)));
 }
 
+/** Exact bytes at the closest guess: a byte-for-byte miss is usually indentation drift. */
+function nearMissPreview(content, oldText) {
+  const first = String(oldText).split("\n").find(line => line.trim().length > 0);
+
+  if (!first) return null;
+  const at = content.indexOf(first.trim());
+
+  if (at < 0) return null;
+  const line = lineNumberAt(content, at);
+  const start = Math.max(1, line - 2);
+  const from = lineStartIndex(content, start);
+  const shown = content.slice(from, lineEndIndex(content, from, Math.min(5, line - start + 3))).replace(/\r?\n$/, "");
+
+  return "first oldText line matches line " + line + " only after trimming; exact bytes there:\n"
+    + shown.split("\n").map((text, index) => formatNumberedLine(start + index, text)).join("\n");
+}
 function matchReplacement(target, content, replacement) {
   if (!isString(replacement?.oldText) || replacement.oldText.length === 0) {
     throw new Error("edit requires non-empty oldText");
@@ -246,7 +262,7 @@ function matchReplacement(target, content, replacement) {
   const index = content.indexOf(oldText);
 
   if (index < 0) {
-    throw new Error("edit target not found in " + target + ": oldText must match the file byte-for-byte\n" + numberedPreview(content));
+    throw new Error("edit target not found in " + target + ": oldText must match the file byte-for-byte\n" + (nearMissPreview(content, oldText) ?? numberedPreview(content)));
   }
   const second = content.indexOf(oldText, index + 1);
 

@@ -11,7 +11,9 @@ it("unsupported edit overloads fail before dispatch with usable signatures", asy
   const f = await engineFixture(t);
   const usage = /invalid edit signature; use edit\(path,oldText,newText\)/;
 
-  for (const call of ['edit("missing.txt", {oldText:"a",newText:"b"})', 'edit({path:"missing.txt",edits:[]})', 'edit({path:"missing.txt",patch:"",oldText:"a",newText:"b"})']) {
+  // A path plus an options object now dispatches (covered by papercuts.test.mjs);
+  // mixed and empty shapes still fail before touching the filesystem.
+  for (const call of ['edit({path:"missing.txt",edits:[]})', 'edit({path:"missing.txt",patch:"",oldText:"a",newText:"b"})']) {
     await assert.rejects(f.execute("await " + call), usage);
   }
 

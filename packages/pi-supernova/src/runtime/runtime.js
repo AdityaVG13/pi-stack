@@ -11,6 +11,21 @@ const WORKER_URL = new URL("./guest-worker.js", import.meta.url);
 
 const ABORT_MESSAGE = "supernova timed out or aborted: pass timeoutMs to allow longer runs, or split the program";
 
+/** Offending source line + caret: without it a syntax error costs a blind retry. */
+function syntaxContext(code, error) {
+  const line = error?.loc?.line;
+  const column = error?.loc?.column;
+
+  if (!Number.isInteger(line) || line < 1) return "";
+  const text = String(code).split("\n")[line - 1];
+
+  if (text === undefined) return "";
+  const shown = text.length > 160 ? text.slice(0, 160) : text;
+  const caret = Number.isInteger(column) ? " ".repeat(Math.min(column, shown.length)) + "^" : "";
+
+  return "\n  " + shown + (caret ? "\n  " + caret : "");
+}
+
 const MEMORY_POLL_MS = 50;
 
 const MEMORY_SLACK = 1.5;
@@ -434,7 +449,7 @@ class GuestRun {
     if (!this.code.trim()) { this.finish(this.fail("code must be a non-empty string; no commands ran")); return false; }
 
     try { this.prepared = prepareProgram(this.code); }
-    catch (error) { this.finish(this.fail("JavaScript syntax error: " + error.message + "; no commands ran. Put literal file/script content in the tool's data parameter and use write(data.path,data.content) or bash({command,args:data.args}).")); return false; }
+    catch (error) { this.finish(this.fail("JavaScript syntax error: " + error.message + "; no commands ran. Put literal file/script content in the tool's data parameter and use write(data.path,data.content) or bash({command,args:data.args})." + syntaxContext(this.code, error))); return false; }
 
     return true;
   }

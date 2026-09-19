@@ -234,3 +234,38 @@ it("unknown read options fail loudly instead of silently reading the whole file"
   assert.equal((await f.execute('return await read("notes.txt", { offset: 2, limit: 1 });')).details.result,"two\n");
   assert.equal((await f.execute('return await read("notes.txt", 3, 1);')).details.result,"three\n");
 });
+
+it("edit accepts a path plus an options object and keeps literal replacements exact", async t => {
+  const f = await engineFixture(t);
+  await f.write("pair.js","alpha\nbeta\ngamma\n");
+  await f.execute('return await edit("pair.js", {edits:[{oldText:"alpha",newText:"ALPHA"},{oldText:"gamma",newText:"GAMMA"}]});');
+  await f.execute('return await edit("pair.js", {oldText:"beta",newText:"BETA"});');
+  assert.equal(await fs.readFile(path.join(f.root,"pair.js"),"utf8"),"ALPHA\nBETA\nGAMMA\n");
+  await assert.rejects(f.execute('return await edit("pair.js", {path:"other.js",oldText:"ALPHA",newText:"x"});'), /invalid edit signature/);
+  await f.write("crlf.txt","one\r\ntwo\r\n");
+  const literal = await f.tool.execute("edit-object-literal",{code:'return await edit("crlf.txt", data.edit);',data:{edit:{oldText:"one\r\n",newText:"ONE\r\n"}},timeoutMs:2000},undefined,undefined,{cwd:f.root});
+  assert.match(String(literal.details.result),/edited/);
+  assert.equal(await fs.readFile(path.join(f.root,"crlf.txt"),"utf8"),"ONE\r\ntwo\r\n");
+});
+
+it("edit misses report the closest exact bytes instead of only the file head", async t => {
+  const f = await engineFixture(t);
+  await f.write("deep.js","const a = 1;\n".repeat(40) + "\tif (ready) {\n\t\treturn top();\n\t}\n");
+  await assert.rejects(f.tool.execute("edit-miss",{code:'return await edit("deep.js", data.oldText, data.newText);',data:{oldText:"    if (ready) {\n        return top();\n    }",newText:"    if (ready) {\n        return bottom();\n    }"},timeoutMs:2000},undefined,undefined,{cwd:f.root}), error => {
+    assert.match(error.message,/edit target not found/);
+    assert.match(error.message,/line 41/);
+    assert.ok(error.message.includes("\tif (ready) {"),error.message);
+    return true;
+  });
+  await assert.rejects(f.execute('return await edit("deep.js","no such text anywhere","x");'),/lines total/);
+});
+
+it("syntax errors show the offending source line and column", async t => {
+  const f = await engineFixture(t);
+  await assert.rejects(f.execute('return "unterminated'), error => {
+    assert.match(error.message,/JavaScript syntax error/);
+    assert.ok(error.message.includes('return "unterminated'),error.message);
+    assert.match(error.message,/\n\s+\^/);
+    return true;
+  });
+});
