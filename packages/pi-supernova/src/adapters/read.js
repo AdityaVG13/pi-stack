@@ -234,6 +234,7 @@ export function createRead(ctx) {
       if (error.code === "ENOENT") throw missingFile(targetPath);
       if (error.code === "ENOTDIR") throw new Error("cannot use path: a parent component of " + targetPath + " is a file, not a directory");
       if (error.code === "EISDIR") throw new Error("path is a directory, not a file: " + targetPath);
+      if (error.code === "EACCES" || error.code === "EPERM") throw new Error("permission denied reading " + targetPath + ": check the file mode (for example bash chmod)");
       throw error;
     }
   }

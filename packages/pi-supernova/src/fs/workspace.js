@@ -216,7 +216,11 @@ function attachCommandIO(state, options, argv, timeoutMs) {
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", chunk => { state.stdout = appendCommandOutput(state, state.stdout, chunk); });
   child.stderr.on("data", chunk => { state.stderr = appendCommandOutput(state, state.stderr, chunk); });
-  child.on("error", error => failCommand(state, error));
+  child.on("error", error => {
+    if (error?.code === "EACCES" || error?.code === "EPERM") failCommand(state, new Error("cannot execute " + argv[0] + ": permission denied (is it executable?)"));
+    else if (error?.code === "ENOENT") failCommand(state, new Error("command not found: " + argv[0]));
+    else failCommand(state, error);
+  });
   child.on("close", (code, signal) => onCommandClose(state, code, signal));
   options.signal?.addEventListener("abort", onAbort, { once: true });
 

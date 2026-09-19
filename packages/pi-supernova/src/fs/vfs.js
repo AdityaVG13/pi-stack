@@ -93,6 +93,7 @@ function remapReadError(err, target) {
   if (err.code === "EISDIR") throw new Error("path is a directory, not a file: " + target);
 
   if (err.code === "ENOTDIR") throw new Error("cannot use path: a parent component of " + target + " is a file, not a directory");
+  if (err.code === "EACCES" || err.code === "EPERM") throw new Error("permission denied reading " + target + ": check the file mode (for example bash chmod)");
 
   if (err.code === "ENOENT") {
     const missing = new Error("no such file: " + target + ' (locate it with read using a directory path or source question; use Promise.allSettled for optional reads to retain successful siblings)');
@@ -138,7 +139,16 @@ async function collectMissingAncestors(parent) {
 }
 
 async function writeTemporary(entry, content, stat) {
-  await fs.writeFile(entry.temporary, content, { encoding: "utf8", flag: "wx", mode: stat ? stat.mode & 0o7777 : 0o666 });
+  try {
+    await fs.writeFile(entry.temporary, content, { encoding: "utf8", flag: "wx", mode: stat ? stat.mode & 0o7777 : 0o666 });
+  } catch (error) {
+    // Never leak the temporary name: name the destination and the real cause.
+    if (error?.code === "EACCES" || error?.code === "EPERM") throw new Error("permission denied writing " + entry.target + ": the directory or file is not writable");
+    if (error?.code === "EROFS") throw new Error("cannot write " + entry.target + ": the file system is read-only");
+    if (error?.code === "ENOSPC") throw new Error("cannot write " + entry.target + ": no space left on device");
+
+    throw error;
+  }
 
   if (stat) await fs.chmod(entry.temporary, stat.mode & 0o7777);
 }

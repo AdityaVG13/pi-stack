@@ -323,6 +323,36 @@ it("failing window reads do not leak unhandled rejections", async t => {
   assert.deepEqual(leaks.map(reason => String(reason?.message ?? reason).slice(0,40)),[]);
 });
 
+it("filesystem permission failures name the path or command with guidance", async t => {
+  const f = await engineFixture(t);
+  await f.write("locked.txt","secret\n");
+  await fs.chmod(path.join(f.root,"locked.txt"),0o000);
+  await assert.rejects(f.execute('return await read("locked.txt",{complete:true});'), error => {
+    assert.match(error.message,/permission denied reading/);
+    assert.match(error.message,/locked\.txt/);
+    assert.doesNotMatch(error.message,/EACCES:/);
+    return true;
+  });
+  await assert.rejects(f.execute('return await edit("locked.txt","secret","x");'), /permission denied reading/);
+  await fs.chmod(path.join(f.root,"locked.txt"),0o644);
+  await f.write("noexec.sh","#!/bin/sh\necho hi\n");
+  await fs.chmod(path.join(f.root,"noexec.sh"),0o644);
+  await assert.rejects(f.execute('return await bash({command:"./noexec.sh",args:[]});'), error => {
+    assert.match(error.message,/cannot execute .*noexec\.sh/);
+    assert.doesNotMatch(error.message,/spawn .*EACCES/);
+    return true;
+  });
+  await fs.mkdir(path.join(f.root,"ro-dir"));
+  await fs.chmod(path.join(f.root,"ro-dir"),0o555);
+  await assert.rejects(f.execute('return await write("ro-dir/new.txt","x");'), error => {
+    assert.match(error.message,/permission denied writing/);
+    assert.match(error.message,/ro-dir/);
+    assert.doesNotMatch(error.message,/\.supernova-/);
+    return true;
+  });
+  await fs.chmod(path.join(f.root,"ro-dir"),0o755);
+});
+
 it("multi-edit failures name the failing entry", async t => {
   const f = await engineFixture(t);
   await f.write("multi.txt","one\ntwo\nthree\n");
