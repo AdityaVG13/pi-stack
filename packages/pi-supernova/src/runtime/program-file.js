@@ -34,7 +34,10 @@ export async function readProgramFile(file, cwd, maxChars, signal) {
 
     signal?.throwIfAborted();
     // Do not silently replace invalid bytes in executable source. Preserve BOMs.
-    const code = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks));
+    let code;
+
+    try { code = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks)); }
+    catch { throw new Error("program file " + file + " is not valid UTF-8 (encoded data could not be decoded); save it as UTF-8 text"); }
 
     if (code.length > chars) throw tooLarge();
 

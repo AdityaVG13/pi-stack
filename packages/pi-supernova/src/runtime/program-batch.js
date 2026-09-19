@@ -146,6 +146,10 @@ class ProgramBatch {
     }
   }
 
+  /** Elapsed and limit: 'deadline or cancellation' alone cannot tell them apart. */
+  deadlineNote() {
+    return " (ran " + Math.round(performance.now() - this.started) + "ms of " + this.timeout + "ms)";
+  }
   takeSettled(result, i) {
     this.results.push(result);
     this.trace.push(...(result.details?.trace ?? []));
@@ -170,7 +174,7 @@ class ProgramBatch {
       this.takeSettled(settled[i], i);
     }
 
-    if (settled.includes(undefined) || this.combined.aborted || performance.now() >= this.deadline) this.stopped = "batch deadline or cancellation; earlier commits remain";
+    if (settled.includes(undefined) || this.combined.aborted || performance.now() >= this.deadline) this.stopped = "batch deadline or cancellation; earlier commits remain" + this.deadlineNote();
   }
 
   sequentialStop(result, i) {
@@ -185,14 +189,15 @@ class ProgramBatch {
 
     if (result.details?.logTruncated) stopped ||= "batch log budget exceeded; remaining programs did not run; earlier commits remain";
 
-    if (this.combined.aborted || performance.now() >= this.deadline) stopped ||= "batch deadline or cancellation; earlier commits remain";
+    // The deadline explains a killed program better than "program N failed".
+    if (this.combined.aborted || performance.now() >= this.deadline) stopped = "batch deadline or cancellation; earlier commits remain" + this.deadlineNote();
 
     return stopped;
   }
 
   async runSequential() {
     for (const [i, program] of this.programs.entries()) {
-      if (this.combined.aborted || performance.now() >= this.deadline) { this.stopped = "deadline or cancellation; remaining programs did not run"; break; }
+      if (this.combined.aborted || performance.now() >= this.deadline) { this.stopped = "deadline or cancellation; remaining programs did not run" + this.deadlineNote(); break; }
 
       const result = await this.runOne(program, i);
       this.live[i] = [];

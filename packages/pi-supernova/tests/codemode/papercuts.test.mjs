@@ -278,3 +278,60 @@ it("timeout failures report elapsed time against the program limit", async t => 
     return true;
   });
 });
+
+it("multi-edit failures name the failing entry", async t => {
+  const f = await engineFixture(t);
+  await f.write("multi.txt","one\ntwo\nthree\n");
+  await assert.rejects(f.execute('return await edit("multi.txt", {edits:[{oldText:"one",newText:"ONE"},{oldText:"missing",newText:"x"}]});'), /edit 2 of 2: .*edit target not found/s);
+  assert.equal(await fs.readFile(path.join(f.root,"multi.txt"),"utf8"),"one\ntwo\nthree\n");
+});
+
+it("JSON projection localizes the parse failure and ignores one leading BOM", async t => {
+  const f = await engineFixture(t);
+  await f.write("bad.json",'{\n  "a": 1,\n  "b": ,\n}\n');
+  await assert.rejects(f.execute('return await read({path:"bad.json",json:".a"});'), error => {
+    assert.match(error.message,/invalid JSON in bad\.json/);
+    // V8 reports only a snippet for some failures; those still name the tokens.
+    assert.ok(error.message.includes('"b": ,'),error.message);
+    return true;
+  });
+  await f.write("trail.json",'{"a":1,}');
+  await assert.rejects(f.execute('return await read({path:"trail.json",json:".a"});'), error => {
+    assert.match(error.message,/line 1 column 8/);
+    assert.ok(error.message.includes('{"a":1,}'),error.message);
+    assert.match(error.message,/\^/);
+    return true;
+  });
+  await f.write("bom.json","\uFEFF" + JSON.stringify({ok:true,padding:"x".repeat(40)}));
+  assert.equal((await f.execute('return await read({path:"bom.json",json:".ok"});')).details.result,true);
+});
+
+it("program files name the file in syntax and encoding failures", async t => {
+  const f = await engineFixture(t);
+  await f.write("broken.js",'await write("never.txt","bad"); )');
+  await assert.rejects(f.tool.execute("file-syntax",{file:"broken.js"},undefined,undefined,{cwd:f.root}), error => {
+    assert.match(error.message,/JavaScript syntax error in broken\.js/);
+    assert.match(error.message,/Fix broken\.js and re-run/);
+    assert.ok(error.message.includes('await write("never.txt","bad"); )'),error.message);
+    return true;
+  });
+  await fs.writeFile(path.join(f.root,"bytes.js"),Buffer.concat([Buffer.from('await write("never.txt","bad");'),Buffer.from([255])]));
+  await assert.rejects(f.tool.execute("file-bytes",{file:"bytes.js"},undefined,undefined,{cwd:f.root}),/bytes\.js is not valid UTF-8/);
+  await assert.rejects(fs.stat(path.join(f.root,"never.txt")),{code:"ENOENT"});
+});
+
+it("batch deadlines report elapsed time against the limit", async t => {
+  const f = await engineFixture(t);
+  const started = Date.now();
+  const result = await f.tool.execute("batch-deadline",{programs:[{code:'await new Promise(()=>{});'},{code:"return 2;"}],timeoutMs:900},undefined,undefined,{cwd:f.root});
+  assert.equal(result.details.ok,false);
+  assert.match(result.details.error,/deadline or cancellation/);
+  assert.match(result.details.error,/ran \d+ms of 900ms/);
+  assert.ok(Date.now() - started < 15000);
+});
+
+it("write checks accept a BOM-prefixed JSON document as valid", async t => {
+  const f = await engineFixture(t);
+  const receipt = await f.tool.execute("write-bom",{code:'return await write("bom-report.json", data.content);',data:{content:"\uFEFF{\"ok\":true}"},timeoutMs:2000},undefined,undefined,{cwd:f.root});
+  assert.doesNotMatch(String(receipt.details.result),/check:/);
+});

@@ -212,7 +212,8 @@ export function quickCheck(text, ext) {
 
   if (ext === ".json") {
     try {
-      JSON.parse(text);
+      // RFC 8259: a single leading BOM is ignorable; do not flag valid JSON.
+      JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
 
       return { ok: true, kind: "json" };
     } catch (err) {

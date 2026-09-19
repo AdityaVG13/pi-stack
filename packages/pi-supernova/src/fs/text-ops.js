@@ -279,7 +279,13 @@ function assertNoOverlap(target, matches) {
 
 export function applyReplacements(target, content, requestedEdits) {
   if (requestedEdits.length === 0) throw new Error("edit requires at least one replacement");
-  const matches = requestedEdits.map((replacement) => matchReplacement(target, content, replacement));
+  const matches = requestedEdits.map((replacement, index) => {
+    try { return matchReplacement(target, content, replacement); }
+    catch (error) {
+      // Name the failing entry: a multi-edit miss is otherwise a guessing game.
+      throw requestedEdits.length === 1 ? error : new Error("edit " + (index + 1) + " of " + requestedEdits.length + ": " + error.message);
+    }
+  });
   matches.sort((a, b) => a.index - b.index);
   assertNoOverlap(target, matches);
   let updated = content;

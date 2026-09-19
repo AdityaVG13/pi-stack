@@ -19,6 +19,7 @@ import {
 } from "../fs/text-ops.js";
 import { imageTooLarge, missingFile, IMAGE_MAX_BYTES, LARGE_FILE_BYTES, ABOUT_TOKEN_MAX, IMAGE_MIME, RAW_JSON_CHARS, RAW_SOURCE_CHARS, RAW_SOURCE_LINES, ROUTING_MAX_CHARS } from "./errors.js";
 import { outlineOptions, recordOutlineOrigins, createReferenceFinder } from "./refs.js";
+import { sourceContext, parsePosition } from "../shared/syntax-context.js";
 
 export function createRead(ctx) {
   const { getCwd, vfs, config, index, ledger, hooks, reads } = ctx;
@@ -501,13 +502,20 @@ export function createRead(ctx) {
     return parts;
   }
 
+  /** RFC 8259 lets parsers ignore one leading BOM; files from Windows tools carry it. */
+  const stripBom = text => text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+
   async function projectJson(rel, targetPath, params) {
     const project = jsonProjector(params.json);
     const text = await vfs.read(targetPath, { maxBytes: MAX_JSON_BYTES, label: "JSON input" });
     let document;
 
-    try { document = JSON.parse(text); }
-    catch { throw new Error("invalid JSON in " + rel + "; the entire document must parse before projection"); }
+    try { document = JSON.parse(stripBom(text)); }
+    catch (error) {
+      const position = parsePosition(error.message, text);
+
+      throw new Error("invalid JSON in " + rel + ": " + error.message + "; the entire document must parse before projection" + (position ? sourceContext(text, position.line, position.column) : ""));
+    }
 
     const many = Array.isArray(params.json);
     const selectors = many ? params.json.map(String) : [params.json === true ? "." : String(params.json)];
