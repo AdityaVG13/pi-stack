@@ -222,3 +222,15 @@ it("optional reads retain successful siblings explicitly, without weakening unca
   assert.match(result.details.result[1].reason.message,/no such file/);
   assert.equal(result.details.returnTruncated,false);
 });
+
+it("unknown read options fail loudly instead of silently reading the whole file", async t => {
+  const f = await engineFixture(t);
+  await f.write("notes.txt","one\ntwo\nthree\n");
+  // Real-session shape: the caller reused another tool's {start,end} window on nova.
+  const error = await f.execute('return await read("notes.txt", { start: 2, end: 3 });').then(() => assert.fail("unknown read options must reject"), reason => reason);
+  assert.match(error.message,/read does not accept option "start"/);
+  assert.match(error.message,/offset:1, limit:80/);
+  // Supported window forms still return exactly the requested lines.
+  assert.equal((await f.execute('return await read("notes.txt", { offset: 2, limit: 1 });')).details.result,"two\n");
+  assert.equal((await f.execute('return await read("notes.txt", 3, 1);')).details.result,"three\n");
+});

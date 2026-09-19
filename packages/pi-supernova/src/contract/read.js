@@ -5,6 +5,20 @@ export const SESSION_URI = /^(?:agent|artifact):\/\//i;
 
 const BOOL_KEYS = ["resolve", "complete", "outline", "evidence"];
 
+const READ_OPTION_KEYS = ["path", "target", "about", "query", "offset", "limit", "json", "resolve", "complete", "outline", "evidence", "maxChars", "_independent"];
+
+/** Unknown options used to be dropped silently: {start,end} read the whole file. */
+function assertReadOptions(args) {
+  const unknown = Object.keys(args).filter(key => !READ_OPTION_KEYS.includes(key));
+
+  if (unknown.length === 0) return;
+  const windowHint = unknown.some(key => key === "start" || key === "end")
+    ? " For a line window use read(path, {offset:1, limit:80}): offset is the first line and limit is the line count."
+    : "";
+
+  throw new Error("read does not accept option " + unknown.map(key => JSON.stringify(key)).join(", ") + "; supported options are " + READ_OPTION_KEYS.filter(key => key !== "_independent").join(", ") + "." + windowHint);
+}
+
 export function isSessionUri(value) {
   return isString(value) && SESSION_URI.test(value);
 }
@@ -62,6 +76,7 @@ export function normalizeRead(params) {
 
   const args = sessionJsonArgs({ ...params, path: params.path ?? params.target });
   validateJsonRead(args);
+  assertReadOptions(args);
   assertReadFlags(args);
   assertExclusiveRead(args);
   assertReadPaths(args.path);
