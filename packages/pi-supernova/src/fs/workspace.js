@@ -219,6 +219,7 @@ function attachCommandIO(state, options, argv, timeoutMs) {
   child.on("error", error => {
     if (error?.code === "EACCES" || error?.code === "EPERM") failCommand(state, new Error("cannot execute " + argv[0] + ": permission denied (is it executable?)"));
     else if (error?.code === "ENOENT") failCommand(state, new Error("command not found: " + argv[0]));
+    else if (error?.code === "ENOTDIR") failCommand(state, new Error("cannot run " + argv[0] + ": the working directory is not a directory"));
     else failCommand(state, error);
   });
   child.on("close", (code, signal) => onCommandClose(state, code, signal));

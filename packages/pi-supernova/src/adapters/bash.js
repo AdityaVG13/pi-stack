@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import { isString } from "../shared/decode.js";
 import { unwrapIfFullyQuoted } from "../fs/text-ops.js";
 import { sourceForReferences } from "../fs/source-window.js";
@@ -34,6 +35,12 @@ export function createBash(ctx) {
       const cwd = getCwd();
       const { literal, command, argv } = parseBash(params);
       const targetCwd = params?.cwd ? await resolveWorkspacePath(cwd, params.cwd, "bash cwd", true) : cwd;
+
+      if (params?.cwd !== undefined) {
+        const st = await fs.stat(targetCwd).catch(() => null);
+
+        if (!st?.isDirectory()) throw new Error("bash cwd is not a directory: " + params.cwd);
+      }
 
       const transactionBarrier = await vfs.prepareExternalMutation("bash");
       let res;

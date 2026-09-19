@@ -353,6 +353,20 @@ it("filesystem permission failures name the path or command with guidance", asyn
   await fs.chmod(path.join(f.root,"ro-dir"),0o755);
 });
 
+it("bash cwd must be a directory and never leaks spawn codes", async t => {
+  const f = await engineFixture(t);
+  await f.write("afile.txt","x\n");
+  await fs.mkdir(path.join(f.root,"adir"));
+  await assert.rejects(f.execute('return await bash({command:"pwd",cwd:"afile.txt"});'), error => {
+    assert.match(error.message,/bash cwd is not a directory: afile\.txt/);
+    assert.doesNotMatch(error.message,/spawn ENOTDIR/);
+    return true;
+  });
+  await assert.rejects(f.execute('return await bash({command:"pwd",cwd:"missing-dir"});'), /bash cwd is not a directory: missing-dir/);
+  const ok = await f.execute('return await bash({command:"pwd",cwd:"adir"});');
+  assert.ok(String(ok.details.result).trim().endsWith("adir"));
+});
+
 it("bash, write and edit reject unknown options instead of ignoring them", async t => {
   const f = await engineFixture(t);
   await f.write("note.txt","one\n");
