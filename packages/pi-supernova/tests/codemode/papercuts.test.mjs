@@ -269,3 +269,12 @@ it("syntax errors show the offending source line and column", async t => {
     return true;
   });
 });
+
+it("timeout failures report elapsed time against the program limit", async t => {
+  const f = await engineFixture(t);
+  await assert.rejects(f.tool.execute("slow",{code:"await new Promise(()=>{});",timeoutMs:1200},undefined,undefined,{cwd:f.root}), error => {
+    assert.match(error.message,/supernova timed out or aborted/);
+    assert.match(error.message,/ran \d+ms of 1200ms/);
+    return true;
+  });
+});

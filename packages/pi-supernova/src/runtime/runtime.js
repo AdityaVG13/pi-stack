@@ -342,7 +342,7 @@ class GuestRun {
     try { this.onTimeout?.(); } catch {}
 
     this.aborting = false;
-    this.finish(this.fail(ABORT_MESSAGE));
+    this.finish(this.fail(ABORT_MESSAGE + " (ran " + Math.round(this.wall()) + "ms of " + this.timeoutMs + "ms)"));
   }
 
   postResult(message) {
