@@ -14,6 +14,19 @@ transactional file operations, batching, bounded results and the grouped nova UI
 
 ## Unreleased
 
+- **Shared program source:** top-level `code` or `file` supplies a batch default;
+  entries may override it. No temporary program file is required for inline reuse.
+- **Explicit object defaults:** `mergeData:true` shallowly overlays per-entry data
+  onto common data. Existing whole-input replacement remains the default.
+
+- Failed `edit` checkpoints now roll back and **throw**. Catch explicitly when
+  rejecting a candidate is intentional; ignored failures no longer report success.
+- Read errors state both size limits and executable recovery examples. Markdown
+  edits skip code-reference searches; exact-symbol usage evidence excludes generic
+  matches and keeps late references inside the returned window.
+- Returned image sets over 16 images / 20 MiB fail with aggregate counts and bytes,
+  rather than silently omitting attachments. Pending file changes roll back.
+
 - **`parallel: true` on `programs`:** independent entries run at once (up to 8),
   keep result order, and do not stop siblings on failure. Sequential is still
   the default.
@@ -162,6 +175,13 @@ lines. Structural warnings and source windows are not substitutes for tests.
 
 ### Safe read-modify-write
 
+Path-only `read(path)` requires at most **160 lines and 8192 UTF-16 characters**.
+A short document can exceed the character limit. For larger files use
+`read(path,{offset:1,limit:80})` (one-based lines), `read(path,{about:"keywords"})`,
+or `read(path,{complete:true})`. The default raw-text read budget is **31,744
+characters**, derived from the configured call/return budgets, not an unlimited
+full-file buffer. Large JSONL needs a bounded parser through `bash({command,args})`.
+
 Plain reads are bounded views, not guaranteed full-file buffers. Use
 `read({path:"file.txt",complete:true})` when code needs the complete file; it
 throws rather than handing back partial text. Prefer `edit` for large-file
@@ -252,12 +272,21 @@ for short one-off operations. See [token measurements](https://github.com/Aditya
 }
 ~~~
 
-Use programs instead of top-level code/file. Supply 1--32 entries, each with
-code OR file and optional data. Top-level data supplies an optional default for
-each entry; explicit entry data replaces it entirely, including null, false, 0
-and empty strings. Every guest receives its own copy, not a shared mutable heap.
-The JSON-encoded array (or `{programs,data}` when defaults are supplied) must fit
-maxCodeChars. Common input counts once; result representations and output limits are unchanged.
+Supply 1--32 `programs` entries. Top-level `code` OR `file` supplies an optional
+source default; an entry's own `code` OR `file` replaces it. Without a shared
+source, every entry still requires its own. A shared file is reread when each
+entry runs, so earlier commits can create or update it.
+
+Top-level `data` supplies an optional input default. By default, explicit entry
+`data` replaces it entirely, including null, false, 0 and empty strings. With
+**`mergeData:true`**, both the default and every explicit entry input must be
+objects: own entry fields override default fields in a **shallow** merge. Nested
+objects are replaced, not recursively merged. Each guest receives its own copy;
+mutations cannot leak between guests or back into caller-owned inputs.
+
+The JSON-encoded array plus any shared code/file/data must fit `maxCodeChars`.
+Common source/input counts once, before expansion. Every entry is validated
+before any program runs. Result representations and output limits are unchanged.
 Entries run sequentially in fresh guests and commit separately. A successful
 entry can create the file executed by a later entry. No implicit retries,
 reordering, shared heap or nested batches are introduced.
@@ -278,6 +307,26 @@ This avoids repeating literal arguments, without a compression codec or result e
 Mutating `data` in one guest cannot affect the next. An entry with `data:null`
 receives null, not the shared object; there is no implicit object merge.
 
+For the same program with varying inputs, no temporary script or input file is
+needed. For example, audit both files with a common term:
+
+```json
+{
+  "code": "const text=await read({path:data.path,complete:true}); return {path:data.path,found:text.includes(data.term),text};",
+  "data": {"term":"TODO"},
+  "mergeData": true,
+  "programs": [
+    {"data":{"path":"src/a.js"}},
+    {"data":{"path":"src/b.js"}}
+  ]
+}
+```
+
+The complete source is still returned twice, once for each requested file; shared
+arguments do not authorize result deduplication or context rewriting. Existing
+programs that depend on whole-input replacement keep that behavior unless the
+caller explicitly requests `mergeData:true`.
+
 The batch stops on the first failed entry, cancellation/deadline, or exhausted
 output/log/image budget. Earlier successful commits remain; only the active
 program's uncommitted writes roll back. Admission errors throw before any program.
@@ -290,7 +339,7 @@ Set `parallel: true` with `programs` to run independent entries concurrently
 (up to 8 at once). Each still gets a fresh guest and its own commit; results stay
 in submission order. A failed entry does not stop siblings. Two entries writing
 the same file race: the losing commit reports a conflict. Sequential remains the
-default. `parallel` is invalid on a lone `code` or `file` call.
+default. `parallel` and `mergeData` are invalid on a lone `code` or `file` call.
 
 The outer deadline, host-call budget, log allowance, text budget and image limits
 are shared across the batch. Individual read budgets are not reduced. Every
@@ -306,7 +355,10 @@ settings, hide observations, or infer a plan on the agent's behalf.
 ### Large inputs and report outputs
 
 The default program limit is 48,000 UTF-16 code units (configurable via
-`maxCodeChars` and exposed in the tool schema). Split larger documents into
+`maxCodeChars` and exposed in the tool schema). The same cap applies separately
+to serialized JSON `data`, including quote/newline escaping and object keys.
+Oversized input fails before commands run and reports its actual serialized size.
+Split larger documents into
 separate invocations: first `write(path, firstChunk)`, then
 `write({path,content:nextChunk,append:true})`. Append uses the complete internal
 file buffer, never a bounded model-facing read; it retains conflict checks and
@@ -316,7 +368,9 @@ file and publish it only when complete. External write overrides reject append.
 
 Supernova is a bounded foreground executor, not a durable background-job manager.
 For long archive scans, use resumable chunks or a host background-job tool and write
-progress records under `.work`. Set the inner `bash` timeout shorter than the
+progress records under `.work`. Shell commands inherit the current program
+`timeoutMs` unless they specify their own; increasing the outer deadline no longer
+leaves a hidden 60-second shell cap. Set the inner `bash` timeout shorter than the
 outer program timeout (for example 10 seconds inside a 20-second program) to retain
 bounded shell diagnostics. A hard guest deadline cannot guarantee pending shell
 output delivery; progress files survive shell execution but staged VFS writes may
@@ -344,12 +398,21 @@ Inputs are capped at 16 MiB, including staged files. JSON reads require regular
 files and reject named pipes without waiting for a writer. The entire input must
 be valid JSON before any selection. Each selector is budgeted before allocating
 the next slice; sparse selector/path/edit arrays are rejected. Selected JSON must
-fit the ordinary read budget or the
-read throws; it is never returned as malformed/truncated JSON. Oversized unwindowed
+fit the ordinary read budget. Oversized selections return a routing object
+`{status:"too_large",path,keys}` (or `length` for an array), not the requested
+array/object: check `status` before calling `.map` or `.filter`, then select
+narrower fields or slices. The input-size cap still throws before projection;
+JSON is never returned malformed or silently truncated. Oversized unwindowed
 plain .json reads also fail with a projection hint. Explicit offset/limit or
 resolve:true still allow raw inspection, but line windows are not JSON documents.
 Do not combine json with complete, line windows, or source views. External read
 overrides reject JSON projection rather than silently ignoring the option.
+Uncaught read errors abort the program, including `return {a:await read(...),
+b:await read(...)}`; earlier successful values are not an implicit partial return.
+For optional sources, explicitly return `await Promise.allSettled(paths.map(path =>
+read(path)))`. This keeps successful text and per-path errors without weakening
+rollback for uncaught failures.
+
 Other read options, even false-valued flags, do not bypass a captured external
 read executor; its policy, transforms and failures remain authoritative.
 
@@ -386,9 +449,11 @@ recovery backups before retrying. Import-based mutations and shell side effects
 are outside the VFS counters; this is not a filesystem audit.
 
 `edit(async () => {...})` creates a nested filesystem checkpoint. It returns
-`{ok:true,committed:true,value}` on success or `{ok:false,committed:false,error}` on
-failure. Shell commands, overlapping/nested checkpoints, and concurrent commands
-outside the active callback are rejected. Await the checkpoint before proceeding.
+`{ok:true,committed:true,value}` on success. On failure it rolls back and rethrows
+the cause, so an ignored failed checkpoint cannot report program success. Use
+`try { await edit(async () => {...}); } catch (error) {...}` for deliberate recovery.
+Shell commands, overlapping/nested checkpoints, and concurrent commands outside
+the active callback are rejected. Await the checkpoint before proceeding.
 
 ## Context, caching and failure fidelity
 
@@ -396,9 +461,15 @@ outside the active callback are rejected. Await the checkpoint before proceeding
   is not proof the model still retains an earlier result after compaction.
 - Oversized text reads provide an exact next-line offset. A single line too large
   for the budget fails explicitly instead of pretending it was read completely.
+- Model attachments support PNG, JPEG, GIF and WebP. BMP and other unsupported
+  MIME types fail before attachment or commit, rather than causing a provider
+  HTTP 400 on the next request. Convert those sources to PNG first; Supernova
+  does not silently convert, resize or modify the original image.
 - Returned images remain image content blocks, including in arrays/objects. Images
   not returned by the program stay out of model output. Returned images are limited
-  to 16 attachments / 20 MiB; resize or return fewer when necessary.
+  to 16 attachments / 20 MiB. Overflow fails the program with the aggregate count
+  and byte size, returns no images, and rolls back pending writes. Resize or return
+  fewer images when necessary.
 - Dense multiline string arrays can render as verbatim source blocks instead of
   escaped string literals. Each block gives its array index and exact UTF-16 length;
   strings and result types are unchanged. This is output framing, not source
@@ -455,7 +526,10 @@ There is no dependency on or automatic routing to any consumer package.
 
 CodeMode executes trusted JavaScript in a terminable worker, **not a security
 sandbox**. The four adapters constrain writes/edits to the workspace and allow
-explicit external reads. JavaScript imports and shell commands still have process
+explicit external reads. Absolute temporary-directory paths outside the workspace
+are not write destinations: use a workspace path such as `.work/verification.log`,
+or a separately authorized external command. Errors identify the rejected path
+and workspace, including symlink escapes. JavaScript imports and shell commands still have process
 privileges. Do not run untrusted programs as though these adapters isolate them.
 
 Pi preflights the outer `supernova` call. Internal primitives do not emit ordinary

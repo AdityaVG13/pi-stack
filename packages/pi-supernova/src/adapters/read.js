@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isString, isNumber } from "../shared/decode.js";
+import { isString, isNumber, assertModelImageMime } from "../shared/decode.js";
 import { extractStructuralSurface } from "../context/surface.js";
 import { pickSpan } from "../context/spans.js";
 import { executeSnap, tokenizeQuery, stem } from "../context/snap.js";
@@ -646,7 +646,8 @@ export function createRead(ctx) {
     const lines = contentLineInfo(loaded.text).count;
 
     if (n > RAW_SOURCE_CHARS || lines > RAW_SOURCE_LINES) {
-      throw new Error("raw read of " + rel + " is " + lines + " lines; use about, offset/limit, or complete:true");
+      const p = JSON.stringify(rel);
+      throw new Error(`raw read of ${rel} is ${lines} lines / ${n} characters; path-only limit is ${RAW_SOURCE_LINES} lines / ${RAW_SOURCE_CHARS} characters. Use read(${p}, {offset:1, limit:80}) for a window, read(${p}, {about:"keywords"}) for matches, or read(${p}, {complete:true}) for the whole file within the read budget`);
     }
 
     return null;
@@ -656,6 +657,7 @@ export function createRead(ctx) {
     const mime = IMAGE_MIME[path.extname(targetPath).toLowerCase()];
 
     if (!mime) return null;
+    assertModelImageMime(mime);
     const bytes = await readImage(rel, targetPath, mime, signal);
 
     if (bytes.length > IMAGE_MAX_BYTES) throw imageTooLarge(rel, bytes.length);
@@ -684,7 +686,7 @@ export function createRead(ctx) {
 
   function assertComplete(rel, sliced, loaded, budget, params) {
     if (params.complete === true && (sliced !== loaded.text || sliced.length > budget || (params.resolve && !jsonFits(sliced, budget)))) {
-      throw new Error(`incomplete read of ${rel}: complete:true requires the entire file within the read budget; use json:".field" for JSON reports, about for text selection, edit() for replacements, or reconstruct resolve:true source windows`);
+      throw new Error(`incomplete read of ${rel}: complete:true requires the entire file within the read budget (${budget} characters). Use read(${JSON.stringify(rel)}, {offset:1, limit:80}) for a window, json:".field" for JSON reports, edit() for replacements, or bash({command,args}) with a bounded parser for large text/JSONL files`);
     }
   }
 

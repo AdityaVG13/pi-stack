@@ -25,7 +25,7 @@ export function imageTooLarge(rel, size) {
 }
 
 export function missingFile(targetPath) {
-  const error = new Error("no such file: " + targetPath + " (locate it with read using a directory path or source question)");
+  const error = new Error("no such file: " + targetPath + " (locate it with read using a directory path or source question; use Promise.allSettled for optional reads to retain successful siblings)");
   error.code = "ENOENT";
   return error;
 }

@@ -1,4 +1,4 @@
-import { isString, isObject } from "../shared/decode.js";
+import { isString, isObject, mapChangedChildren } from "../shared/decode.js";
 
 function normalizeText(text) {
   return isString(text) ? text : String(text ?? "");
@@ -109,32 +109,40 @@ function formatRawStringArray(value) {
   return raw.length < escapedSize ? raw : null;
 }
 
-function shouldFrameRaw(input) {
-  return isString(input) && input.includes("\n") && !hasUnpairedSurrogate(input) && JSON.stringify(input).length - input.length > 64;
+function rawStringSize(input) {
+  if (!isString(input) || !input.includes("\n") || hasUnpairedSurrogate(input)) return 0;
+  const size = JSON.stringify(input).length;
+
+  return size - input.length > 64 ? size : 0;
 }
 
-function visitRawStrings(input, strings) {
-  if (shouldFrameRaw(input)) {
-    const index = strings.push(input) - 1;
+function visitRawStrings(input, acc) {
+  const size = rawStringSize(input);
+
+  if (size) {
+    const index = acc.strings.push(input) - 1;
+    acc.escapedChars += size;
 
     return { [RAW_TEXT]: "raw[" + index + "]" };
   }
 
-  if (Array.isArray(input)) return input.map(child => visitRawStrings(child, strings));
-
-  if (isObject(input)) return Object.fromEntries(Object.entries(input).map(([key, child]) => [key, visitRawStrings(child, strings)]));
-
-  return input;
+  return mapChangedChildren(input, visitRawStrings, acc);
 }
 
-function framedReturn(value, escaped) {
-  const strings = [];
-  const referencedValue = visitRawStrings(value, strings);
+function framedReturn(value) {
+  const acc = { strings: [], escapedChars: 0 };
+  const referencedValue = visitRawStrings(value, acc);
+  const { strings } = acc;
 
-  if (!strings.length) return escaped;
+  if (!strings.length) return formatValue(value);
   // Keep every key, value, duplicate string and byte. References are unquoted
   // expressions, so literal "raw[0]" values and header-like source cannot collide.
   const framed = formatValue(referencedValue) + "\nraw strings[" + strings.length + "]\n" + strings.map((text, i) => "raw[" + i + "] " + text.length + " UTF-16 units\n" + text + "\n").join("");
+
+  // The ordinary rendering contains at least these complete escaped literals.
+  // If framing beats even that lower bound, do not build the discarded rendering.
+  if (framed.length < acc.escapedChars) return framed;
+  const escaped = formatValue(value);
 
   return framed.length < escaped.length ? framed : escaped;
 }
@@ -146,7 +154,7 @@ export function formatReturn(value) {
 
   if (rawArray !== null) return rawArray;
 
-  return framedReturn(value, formatValue(value));
+  return framedReturn(value);
 }
 
 const RAW_TEXT = Symbol("raw text reference");

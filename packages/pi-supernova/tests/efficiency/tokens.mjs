@@ -9,7 +9,7 @@ import { formatReturn, formatValue } from "../../src/output/format.js";
 import { registerCodeMode } from "../../index.js";
 import { registrationHost, engineFixture, modelText } from "../helpers/engine.mjs";
 import { programBatchText } from "../../src/runtime/program-batch.js";
-import { assertElisionOnly, auditWorkload, runWorkload, workloadHash, trafficCounts } from "./workflow.mjs";
+import { assertElisionOnly, auditWorkload, runWorkload, workloadHash, trafficCounts, runBatchReuseWorkload } from "./workflow.mjs";
 
 const { getEncoding } = await import(process.argv[2] ? pathToFileURL(path.resolve(process.argv[2])).href : "js-tiktoken");
 
@@ -29,6 +29,11 @@ assert.equal(createHash("sha256").update(baselineText).digest("hex"), "96964f990
 const baseline = JSON.parse(baselineText);
 
 const beforeDefinition = baseline.definition;
+
+const reuseText = await fs.readFile(new URL("./batch-reuse-baseline.json",import.meta.url),"utf8");
+assert.equal(createHash("sha256").update(reuseText).digest("hex"),"589960c417006630872c16fae9ae5be4f5cdbdddbf86dda9fd9377651352055a","batch-reuse inputs, pre-feature definition and complete output are frozen");
+const reuseBaseline = JSON.parse(reuseText);
+const batchReuse = await runBatchReuseWorkload(reuseBaseline);
 
 const workload = auditWorkload(baseline.source,baseline.decode);
 
@@ -131,6 +136,8 @@ const setup = JSON.stringify({code:"await write(data.path,data.content)",data:{p
 
 // Measured before this pass on commit d444eb7; same frozen workload and six calls.
 const priorBatchTraffic = {o200k_base:18535,cl100k_base:18310};
+// Captured from the unreleased working tree before shared-source/object defaults.
+const passStartingTraffic = {o200k_base:10191,cl100k_base:10067};
 
 assert.equal(workloadHash(candidate.events.map(event=>event.args)),"dcc1f796315bc25cb3e0ccbd6fc226641bff3f4054b61f0625fbe0cc7bd7f066","do not remove model decision boundaries or change the six-call schedule");
 
@@ -160,6 +167,10 @@ for (const name of ["o200k_base","cl100k_base"]) {
   assert.ok(sharedArgumentsAfter <= sharedArgumentsBefore * .30, "shared defaults must remove at least 70% of repeated argument traffic");
   assert.ok(sharedAfter <= sharedBefore * .40, "shared defaults must save at least 60% including full outputs, both definitions and replay");
   const sharedData = {before:sharedBefore,after:sharedAfter,savedPercent:Number(((1-sharedAfter/sharedBefore)*100).toFixed(2)),argumentsBefore:sharedArgumentsBefore,argumentsAfter:sharedArgumentsAfter,resultTokens:sharedResultTokens,programs:8,sourceFiles:48,completeOutputsEqual:true};
+  const reuseBefore = 2*count(JSON.stringify(reuseBaseline.definition)) + 2*count(JSON.stringify(batchReuse.repeated)) + count(reuseBaseline.output);
+  const reuseAfter = 2*count(JSON.stringify(definition)) + 2*count(JSON.stringify(batchReuse.args)) + count(batchReuse.output);
+  assert.ok(reuseAfter<=Math.floor(reuseBefore*.22),name+": require >=78% for shared program/object defaults, including definitions, arguments, replay and identical complete outputs");
+  const sharedProgramReuse = {before:reuseBefore,after:reuseAfter,savedPercent:Number(((1-reuseAfter/reuseBefore)*100).toFixed(2)),argumentsBefore:count(JSON.stringify(batchReuse.repeated)),argumentsAfter:count(JSON.stringify(batchReuse.args)),resultTokens:count(batchReuse.output),programs:reuseBaseline.programs.length,modelCalls:1,finalFiles:2*reuseBaseline.programs.length,completeOutputsEqual:true};
   const schemaDelta = count(JSON.stringify(definition)) - count(JSON.stringify(beforeDefinition));
   const argumentSavings = count(inline)*5 - count(reused)*5 - count(setup);
   assert.ok(argumentSavings > 0);
@@ -185,8 +196,8 @@ for (const name of ["o200k_base","cl100k_base"]) {
 
   if(afterTraffic.total>Math.floor(prior*.81)) failures.push(name+": current-pass traffic "+afterTraffic.total+" > "+Math.floor(prior*.81)+"; require another 19% on unchanged programs/results");
 
-  if (savedFraction < .40) failures.push(name + ": " + afterTraffic.total + " > " + Math.floor(beforeTraffic.total * .60) + " (" + (savedFraction*100).toFixed(2) + "% savings; require >=40%)");
-  reports.push({encoding:name,sharedData,currentPass:{baselineRevision:"d444eb7",before:prior,after:afterTraffic.total,savedPercent:Number(((1-afterTraffic.total/prior)*100).toFixed(2))},traffic:{before:beforeTraffic,after:afterTraffic,savedPercent:Number((savedFraction*100).toFixed(2)),maximumTokens:Math.floor(beforeTraffic.total*.60)},observed:{experimental:true,enabledByDefault:false,total:observedTraffic.total,unobservedSameSchedule:beforeTraffic.total,saved:beforeTraffic.total-observedTraffic.total,savedPercent:Number(((1-observedTraffic.total/beforeTraffic.total)*100).toFixed(2)),ceiling:Number.isInteger(observedCeiling)?observedCeiling:null},outputs,definition:{before:count(JSON.stringify(beforeDefinition)),after:count(JSON.stringify(definition)),addedTokens:schemaDelta},
+  if (savedFraction < .65) failures.push(name + ": " + afterTraffic.total + " > " + Math.floor(beforeTraffic.total * .35) + " (" + (savedFraction*100).toFixed(2) + "% savings; require >=65%)");
+  reports.push({encoding:name,sharedData,sharedProgramReuse,thisPass:{before:passStartingTraffic[name],after:afterTraffic.total,savedPercent:Number(((1-afterTraffic.total/passStartingTraffic[name])*100).toFixed(2))},currentPass:{baselineRevision:"d444eb7",before:prior,after:afterTraffic.total,savedPercent:Number(((1-afterTraffic.total/prior)*100).toFixed(2))},traffic:{before:beforeTraffic,after:afterTraffic,savedPercent:Number((savedFraction*100).toFixed(2)),maximumTokens:Math.floor(beforeTraffic.total*.35)},observed:{experimental:true,enabledByDefault:false,total:observedTraffic.total,unobservedSameSchedule:beforeTraffic.total,saved:beforeTraffic.total-observedTraffic.total,savedPercent:Number(((1-observedTraffic.total/beforeTraffic.total)*100).toFixed(2)),ceiling:Number.isInteger(observedCeiling)?observedCeiling:null},outputs,definition:{before:count(JSON.stringify(beforeDefinition)),after:count(JSON.stringify(definition)),addedTokens:schemaDelta},
     reuse:{inline:count(inline),file:count(reused),setup:count(setup),fiveInline:count(inline)*5,fiveFileWithSetup:count(reused)*5+count(setup),savedArgumentTokens:argumentSavings,
       argumentOnlyBreakEvenExecutions:Math.floor(count(setup)/(count(inline)-count(reused)))+1}});
 }

@@ -36,7 +36,7 @@ it("CodeMode guidance advertises the four commands, not optional command familie
 
   for (const name of ["read", "edit", "write", "bash"]) assert.ok(guidance.includes(name));
 
-  for (const needle of ["complete:true", "resolve:true", "append:true", "programs:", "json:", "args", "numbered window", "edit(view,text)", "edit(view,old,new)", "Found is a span", "same view as resolve", "too_large"]) {
+  for (const needle of ["complete:true", "resolve:true", "append:true", "programs:", "json:", "args", "numbered window", "edit(view,text)", "edit(view,old,new)", "view.text is a span", 'read("symbol or question") = read({query,resolve:true})', "too_large"]) {
     assert.ok(guidance.includes(needle), `standing reference dropped ${needle}`);
   }
 

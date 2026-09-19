@@ -1,6 +1,6 @@
 import { it } from "node:test";
 import assert from "node:assert/strict";
-import { runGuestProgram } from "../../src/runtime/runtime.js";
+import { runGuestProgram, stopWarmGuestWorker } from "../../src/runtime/runtime.js";
 import { limits } from "../helpers/engine.mjs";
 
 it("independent read starts coalesce into one bridge request without callMany or a batching helper", async () => {
@@ -33,4 +33,41 @@ it("a program error cannot bypass the configured return-text budget", async () =
   assert.match(result.error, /diagnostic-/);
   assert.ok(result.error.length <= budget, `Error emitted ${result.error.length} characters against a ${budget}-character budget`);
   assert.match(result.error, /truncat|omitt|spill/i, "Clipped diagnostics must disclose omitted content");
+});
+
+it("completion retains no drain timer, but still cancels and bounds pending calls", async t => {
+  const pending = new Set();
+  const schedule = globalThis.setTimeout, clear = globalThis.clearTimeout;
+  let drains = 0;
+  t.mock.method(globalThis, "setTimeout", (fn, ms, ...args) => {
+    if (ms !== 250) return schedule(fn, ms, ...args);
+    const timer = schedule(() => { pending.delete(timer); fn(...args); }, ms);
+    drains++;
+    pending.add(timer);
+    return timer;
+  });
+  t.mock.method(globalThis, "clearTimeout", timer => { pending.delete(timer); return clear(timer); });
+  t.after(stopWarmGuestWorker);
+
+  for (const code of ['return 42;', 'throw Error("expected");']) {
+    const result = await runGuestProgram({code, config:limits});
+    assert.equal(result.ok, code.startsWith("return"));
+    assert.equal(drains, 0, "settled runs must not schedule a 250 ms cleanup delay");
+  }
+
+  let release, cancelled = 0;
+  const settled = await runGuestProgram({code:'void bash("pending"); return 42;', config:limits, nova:{
+    call: () => new Promise(resolve => { release = resolve; }),
+    cancel() { cancelled++; release({ok:true,value:"stopped"}); },
+  }});
+  assert.equal(settled.ok, true, settled.error);
+  assert.equal(cancelled, 1);
+  assert.equal(drains, 1, "an outstanding call still receives its bounded drain");
+  assert.equal(pending.size, 0, "settling early must clear the fallback timer");
+
+  const stuck = await runGuestProgram({code:'void bash("pending"); return 42;', config:limits, nova:{call:() => new Promise(() => {})}});
+  assert.equal(stuck.ok, false);
+  assert.match(stuck.error, /host call still running/);
+  assert.equal(drains, 2);
+  assert.equal(pending.size, 0);
 });

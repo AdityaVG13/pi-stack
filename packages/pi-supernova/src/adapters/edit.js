@@ -131,6 +131,7 @@ export function createEdit(ctx) {
   }
 
   async function changedDeclarationRefs(cwd, target, original, updated, diff, signal) {
+    if (/\.(md|mdx|rst|txt)$/i.test(target)) return "";
     const names = collectChangedNames(target, original, updated, diff);
 
     if (names.size === 0) return "";
@@ -143,7 +144,7 @@ export function createEdit(ctx) {
     } catch (error) {
       signal?.throwIfAborted();
 
-      return "references unavailable: " + error.message;
+      return "references unavailable: " + String(error.message).slice(0, 512);
     }
   }
 

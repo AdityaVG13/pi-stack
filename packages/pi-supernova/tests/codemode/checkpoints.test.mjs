@@ -13,7 +13,7 @@ it("workspace notifications describe disk commits, not checkpoint merges or roll
     events.push({ event, contents: event.paths?.map(p => readFileSync(p, "utf8")) });
   } };
   await f.execute(`
-    await edit(async () => { await write("discarded.txt", "no"); throw Error("rollback"); });
+    await edit(async () => { await write("discarded.txt", "no"); throw Error("rollback"); }).catch(error => { if (error.message !== "rollback") throw error; });
     await edit(async () => { await write("kept.txt", "checkpoint"); });
     await write("kept.txt", "final");
   `);
@@ -50,7 +50,7 @@ it("edit callbacks retain filesystem checkpoints without exposing a speculate co
     const rejected = await edit(async () => {
       await write("state.txt", "candidate");
       throw Error("candidate rejected");
-    });
+    }).catch(error => ({error:error.message}));
     const restored = await read("state.txt");
     const accepted = await edit(async () => {
       await write({path:"state.txt",content:"accepted",replace:true});
@@ -59,8 +59,7 @@ it("edit callbacks retain filesystem checkpoints without exposing a speculate co
     return {rejected, restored, accepted, final: await read("state.txt")};
   `);
 
-  assert.equal(result.details.result.rejected.ok, false);
-  assert.match(result.details.result.rejected.error, /candidate rejected/);
+  assert.deepEqual(result.details.result.rejected, {error:"candidate rejected"});
   assert.equal(result.details.result.restored, "original");
   assert.deepEqual(result.details.result.accepted, { ok: true, committed: true, value: "validated" });
   assert.equal(result.details.result.final, "accepted");

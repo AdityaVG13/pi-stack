@@ -27,20 +27,19 @@ it("an active checkpoint rejects outside writes instead of absorbing them into i
   await f.write("state.txt", "original");
 
   const result = await f.execute(`
-    const candidate = edit(async () => { await write("state.txt", "candidate"); throw Error("reject"); });
+    const candidate = edit(async () => { await write("state.txt", "candidate"); throw Error("reject"); }).catch(error => error.message);
     const outside = await write("state.txt", "outside").then(() => "unexpected", error => error.message);
-    await candidate;
-    return {outside, text:await read("state.txt")};
+    const rejected = await candidate;
+    return {outside, rejected, text:await read("state.txt")};
   `);
 
   assert.equal(result.details.result.outside, "await the active edit checkpoint before issuing other commands; completed checkpoints cannot issue commands");
+  assert.equal(result.details.result.rejected, "reject");
   assert.equal(result.details.result.text, "original");
 });
 
 it("a filesystem checkpoint rejects shell side effects before launching the command", async t => {
   const f = await engineFixture(t);
-  const result = await f.execute('return await edit(async () => { await bash("printf escaped > escaped.txt"); });');
-  assert.equal(result.details.result.ok, false);
-  assert.match(result.details.result.error, /cannot run inside an edit checkpoint/);
+  await assert.rejects(f.execute('return await edit(async () => { await bash("printf escaped > escaped.txt"); });'), /cannot run inside an edit checkpoint/);
   await assert.rejects(fs.stat(path.join(f.root, "escaped.txt")), { code: "ENOENT" });
 });

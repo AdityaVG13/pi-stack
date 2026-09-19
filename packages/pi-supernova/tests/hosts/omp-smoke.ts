@@ -3,7 +3,9 @@ import fs from "node:fs/promises";
 import assert from "node:assert/strict";
 
 export default function (pi) {
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", (_event, ctx) => {
+    // Let startup finish so RPC can process the fixture's real approval replies.
+    setImmediate(async () => {
     try {
       const id = ctx.sessionManager.getSessionId();
 
@@ -29,6 +31,12 @@ export default function (pi) {
       await assert.rejects(tool.execute("omp-failure", { code: 'throw Error("host-failure-sentinel");' }, undefined, undefined, ctx), /host-failure-sentinel/);
       const batch = await tool.execute("omp-batch",{programs:[{code:"return data;",data:false},{code:"return 42;"}]},undefined,undefined,ctx);
       assert.deepEqual(batch.details.result,[false,42]);
+      const shared = await tool.execute("omp-shared-batch",{
+        code:'data.seen++; return data;',data:{seen:0,literal:"shared λ😀\r\n"},mergeData:true,
+        programs:[{data:{job:1}},{data:{job:2}}],
+      },undefined,undefined,ctx);
+      assert.equal(shared.details.ok,true);
+      assert.deepEqual(shared.details.result,[{seen:1,literal:"shared λ😀\r\n",job:1},{seen:1,literal:"shared λ😀\r\n",job:2}]);
       const stopped = await tool.execute("omp-batch-stop",{programs:[{code:'return await read("pixel.png");'},{code:'throw Error("batch-stop");'},{code:"return 9;"}]},undefined,undefined,ctx);
       assert.equal(stopped.details.ok,false); assert.equal(stopped.isError,true); assert.equal(stopped.details.attempted,2);
       assert.ok(stopped.content.some(block=>block.type==="image"));
@@ -38,5 +46,6 @@ export default function (pi) {
       await fs.writeFile(process.env.SUPERNOVA_HOST_OUTPUT, JSON.stringify({ error: String(error) }));
       process.exit(1);
     }
+    });
   });
 }

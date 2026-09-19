@@ -373,6 +373,8 @@ function formatTarget(op, budget) {
 function opMarker(theme, op, isPartial, isError) {
 	if (op.ok === false) return theme.fg("error", "×");
 
+	if (op.mutationAttempt) return theme.fg("warning", "·");
+
 	if (op.ok === true) return theme.fg("success", "✓");
 
 	if (isPartial) return theme.fg("dim", "·");
@@ -430,8 +432,9 @@ function formatOpRow(theme, op, width, isPartial, isError) {
 	const duration = theme.fg("dim", durationText.padStart(DURATION_COL));
 	const exit = appendExit(theme, op);
 	const counts = appendDiffCounts(theme, op);
-	const prefix = `${marker} ${tool} ${duration}  ` + exit.text + counts.text;
-	const used = 2 + toolText.length + 1 + DURATION_COL + 2 + exit.width + counts.width;
+	const outcome = op.mutationAttempt ? "attempted " : "";
+	const prefix = `${marker} ${tool} ${duration}  ` + exit.text + counts.text + theme.fg("warning", outcome);
+	const used = 2 + toolText.length + 1 + DURATION_COL + 2 + exit.width + counts.width + outcome.length;
 
 	return opRowSuffix(theme, op, prefix, Math.max(1, width - used));
 }
@@ -460,10 +463,22 @@ function appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, is
 	if (ops.length > maxOps) lines.push(theme.fg("dim", `  … ${ops.length - maxOps} more calls`));
 }
 
-function appendError(lines, theme, payload, expanded, width) {
-	const error = "✗ " + (payload?.error ? cleanBlockText(payload.error) : "error");
+function appendError(lines, theme, payload, _expanded, width) {
+	const errors = [payload?.error || "error"];
+	for (const [i, program] of (payload?.programs ?? []).entries()) {
+		if (program.details?.ok === false) errors.push(`program ${i + 1}: ${program.details.error || resultTextContent(program)}`);
+	}
+	for (const error of errors) for (const line of resultLines("✗ " + cleanBlockText(error), width)) lines.push(theme.fg("error", line));
+}
 
-	for (const line of expanded ? resultLines(error, width) : error.split("\n")) lines.push(theme.fg("error", line));
+function appendMutations(lines, theme, payload, width) {
+	const m = payload?.mutations;
+	if (!m || !(m.committed || m.rolledBack || m.external || m.pendingCommits || m.recoveryFailed)) return;
+	const summary = `file versions: committed=${m.committed || 0} rolledBack=${m.rolledBack || 0}`
+		+ (m.external ? `; external calls attempted=${m.external}` : "")
+		+ (m.pendingCommits ? `; pendingCommits=${m.pendingCommits}` : "")
+		+ (m.recoveryFailed ? "; recovery failed: inspect files" : "");
+	for (const line of resultLines(summary, width)) lines.push(theme.fg(m.rolledBack || m.recoveryFailed ? "warning" : "dim", line));
 }
 
 function appendResult(lines, theme, payload, expanded, width) {
@@ -502,17 +517,22 @@ function appendOverflow(lines, theme, trace, maxOps, isPartial) {
 }
 
 function appendEmptyOps(lines, theme, ops, isError, isPartial) {
-	if (ops.length === 0 && !isError && !isPartial) lines.push(theme.fg("dim", "no adapter calls"));
+	if (ops.length === 0 && !isError && !isPartial) lines.push(theme.fg("dim", "JavaScript-only execution"));
 }
 
 function buildBodyLines(theme, width, { payload, context, expanded, isPartial, isError }) {
 	const trace = traceFor(payload, context);
 	const { maxOps, maxDiffLines } = bodyLimits(expanded, isPartial);
 	const ops = operationsFromTrace(visibleTrace(trace, maxOps, isPartial));
+	// Trace success records an operation, not persistence of every staged version.
+	// Mixed rollback/commit counts cannot safely be attributed to individual rows.
+	for (const op of ops) op.mutationAttempt = op.ok === true && ["write", "edit", "patch"].includes(op.tool)
+		&& (isPartial || isError || payload?.mutations?.rolledBack > 0 || payload?.mutations?.recoveryFailed);
 	const lines = [];
 	appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, isError);
 	appendOverflow(lines, theme, trace, maxOps, isPartial);
-	appendEmptyOps(lines, theme, ops, isError, isPartial);
+	if (!isPartial) appendMutations(lines, theme, payload, width);
+	if (Array.isArray(payload?.trace)) appendEmptyOps(lines, theme, ops, isError, isPartial);
 	appendTail(lines, theme, payload, expanded, isError, width, ops.length === 0 && !isPartial);
 
 	return { lines, opCount: trace.length };
@@ -594,12 +614,14 @@ function syncState(context, payload) {
 	if (payload.wallMs != null && context.state.wallMs !== payload.wallMs) context.state.wallMs = payload.wallMs;
 }
 
-function errorPayload(result) {
-	return result?.isError ? { ok: false, error: result.content?.flatMap(block => block.type === "text" ? [block.text] : []).join("\n") } : undefined;
+function resultTextContent(result) {
+	return result?.content?.flatMap(block => block.type === "text" ? [block.text] : []).join("\n") || "";
 }
 
-function payloadFromResult(result) {
-	return result?.details ?? errorPayload(result);
+function payloadFromResult(result, hostError) {
+	const payload = result?.details;
+	if (hostError) return {...payload, ok:false, error:payload?.error || resultTextContent(result) || "tool execution failed"};
+	return payload ?? {result:resultTextContent(result)};
 }
 
 function bindResultCard(host, options, context) {
@@ -619,9 +641,11 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 		themeArg,
 		contextArg,
 	);
-	const payload = payloadFromResult(result);
+	// Pi omits isError from result and supplies it through render context.
+	const hostError = result?.isError === true || context?.isError === true || options?.isError === true;
+	const payload = payloadFromResult(result, hostError);
 	syncState(context, payload);
-	const isError = result?.isError || payload?.ok === false;
+	const isError = hostError || payload?.ok === false;
 	const comp = bindResultCard(host, options, context);
 	comp.set(theme, { payload, context, args, expanded, isPartial, isError, host });
 

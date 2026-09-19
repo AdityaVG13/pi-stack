@@ -1,0 +1,252 @@
+{
+  "schema": 1,
+  "description": "Sixteen independent package-doc scaffolds, each with its own commit. Identical code and literal license/introduction, different directory input. No added helper files. Both saved outputs and all 32 final file contents are verified.",
+  "definition": {
+    "description": "JavaScript async body or arrow with read, write, edit, bash; file:path runs a program file. Put text/scripts/argv in data (default ≤48000 serialized JSON characters). No fs/import/require.\n\nread(path|paths, offset?, limit?) → raw text/text[]; directories → entries[]\nPath-only: ≤160 lines AND ≤8192 characters; otherwise read(path,{offset:1,limit:80}), read(path,{about:\"keywords\"}), or read(path,{complete:true}). Offsets are 1-based; complete requires the whole file within the default 31744-character budget. Large JSONL: bounded parser via bash.\nread(imagePath) → image (PNG/JPEG/GIF/WebP); ≤16 attachments / 20 MiB total, otherwise failure\nread({path,json:selector}) → parsed JSON; selectors: \".field\", \".items[0:3]\", \".items.length\", quoted keys, true. 16 MiB cap; no jq.\nOversized JSON → {status:\"too_large\",path,keys} (arrays: length); narrow the selector.\nread(\"symbol or question\") → same view as resolve:true\nread({query,resolve:true}) → {status,path,line,text,...}; check status\nread(path,{about}) → matching windows; read({query,evidence:true}) → ranked evidence; read({path,outline:true}) → declarations\nwrite(path,text) → replace unread workspace file; write({path,content,append:true}) → append without reading. After read use edit; replace:true overrides.\nedit(path,oldText,newText) | edit({path,edits:[{oldText,newText}]}) → numbered post-edit lines, checks, references. oldText must match read() exactly; misses return numbered windows.\nFound is a span, not the file. edit(view,text) replaces the window; edit(view,old,new) requires a unique match within it.\nedit(async()=>{...}) → checkpoint: merge on success; rollback/rethrow on failure; catch to recover\nbash(command,{cwd?,timeoutMs?}) or bash({command,args}) for literal argv → bounded output; nonzero throws; inherits program timeoutMs unless overridden\n\nArray reads reject failures; use Promise.allSettled for optional paths. Edits stage until success; bash commits preceding writes. Batch known reads/edits/tests with Promise.all or programs.\nprograms:[{code|file,data?},...] runs sequential fresh guests with separate commits; top-level data defaults per entry. Failure stops, keeping earlier commits. parallel:true runs disjoint entries concurrently. Separate calls only for new model decisions.\n",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "maxLength": 48000
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "data": {},
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1000
+        },
+        "programs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "maxLength": 48000
+              },
+              "file": {
+                "type": "string",
+                "minLength": 1
+              },
+              "data": {}
+            },
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "parallel": {
+          "type": "boolean"
+        }
+      }
+    },
+    "promptSnippet": "read, write, edit, bash"
+  },
+  "code": "const base = data.directory;\nconst readme = \"# \" + base.split(\"/\").at(-1) + \"\\n\\n\" + data.introduction + \"\\n\";\nconst receipts = await Promise.all([\n  write(base + \"/LICENSE\", data.license),\n  write(base + \"/README.md\", readme),\n]);\nconst saved = await Promise.all([\n  read({path:base + \"/LICENSE\", complete:true}),\n  read({path:base + \"/README.md\", complete:true}),\n]);\nif (saved[0] !== data.license || saved[1] !== readme) throw Error(\"scaffold content changed\");\nreturn {directory:base, receipts};",
+  "data": {
+    "license": "MIT License\n\nCopyright (c) 2026 AdityaVG13\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n",
+    "introduction": "The model submits JavaScript, not four separately advertised native tools.\nOrdinary JavaScript control flow remains available; the guest command bindings\nare only `read`, `edit`, `write`, and `bash`. Supernova supplies retrieval,\ntransactional file operations, batching, bounded results and the grouped nova UI."
+  },
+  "programs": [
+    {
+      "data": {
+        "directory": "packages/module-00"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-01"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-02"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-03"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-04"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-05"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-06"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-07"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-08"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-09"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-10"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-11"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-12"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-13"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-14"
+      }
+    },
+    {
+      "data": {
+        "directory": "packages/module-15"
+      }
+    }
+  ],
+  "repeatedArgumentsHash": "1b00c722ffe9ee44c791565e8f7414c3189ff28dab5bb11737bdc66cb20bf72d",
+  "output": "ok: programs 16/16\nresults (UTF-16 lengths):\n[0] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-00\",\n receipts:[\"wrote packages/module-00/LICENSE (speculative)\",\"wrote packages/module-00/README.md (speculative)\"]\n}\n[1] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-01\",\n receipts:[\"wrote packages/module-01/LICENSE (speculative)\",\"wrote packages/module-01/README.md (speculative)\"]\n}\n[2] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-02\",\n receipts:[\"wrote packages/module-02/LICENSE (speculative)\",\"wrote packages/module-02/README.md (speculative)\"]\n}\n[3] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-03\",\n receipts:[\"wrote packages/module-03/LICENSE (speculative)\",\"wrote packages/module-03/README.md (speculative)\"]\n}\n[4] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-04\",\n receipts:[\"wrote packages/module-04/LICENSE (speculative)\",\"wrote packages/module-04/README.md (speculative)\"]\n}\n[5] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-05\",\n receipts:[\"wrote packages/module-05/LICENSE (speculative)\",\"wrote packages/module-05/README.md (speculative)\"]\n}\n[6] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-06\",\n receipts:[\"wrote packages/module-06/LICENSE (speculative)\",\"wrote packages/module-06/README.md (speculative)\"]\n}\n[7] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-07\",\n receipts:[\"wrote packages/module-07/LICENSE (speculative)\",\"wrote packages/module-07/README.md (speculative)\"]\n}\n[8] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-08\",\n receipts:[\"wrote packages/module-08/LICENSE (speculative)\",\"wrote packages/module-08/README.md (speculative)\"]\n}\n[9] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-09\",\n receipts:[\"wrote packages/module-09/LICENSE (speculative)\",\"wrote packages/module-09/README.md (speculative)\"]\n}\n[10] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-10\",\n receipts:[\"wrote packages/module-10/LICENSE (speculative)\",\"wrote packages/module-10/README.md (speculative)\"]\n}\n[11] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-11\",\n receipts:[\"wrote packages/module-11/LICENSE (speculative)\",\"wrote packages/module-11/README.md (speculative)\"]\n}\n[12] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-12\",\n receipts:[\"wrote packages/module-12/LICENSE (speculative)\",\"wrote packages/module-12/README.md (speculative)\"]\n}\n[13] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-13\",\n receipts:[\"wrote packages/module-13/LICENSE (speculative)\",\"wrote packages/module-13/README.md (speculative)\"]\n}\n[14] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-14\",\n receipts:[\"wrote packages/module-14/LICENSE (speculative)\",\"wrote packages/module-14/README.md (speculative)\"]\n}\n[15] 210\nok #0 0ms\nmutations: committed=2 rolledBack=0 (file versions)\n{\n directory:\"packages/module-15\",\n receipts:[\"wrote packages/module-15/LICENSE (speculative)\",\"wrote packages/module-15/README.md (speculative)\"]\n}\n",
+  "result": [
+    {
+      "directory": "packages/module-00",
+      "receipts": [
+        "wrote packages/module-00/LICENSE (speculative)",
+        "wrote packages/module-00/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-01",
+      "receipts": [
+        "wrote packages/module-01/LICENSE (speculative)",
+        "wrote packages/module-01/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-02",
+      "receipts": [
+        "wrote packages/module-02/LICENSE (speculative)",
+        "wrote packages/module-02/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-03",
+      "receipts": [
+        "wrote packages/module-03/LICENSE (speculative)",
+        "wrote packages/module-03/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-04",
+      "receipts": [
+        "wrote packages/module-04/LICENSE (speculative)",
+        "wrote packages/module-04/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-05",
+      "receipts": [
+        "wrote packages/module-05/LICENSE (speculative)",
+        "wrote packages/module-05/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-06",
+      "receipts": [
+        "wrote packages/module-06/LICENSE (speculative)",
+        "wrote packages/module-06/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-07",
+      "receipts": [
+        "wrote packages/module-07/LICENSE (speculative)",
+        "wrote packages/module-07/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-08",
+      "receipts": [
+        "wrote packages/module-08/LICENSE (speculative)",
+        "wrote packages/module-08/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-09",
+      "receipts": [
+        "wrote packages/module-09/LICENSE (speculative)",
+        "wrote packages/module-09/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-10",
+      "receipts": [
+        "wrote packages/module-10/LICENSE (speculative)",
+        "wrote packages/module-10/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-11",
+      "receipts": [
+        "wrote packages/module-11/LICENSE (speculative)",
+        "wrote packages/module-11/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-12",
+      "receipts": [
+        "wrote packages/module-12/LICENSE (speculative)",
+        "wrote packages/module-12/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-13",
+      "receipts": [
+        "wrote packages/module-13/LICENSE (speculative)",
+        "wrote packages/module-13/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-14",
+      "receipts": [
+        "wrote packages/module-14/LICENSE (speculative)",
+        "wrote packages/module-14/README.md (speculative)"
+      ]
+    },
+    {
+      "directory": "packages/module-15",
+      "receipts": [
+        "wrote packages/module-15/LICENSE (speculative)",
+        "wrote packages/module-15/README.md (speculative)"
+      ]
+    }
+  ]
+}

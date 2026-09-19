@@ -426,7 +426,9 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
       },
     },
     fork(options) {
-      return createHostBridge({ pi, config, getCwd: options.getCwd, registry: sharedRegistry, ledger: ledger.fork(), budget: options.budget });
+      const runConfig = options.timeoutMs === undefined ? config : { ...config, timeoutMs: Number(options.timeoutMs) };
+
+      return createHostBridge({ pi, config: runConfig, getCwd: options.getCwd, registry: sharedRegistry, ledger: ledger.fork(), budget: options.budget });
     },
     close() { closed = true; vfs.closed = true; },
     bindCallContext,

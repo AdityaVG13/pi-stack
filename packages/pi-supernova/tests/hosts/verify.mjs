@@ -5,7 +5,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 
 const piRoot = process.env.PI_SUPERNOVA_PI_ROOT;
 
@@ -29,7 +30,7 @@ await fs.writeFile(path.join(root, "auth.js"), sourceBody);
 
 const code = `
   await write("state.txt", "before");
-  const checkpoint = await edit(async () => { await write("state.txt", "candidate"); throw Error("reject"); });
+  const checkpoint = await edit(async () => { await write("state.txt", "candidate"); throw Error("reject"); }).catch(error => ({ok:false,error:error.message}));
   await edit({path:"state.txt", edits:[{oldText:"before",newText:"after"}]});
   const a = read("state.txt"), b = read("state.txt");
   const text = await Promise.all([a,b]);
@@ -109,6 +110,15 @@ const batched = await tools[0].execute("pi-batch",batchArgs,undefined,undefined,
 
 assert.deepEqual(batched.details.result,[false,42]);
 
+const sharedArgs = validateToolArguments(tools[0],{name:"supernova",arguments:{
+  code:'data.seen++; return data;',data:{seen:0,literal:"shared λ😀\r\n"},mergeData:true,
+  programs:[{data:{job:1}},{data:{job:2}}],
+}});
+const sharedBatch = await tools[0].execute("pi-shared-batch",sharedArgs,undefined,undefined,runner.createContext());
+assert.equal(sharedBatch.details.ok,true);
+assert.deepEqual(sharedBatch.details.result,[{seen:1,literal:"shared λ😀\r\n",job:1},{seen:1,literal:"shared λ😀\r\n",job:2}]);
+assert.equal(sharedArgs.data.seen,0,"actual host inputs must not be mutated");
+
 const stoppedBatch = await tools[0].execute("pi-batch-stop",{programs:[{code:'return await read("pixel.png");'},{code:'throw Error("batch-stop");'},{code:"return 9;"}]},undefined,undefined,runner.createContext());
 
 assert.equal(stoppedBatch.details.ok,false);
@@ -119,7 +129,8 @@ assert.equal(stoppedBatch.details.attempted,2);
 
 assert.equal(stoppedBatch.content.find(block=>block.type==="image")?.data,png);
 
-await assert.rejects(tools[0].execute("pi-failure", { code: 'throw Error("host-failure-sentinel");' }, undefined, undefined, runner.createContext()), /host-failure-sentinel/);
+const hostFailure = await tools[0].execute("pi-failure", { code: 'throw Error("host-failure-sentinel");' }, undefined, undefined, runner.createContext()).then(() => assert.fail("must reject"), error => error);
+assert.match(hostFailure.message, /host-failure-sentinel/);
 
 const { visibleWidth } = await importPi("node_modules/@earendil-works/pi-tui/dist/index.js");
 
@@ -154,7 +165,7 @@ batchRow.markExecutionStarted();
 
  batchRow.setArgsComplete();
 
- batchRow.updateResult(stoppedBatch,true);
+ batchRow.updateResult(stoppedBatch,false);
 
 for (const expanded of [false,true]) {
   batchRow.setExpanded(expanded);
@@ -162,16 +173,54 @@ for (const expanded of [false,true]) {
   for (const width of [40,80,120,240]) for (const line of batchRow.render(width)) assert.ok(visibleWidth(line)<=width);
 }
 
+// Pi strips isError from the result argument and supplies it in render context.
+// Exercise that actual host handoff, not a result with a synthetic isError field.
+const errorRow = new ToolExecutionComponent("supernova","pi-failure",{code:'throw Error("host-failure-sentinel");'},{},tools[0],{requestRender(){}},root);
+errorRow.markExecutionStarted();
+errorRow.setArgsComplete();
+errorRow.updateResult({isError:true,content:[{type:"text",text:hostFailure.message}]},false);
+for (const expanded of [false,true]) {
+  errorRow.setExpanded(expanded);
+  const text = errorRow.render(120).join("\n");
+  assert.match(text,/failed/);
+  assert.match(text,/host-failure-sentinel/);
+  assert.doesNotMatch(text,/JavaScript-only execution|nova: complete/);
+  for (const width of [40,80,120,240]) for (const line of errorRow.render(width)) assert.ok(visibleWidth(line)<=width);
+}
+
 await fs.writeFile(path.join(root, "auth.js"), sourceBody);
 
-const child = spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)(deny network*)", omp,
+// Exercise OMP's real approval gate rather than disabling it. Only the known
+// fixture tool is approved in this disposable, network-denied process.
+function runOmp(command, args, options) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, options);
+    let stdout = "", stderr = "";
+    const timer = setTimeout(() => { child.kill(); reject(new Error("OMP smoke timed out\n" + stdout + stderr)); }, 20000);
+    const lines = createInterface({ input: child.stdout });
+    lines.on("line", line => {
+      stdout += line + "\n";
+      let event;
+      try { event = JSON.parse(line); } catch { return; }
+      if (event.type !== "extension_ui_request") return;
+      const approved = event.method === "select" && event.title === "Allow tool: supernova" && event.options?.includes("Approve");
+      child.stdin.write(JSON.stringify({type:"extension_ui_response",id:event.id,...(approved ? {value:"Approve"} : {cancelled:true})}) + "\n");
+      if (!approved) stderr += "Unexpected approval request: " + line + "\n";
+    });
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    child.on("error", error => { clearTimeout(timer); reject(error); });
+    child.on("close", status => { clearTimeout(timer); lines.close(); resolve({status,stdout,stderr}); });
+  });
+}
+
+const child = await runOmp("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)(deny network*)", omp,
   "--cwd", root, "--mode", "rpc", "--tools", "read,edit,write,bash", "--no-lsp", "--no-pty", "--no-extensions", "--no-skills", "--no-rules", "--no-title", "--session", path.join(root, "session.jsonl"),
   "-e", path.join(packageRoot, "index.js"), "-e", path.join(packageRoot, "tests/hosts/omp-smoke.ts")], {
-  encoding: "utf8", timeout: 20000,
+  stdio: ["pipe", "pipe", "pipe"],
   env: { ...process.env, PI_CODING_AGENT_DIR: path.join(root, "omp-config"), PI_SUPERNOVA_CONFIG: path.join(packageRoot, "src/config/config.default.json"), SUPERNOVA_HOST_PROGRAM: path.join(root, "program.js"), SUPERNOVA_HOST_OUTPUT: path.join(root, "omp-result.json") },
 });
 
-assert.equal(child.status, 0, child.stderr || String(child.error));
+assert.equal(child.status, 0, child.stderr + child.stdout);
 
 verify(JSON.parse(await fs.readFile(path.join(root, "omp-result.json"), "utf8")));
 

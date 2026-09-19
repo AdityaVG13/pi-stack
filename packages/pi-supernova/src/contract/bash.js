@@ -11,7 +11,12 @@ function normalizeArgv(args) {
   if (args.args === undefined) return;
   if (!isString(args.command) || !Array.isArray(args.args)) throw new Error(ARGV_ERROR);
 
-  for (let i = 0; i < args.args.length; i++) if (!isString(args.args[i])) throw new Error(ARGV_ERROR);
+  for (let i = 0; i < args.args.length; i++) {
+    if (!isString(args.args[i])) {
+      const type = args.args[i] === undefined ? "undefined" : "not a string";
+      throw new Error(`${ARGV_ERROR}; args[${i}] is ${type}; check the supplied data fields and pass each argument as a string`);
+    }
+  }
   args.args = args.args.map(String);
 
   if (process.platform === "win32") {

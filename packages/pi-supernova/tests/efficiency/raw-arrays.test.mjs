@@ -2,6 +2,7 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { formatReturn, formatValue } from "../../src/output/format.js";
+import { packageFinalReturn } from "../../src/output/bottleneck.js";
 import { engineFixture, modelText } from "../helpers/engine.mjs";
 
 it("multiline read arrays deliver unchanged source without JSON escaping or a model-side join", async t => {
@@ -106,4 +107,40 @@ it("nested framing retains compact scalar output and escapes unpaired UTF-16", (
   assert.ok(!text.includes("\ud800"));
   assert.match(text,/"raw\[0\]":raw\[0\]/);
   assert.equal(Object.hasOwn(value,"raw[0]"),true);
+});
+
+it("result packaging copies only changed branches without mutating images, keys or sparse arrays", () => {
+  const report = Object.freeze({ok:true,zero:-0,count:NaN});
+  assert.equal(packageFinalReturn(report, [], {}).returnValue, report);
+  const image = Object.freeze({type:"image",mimeType:"image/png",data:"AQ=="});
+  const sparse = [];
+  sparse[2] = image;
+  Object.freeze(sparse);
+  const value = Object.freeze(Object.fromEntries([["report",report],["sparse",sparse],["__proto__",image]]));
+  const packed = packageFinalReturn(value, [], {});
+  assert.equal(packed.returnValue.report, report);
+  assert.notEqual(packed.returnValue, value);
+  assert.equal(0 in packed.returnValue.sparse, false);
+  assert.equal(packed.returnValue.sparse[2], "[image 1: image/png]");
+  assert.equal(Object.hasOwn(packed.returnValue,"__proto__"), true);
+  assert.equal(packed.returnValue.__proto__, "[image 2: image/png]");
+  assert.equal(Object.getPrototypeOf(packed.returnValue), Object.prototype);
+  assert.equal(value.__proto__, image);
+  assert.equal(sparse[2], image);
+  assert.deepEqual(packed.images, [image,image]);
+  assert.equal(packed.returnTruncated, false);
+});
+
+it("raw-source fast paths keep the original shortest-rendering choice near framing boundaries", () => {
+  for (const count of [63,64,65,80,120]) {
+    for (const padding of ["", "metadata".repeat(30)]) {
+      const source = "\n".repeat(count);
+      const value = {padding,text:source};
+      const escaped = formatValue(value);
+      // This fixture stays away from the 120-column placeholder layout boundary.
+      const structure = formatValue({padding,text:"raw[0]"}).replace('"raw[0]"', 'raw[0]');
+      const framed = structure + "\nraw strings[1]\nraw[0] " + source.length + " UTF-16 units\n" + source + "\n";
+      assert.equal(formatReturn(value), framed.length < escaped.length ? framed : escaped);
+    }
+  }
 });

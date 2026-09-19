@@ -28,42 +28,56 @@ export function programBatchText(results, total, stopped = "", failed = 0) {
     }).join("");
 }
 
-function assertProgramEntry(p) {
+function assertProgramEntry(p, defaults = {}) {
+  const source = p?.code === undefined && p?.file === undefined ? defaults : p;
+
   if (!isObject(p) || Array.isArray(p) || Object.keys(p).some(key => !["code","file","data"].includes(key)) ||
-      ((p.code === undefined) === (p.file === undefined)) || !isString(p.code ?? p.file) || !(p.code ?? p.file).trim()) {
-    throw new Error("each program requires code OR file, with optional data; no nested batches or per-entry timeouts; no programs ran");
+      ((source.code === undefined) === (source.file === undefined)) || !isString(source.code ?? source.file) || !(source.code ?? source.file).trim()) {
+    throw new Error("each program requires code OR file (own or shared), with optional data; no nested batches or per-entry timeouts; no programs ran");
   }
 }
 
-function encodeBatchPayload(params) {
-  const hasDefault = params.data !== undefined;
-  let encoded;
+const objectData = value => isObject(value) && !Array.isArray(value);
 
-  try { encoded = JSON.stringify(hasDefault ? {programs:params.programs,data:params.data} : params.programs); } catch { throw new Error("programs and data must be JSON-serializable; no programs ran"); }
+function applyBatchDefaults(parsed, mergeData) {
+  if (mergeData && !objectData(parsed.data)) throw new Error("mergeData requires top-level object data; no programs ran");
+  const source = parsed.code !== undefined ? {code:parsed.code} : parsed.file !== undefined ? {file:parsed.file} : {};
 
-  return { hasDefault, encoded };
-}
+  return parsed.programs.map(program => {
+    assertProgramEntry(program, source);
+    const entry = program.code === undefined && program.file === undefined ? {...source,...program} : program;
 
-function applyDefaultData(parsed, hasDefault) {
-  if (!hasDefault) return parsed;
-  if (!Object.hasOwn(parsed,"data")) throw new Error("data must be JSON-serializable; no programs ran");
+    if (mergeData) {
+      if (program.data !== undefined && !objectData(program.data)) throw new Error("mergeData requires object data in every explicit entry; no programs ran");
+      // Shallow own-property overlay, including literal __proto__ keys. The
+      // runtime snapshots data again per guest; no mutable heap is shared.
+      entry.data = {...parsed.data,...program.data};
+    } else if (program.data === undefined && Object.hasOwn(parsed,"data")) entry.data = parsed.data;
 
-  // The runtime snapshots data separately for each fresh guest. An explicit
-  // entry replaces the default wholesale; falsy values are not missing values.
-  return parsed.programs.map(program => program.data === undefined ? {...program,data:parsed.data} : program);
+    return entry;
+  });
 }
 
 function parseBatchPayload(params, config) {
-  if (["code","file"].some(key => params[key] !== undefined)) throw new Error("programs cannot combine with top-level code or file; no programs ran");
-
   if (!Array.isArray(params.programs) || !params.programs.length || params.programs.length > 32) throw new Error("programs requires 1..32 entries; no programs ran");
+  if (params.mergeData !== undefined && params.mergeData !== true && params.mergeData !== false) throw new Error("mergeData must be boolean; no programs ran");
+  const defaults = Object.fromEntries(["code","file","data"].filter(key => params[key] !== undefined).map(key => [key,params[key]]));
 
-  for (const p of params.programs) assertProgramEntry(p);
-  const { hasDefault, encoded } = encodeBatchPayload(params);
+  if (defaults.code !== undefined || defaults.file !== undefined) assertProgramEntry(defaults);
+  for (const p of params.programs) assertProgramEntry(p, defaults);
+  const hasDefaults = Object.keys(defaults).length > 0;
+  let encoded;
 
-  if (encoded.length > (config.maxCodeChars ?? 48000)) throw new Error("programs JSON exceeds the code character budget; no programs ran");
+  try { encoded = JSON.stringify(hasDefaults ? {programs:params.programs,...defaults} : params.programs); } catch { throw new Error("programs and defaults must be JSON-serializable; no programs ran"); }
 
-  return applyDefaultData(JSON.parse(encoded), hasDefault);
+  if (encoded.length > (config.maxCodeChars ?? 48000)) throw new Error("programs JSON exceeds the code character budget (including shared code/file/data); no programs ran");
+  const parsed = hasDefaults ? JSON.parse(encoded) : {programs:JSON.parse(encoded)};
+
+  if (Object.hasOwn(defaults,"data") && !Object.hasOwn(parsed,"data")) throw new Error("data must be JSON-serializable; no programs ran");
+
+  // Validate and expand every entry before executing any. Defaults count once
+  // against admission, not once for each independent guest receiving a copy.
+  return applyBatchDefaults(parsed, params.mergeData === true);
 }
 
 function batchTimeoutMs(params, config) {

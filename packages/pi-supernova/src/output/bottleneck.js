@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { isString, isObject } from "../shared/decode.js";
+import { isString, isObject, mapChangedChildren, assertModelImageMime } from "../shared/decode.js";
 import { truncateChars, formatReturn, formatBoundedStringArray } from "./format.js";
 
 function json(value) {
@@ -239,15 +239,15 @@ export function packageHostResult(raw, config) {
 
 function collectImage(input, acc) {
   if (!(input?.type === "image" && isString(input.data) && isString(input.mimeType) && input.mimeType.startsWith("image/"))) return null;
+  assertModelImageMime(input.mimeType);
   const size = Buffer.byteLength(input.data, "base64");
 
-  if (acc.images.length >= 16 || acc.imageBytes + size > 20 * 1024 * 1024) {
-    acc.imageOverflow = true;
-
-    return "[image omitted: exceeds 16 attachments or 20 MiB]";
-  }
-
+  acc.imageCount += 1;
   acc.imageBytes += size;
+  if (acc.imageCount > 16 || acc.imageBytes > 20 * 1024 * 1024) {
+    acc.imageOverflow = true;
+    return "[image over budget]";
+  }
   acc.images.push({ type: "image", data: input.data, mimeType: input.mimeType });
 
   return `[image ${acc.images.length}: ${input.mimeType}]`;
@@ -258,11 +258,7 @@ function collectImages(input, acc) {
 
   if (replaced !== null) return replaced;
 
-  if (Array.isArray(input)) return input.map(child => collectImages(child, acc));
-
-  if (isObject(input)) return Object.fromEntries(Object.entries(input).map(([key, child]) => [key, collectImages(child, acc)]));
-
-  return input;
+  return mapChangedChildren(input, collectImages, acc);
 }
 
 function serializeReturn(value, formatted, maxReturn, imageOverflow) {
@@ -293,8 +289,11 @@ function clipLogs(logs, config) {
 }
 
 export function packageFinalReturn(value, logs, config) {
-  const acc = { images: [], imageBytes: 0, imageOverflow: false };
+  const acc = { images: [], imageCount: 0, imageBytes: 0, imageOverflow: false };
   value = collectImages(value, acc);
+  if (acc.imageOverflow) {
+    throw new Error(`image attachment budget exceeded: ${acc.imageCount} images / ${acc.imageBytes} bytes; limit is 16 images / 20971520 bytes (20 MiB). No images returned; return fewer or smaller images per program`);
+  }
   const maxReturn = config.maxReturnChars ?? 32000;
   const serialized = serializeReturn(value, formatReturn(value), maxReturn, acc.imageOverflow);
   const clipped = clipLogs(logs, config);

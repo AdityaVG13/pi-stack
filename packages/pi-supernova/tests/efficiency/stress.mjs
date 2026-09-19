@@ -91,8 +91,10 @@ try {
       const result=await run(id,cwd,`
         if(globalThis.stressMarker!==undefined)throw Error("worker reused");
         globalThis.stressMarker=${JSON.stringify(id)};
-        const checkpoint=await edit(async()=>{await write(${JSON.stringify(candidate)},"discard");throw Error("reject");});
-        if(checkpoint.ok)throw Error("checkpoint accepted");
+        let rejected=false;
+        try { await edit(async()=>{await write(${JSON.stringify(candidate)},"discard");throw Error("reject");}); }
+        catch(error) { if(error.message!=="reject")throw error; rejected=true; }
+        if(!rejected)throw Error("checkpoint accepted");
         await write(${JSON.stringify(file)},JSON.stringify({id:data.id,counter:0}));
         await edit(${JSON.stringify(file)},'"counter":0','"counter":1');
         const saved=JSON.parse(await read(${JSON.stringify(file)}));
@@ -118,7 +120,7 @@ try {
 
     for(let wave=0;wave<20;wave++) {
       const outcomes=await Promise.allSettled(Array.from({length:8},(_,i)=>run("contended-"+wave+"-"+i,cwd,
-        'const value=Number(await read("counter.txt"));await new Promise(resolve=>setTimeout(resolve,20));await write("counter.txt",String(value+1));return value+1;')));
+        'const value=Number(await read("counter.txt"));await new Promise(resolve=>setTimeout(resolve,20));await write({path:"counter.txt",content:String(value+1),replace:true});return value+1;')));
 
       for(const outcome of outcomes) {
         if(outcome.status==="fulfilled")committed++;

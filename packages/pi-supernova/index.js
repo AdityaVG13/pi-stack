@@ -212,6 +212,7 @@ export function registerCodeMode(pi) {
 
   function rejectLoneParallel(params) {
     if (params?.parallel !== undefined) throw new Error("parallel applies to the programs array; no commands ran");
+    if (params?.mergeData !== undefined) throw new Error("mergeData applies to the programs array; no commands ran");
   }
 
   function bindRunSignal(signal) {
@@ -224,8 +225,8 @@ export function registerCodeMode(pi) {
     return { runController, abortRun };
   }
 
-  function openRunBridge(ctx, runCwd, budget, runController) {
-    const runBridge = bridge.fork({ getCwd: () => runCwd, budget });
+  function openRunBridge(ctx, runCwd, budget, runController, timeoutMs) {
+    const runBridge = bridge.fork({ getCwd: () => runCwd, budget, timeoutMs });
     runBridge.bindCallContext(ctx, runController.signal);
     runBridge.resetCallBudget();
 
@@ -332,6 +333,7 @@ export function registerCodeMode(pi) {
         data: Type.Optional(Type.Unknown()),
       }, {additionalProperties:false}), {minItems:1,maxItems:32})),
       parallel: Type.Optional(Type.Boolean()),
+      mergeData: Type.Optional(Type.Boolean()),
     }),
     // One self-owned result frame is shared by Pi and OMP; renderCall stays empty
     // so separate call/result slots cannot duplicate the lifecycle card.
@@ -345,7 +347,7 @@ export function registerCodeMode(pi) {
       cancelWarmTimer();
       const runCwd = isString(ctx?.cwd) && ctx.cwd ? ctx.cwd : cwd;
       const { runController, abortRun } = bindRunSignal(signal);
-      const runBridge = openRunBridge(ctx, runCwd, budget, runController);
+      const runBridge = openRunBridge(ctx, runCwd, budget, runController, params?.timeoutMs);
       const call = ++programSeq;
       runBridge.ledger.beginProgram(call);
       const emitProgress = progressEmitter(onUpdate);

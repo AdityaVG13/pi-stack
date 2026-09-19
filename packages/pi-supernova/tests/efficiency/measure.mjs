@@ -3,6 +3,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { packageFinalReturn } from "../../src/output/bottleneck.js";
 import { createHostBridge } from "../../src/bridge/host-bridge.js";
 import { runGuestProgram, warmGuestWorker, stopWarmGuestWorker } from "../../src/runtime/runtime.js";
 import { packageDefaults } from "../../src/config/config.js";
@@ -59,6 +61,33 @@ for (const [name, batchRead, warm] of [["unbatchedCodeModeCold", false, false], 
 
 await stopWarmGuestWorker();
 
+// Pure result packaging, measured separately from worker/filesystem latency.
+// Hash the full typed value AND emitted text: speed must not shorten either.
+const packaging = {};
+const source = 'export const text = "λ😀\\path";\r\n'.repeat(120);
+const payloads = {
+  report: Array.from({length:200}, (_, i) => ({path:"src/unit-"+i+".js",line:i+1,ok:true,count:i})),
+  source: {path:"src/unit.js",text:source,copy:source,complete:true},
+};
+
+for (const [name, value] of Object.entries(payloads)) {
+  const packed = packageFinalReturn(value, [], config);
+  assert.equal(packed.returnTruncated, false);
+  assert.deepEqual(packed.returnValue, value);
+  const samples = [];
+  const iterations = 100;
+
+  for (let wave = 0; wave < 110; wave++) {
+    const start = performance.now();
+    for (let i = 0; i < iterations; i++) packageFinalReturn(value, [], config);
+    if (wave >= 10) samples.push((performance.now() - start) / iterations);
+  }
+
+  samples.sort((a,b) => a-b);
+  packaging[name] = {p50Ms:samples[49],p95Ms:samples[94],iterations:samples.length*iterations,
+    chars:packed.returnText.length,sha256:createHash("sha256").update(JSON.stringify(packed)).digest("hex")};
+}
+
 assert.ok(results.coalescedCodeModePristineWarm.p95Ms < results.unbatchedCodeModeCold.p95Ms, "Pristine-ready worker execution should beat cold startup for this fixture");
 
-console.log(JSON.stringify({ machine: os.cpus()[0].model, platform: process.platform, node: process.version, measuredWaves, filesPerWave: 8, acceptance: "identical full per-file results; 8 to 1 bridge calls; pristine-warm p95 below unbatched cold", results, fixture: root, limits: "Local filesystem/worker benchmark; excludes prewarm time, model latency and provider tokens. Character counts are not token counts. Max is worst observed, not a real-time guarantee; extreme percentiles from small samples are conservative sentinels." }, null, 2));
+console.log(JSON.stringify({ machine: os.cpus()[0].model, platform: process.platform, node: process.version, measuredWaves, filesPerWave: 8, acceptance: "identical full per-file results; 8 to 1 bridge calls; pristine-warm p95 below unbatched cold", results, packaging, fixture: root, limits: "Local filesystem/worker benchmark; excludes prewarm time, model latency and provider tokens. Character counts are not token counts. Max is worst observed, not a real-time guarantee; extreme percentiles from small samples are conservative sentinels." }, null, 2));

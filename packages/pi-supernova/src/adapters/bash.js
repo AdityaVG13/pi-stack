@@ -43,7 +43,7 @@ export function createBash(ctx) {
           cwd: targetCwd,
           env: hooks.commandEnv(),
           commandLabel: literal ? command : undefined,
-          timeoutMs: params?.timeoutMs,
+          timeoutMs: params?.timeoutMs === undefined ? config.timeoutMs : params.timeoutMs,
           signal,
           maxOutputChars: config.maxCallResultChars,
         });

@@ -134,8 +134,16 @@ function consumeSlash(text, i, prev) {
 }
 
 /** Try to consume a comment, string, template, or regex at i. Returns { end, prev } | { error, at } | null. */
-function consumeLiteral(text, i, stack, prev) {
+function consumeLiteral(text, i, stack, prev, rust) {
   const c = text[i];
+
+  if (rust && c === "'") {
+    const lifetime = /^'[\p{ID_Start}_][\p{ID_Continue}]*/u.exec(text.slice(i));
+    const end = i + (lifetime?.[0].length ?? 0);
+
+    // A closing apostrophe makes this a character literal, not a lifetime/label.
+    if (lifetime && text[end] !== "'") return { end, prev: "value" };
+  }
 
   if (c === '"' || c === "'" || c === "`") return consumeQuoted(text, i, stack);
 
@@ -163,13 +171,13 @@ function bracket(c, i, stack, stopDepth) {
 }
 
 /** Skips comments, strings, templates and regex literals; `prev` is the last code token, which decides regex-vs-division. */
-function scan(text, start, stack, stopDepth) {
+function scan(text, start, stack, stopDepth, rust = false) {
   let i = start;
   let prev = "";
 
   while (i < text.length) {
     const c = text[i];
-    const literal = consumeLiteral(text, i, stack, prev);
+    const literal = consumeLiteral(text, i, stack, prev, rust);
 
     if (literal) {
       if (literal.error) return literal;
@@ -214,7 +222,7 @@ export function quickCheck(text, ext) {
 
   if (!CODE_EXT.has(ext)) return null;
   const stack = [];
-  const r = scan(text, 0, stack);
+  const r = scan(text, 0, stack, undefined, ext === ".rs");
 
   if (r.error) return { ok: false, kind: "balance", message: r.error + " at line " + lineOf(text, r.at) };
 

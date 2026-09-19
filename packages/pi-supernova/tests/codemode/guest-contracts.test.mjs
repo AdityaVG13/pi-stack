@@ -165,7 +165,7 @@ it("oversized multi-file returns keep every sentinel in its own framed slot", as
   }
 });
 
-it("sixteen returned images stay attached; the seventeenth is omitted without rolling back writes", async t => {
+it("sixteen returned images stay attached; overflow fails and rolls back pending writes", async t => {
   const f = await engineFixture(t);
   const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRzkAAAAASUVORK5CYII=", "base64");
   await f.write("pixel.png", pixel);
@@ -177,16 +177,19 @@ it("sixteen returned images stay attached; the seventeenth is omitted without ro
   assert.equal(atCap.content.filter(block => block.type === "image").length, 16);
   assert.doesNotMatch(modelText(atCap), /image omitted/);
   assert.equal(await fs.readFile(path.join(f.root, "ledger.md"), "utf8"), "kept-16");
-  const overflow = await f.execute(`
+  await assert.rejects(f.execute(`
     await write("ledger.md", "kept-17");
     return await Promise.all(Array.from({length:17}, () => read("pixel.png")));
-  `);
-  assert.equal(overflow.details.ok, true);
-  assert.equal(overflow.details.mutations.committed, 1);
-  assert.equal(overflow.details.mutations.rolledBack, 0);
-  assert.equal(overflow.content.filter(block => block.type === "image").length, 16);
-  assert.match(modelText(overflow), /\[image omitted: exceeds 16 attachments or 20 MiB\]/);
-  assert.equal(await fs.readFile(path.join(f.root, "ledger.md"), "utf8"), "kept-17");
+  `), error => {
+    const overflow = error.supernovaResult;
+    assert.equal(overflow.details.ok, false);
+    assert.equal(overflow.details.mutations.committed, 0);
+    assert.equal(overflow.details.mutations.rolledBack, 1);
+    assert.equal(overflow.content.filter(block => block.type === "image").length, 0);
+    assert.match(error.message, /17 images.*20 MiB/);
+    return true;
+  });
+  assert.equal(await fs.readFile(path.join(f.root, "ledger.md"), "utf8"), "kept-16");
 });
 
 it("JavaScript syntax errors run no commands and name the data parameter", async t => {

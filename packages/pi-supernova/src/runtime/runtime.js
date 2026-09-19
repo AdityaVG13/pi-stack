@@ -221,7 +221,7 @@ function admitData(data, cap) {
     const encoded = JSON.stringify(data);
 
     if (encoded === undefined) return { error: "data must be JSON-serializable" };
-    if (encoded.length > cap) return { error: "data exceeds " + cap + " characters; split literal inputs across invocations" };
+    if (encoded.length > cap) return { error: "data exceeds " + cap + " characters (serialized JSON: " + encoded.length + " UTF-16 characters); no commands ran. Split literal inputs across invocations; large text can use write({path,content,append:true}) chunks without omitting content" };
 
     return { data: JSON.parse(encoded) };
   } catch { return { error: "data must be JSON-serializable" }; }
@@ -346,7 +346,12 @@ class GuestRun {
 
   async drainPending(outcome) {
     if (this.pending.size || !outcome.ok) this.cancelHost();
-    await Promise.race([Promise.allSettled(this.pending), new Promise(resolve => setTimeout(resolve, 250))]);
+    if (!this.pending.size) return;
+    let timer;
+
+    try {
+      await Promise.race([Promise.allSettled(this.pending), new Promise(resolve => { timer = setTimeout(resolve, 250); })]);
+    } finally { clearTimeout(timer); }
     if (this.pending.size && outcome.ok) this.hostError ??= "program completed with a host call still running";
   }
 

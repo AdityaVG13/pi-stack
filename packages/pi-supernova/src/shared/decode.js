@@ -19,6 +19,36 @@ export function looksLikePath(target) {
   );
 }
 
+/** Transform children without copying unchanged result trees. Never mutate the input. */
+export function mapChangedChildren(value, visit, context) {
+  const array = Array.isArray(value);
+
+  if (!array && !isObject(value)) return value;
+  let out = value;
+
+  for (const key of array ? value.keys() : Object.keys(value)) {
+    if (array && !(key in value)) continue;
+    const before = value[key];
+    const after = visit(before, context);
+
+    if (Object.is(before, after)) continue;
+    if (out === value) out = array ? value.slice() : { ...value };
+    // Define rather than assign: "__proto__" must remain an ordinary data key.
+    Object.defineProperty(out, key, { value: after, enumerable: true, writable: true, configurable: true });
+  }
+
+  return out;
+}
+
+const MODEL_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+/** Reject unsupported attachments before they can poison the next model request. */
+export function assertModelImageMime(mimeType) {
+  if (!MODEL_IMAGE_MIMES.has(mimeType)) {
+    throw new Error("unsupported image attachment type " + mimeType + "; model images require PNG, JPEG, GIF, or WebP. Convert the image to PNG before reading/returning it; no image attached");
+  }
+}
+
 const MAX_DEPTH = 64;
 
 const MAX_TYPED_ARRAY = 4096;

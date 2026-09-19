@@ -1,19 +1,15 @@
-// Standing tool description: sent on every request. One nova call, four commands inside.
-export const REFERENCE = `JavaScript async body or arrow with read, write, edit, bash. file:path runs that program file instead. Put Markdown/scripts/argv in data. Guest has no fs/import/require.
-
-read(path|paths, offset?, limit?) → raw text or text[]; read(directory) → entries[]
-read(imagePath) → image (PNG/JPEG/GIF/WebP/BMP)
-read({path,json:".field"}) → parsed JSON; .items[0:3], .items.length, quoted keys, or true; 16 MiB cap; no jq
-raw JSON or selections over budget return {status:"too_large",path,keys} (length for arrays); narrow with json:".field" or slices
-read("symbol or question") → same view as resolve:true
-read({query,resolve:true}) → {status,path,line,text,...}
-read(path,{about}) → matching windows; read({query,evidence:true}) → ranked evidence; read({path,outline:true}) → declarations
-write(path, text) → replace an unread file; write({path,content,append:true}) → append without a prior read. After read use edit; replace:true overrides.
-edit(path,oldText,newText) | edit({path,edits}) → numbered post-edit lines, checks, references
-edit(async () => {...}) → checkpoint: commit on success, rollback on throw
-bash(command,{cwd?,timeoutMs?}) → bounded output; nonzero throws
-bash({command,args}) → literal argv
-
-edit oldText is an exact substring of read(); a miss includes a numbered window. Found is a span, not the file. Check resolve:true status; edit(view,text) replaces that window; edit(view,old,new) is unique inside it. complete:true rejects partial files. Array reads reject failures. Edits stage until success; bash commits preceding writes. Batch known reads, edits, and tests in this program (Promise.all, or programs with parallel:true).
-programs:[{code|file,data?},...] sequential fresh guests, separate commits; top-level data defaults per entry. Stop on failure keeps earlier commits. parallel:true runs disjoint entries concurrently. Separate supernova calls only when the next step needs a model decision.
+// Standing tool description: sent on every request. No result or history compression.
+export const REFERENCE = `JS body/async arrow with read/write/edit/bash; no fs/import/require. file runs workspace scripts. data holds literal text/scripts/argv (≤48000 serialized JSON chars).
+read(path|paths,offset=1,limit?) → raw text/text[]; directories → entries; images: PNG/JPEG/GIF/WebP (≤16 attachments/20 MiB total).
+Path-only: ≤160 lines AND 8192 characters (UTF-16). Use read(path,{offset:1,limit:80}), about, or complete:true (whole file ≤31744 chars). Large JSONL: bounded parser via bash.
+read({path,json:selector}) → parsed JSON; selectors ".field", ".a[0:3]", ".a.length", quoted keys, true; 16 MiB input, no jq. Oversized → {status:"too_large",keys} (arrays: length); narrow selectors.
+read("symbol or question") = read({query,resolve:true}) → view; check status; view.text is a span, not the file.
+read(path,{about}) → windows; read({query,evidence:true}) → ranked evidence; read({path,outline:true}) → declarations.
+write(path,text) replaces unread workspace files; write({path,content,append:true}) appends without reading. After read: edit or replace:true.
+edit(path,oldText,newText) | edit({path,edits:[{oldText,newText}]}) exact unique read text; numbered windows (including misses), checks/references.
+edit(view,text) replaces the span; edit(view,old,new) matches uniquely within it. edit(async()=>{...}) checkpoint merges on success, rolls back/rethrows on failure; catch to recover.
+bash(command,{cwd?,timeoutMs?}) | bash({command,args}) literal argv; bounded output, nonzero throws; inherits program timeout unless overridden.
+Edits stage until success; bash commits first. Array errors abort; Promise.allSettled for optional reads.
+programs:[{code?,file?,data?}] inherits top-level code OR file and data. Entry source overrides; data replaces unless mergeData:true (shallow objects, entry keys win).
+Fresh guests/separate commits; sequential failure stops, prior commits stay. parallel:true for disjoint entries. Batch known work; separate calls only for new decisions.
 `;

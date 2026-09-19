@@ -21,6 +21,154 @@ The benchmark uses js-tiktoken 1.0.21, pinned as a development dependency. It ru
 real Supernova programs in temporary workspaces without provider calls or downloads.
 The token regression gate also runs in the normal test suite.
 
+## Unreleased explicit batch reuse (2026-09-19)
+
+**79.82% / 79.92% less traffic on the shared-source/object-input workload, not a
+claim of 80% savings on every task.** Source and object defaults remove repeated
+arguments without compression, citations, result elision, context rewriting,
+reduced limits or changes to reasoning settings. Every program still executes in
+a fresh guest with its own commit. No model decision point is removed.
+
+The missing capability was combining common executable/input values with distinct
+per-entry inputs without repeating them or first saving helper files. Batches now
+accept top-level `code` OR `file` as a source default. `mergeData:true` explicitly
+opts into a shallow object overlay; the legacy whole-input replacement remains
+the default. Entries can override the source, and nested data objects are replaced,
+not recursively merged. Nothing is inferred or automatically deduplicated.
+
+### Frozen eligible workload
+
+The pre-feature working tree, including the earlier unreleased papercut fixes,
+ran 16 independent package-doc scaffolds. Each program wrote a LICENSE and README,
+reread both exact staged contents, and returned its complete receipts. The control
+repeated the same executable and literal license/introduction with a distinct
+directory per entry. Its encoded program array was **32,353 characters**, within
+the existing 48,000-character admission cap. This is not an inadmissible baseline.
+
+The candidate supplies the same complete code and common data once, plus those
+same per-entry directories. Both arms use **one tool invocation plus the final
+model handoff**, the same 16-program schedule, and all 32 final files. The baseline
+was captured before the implementation; neither program source nor data was padded
+or changed to meet the gate.
+
+| Tokenizer | Before | After | Reduction | Argument tokens before / after | Unchanged result tokens |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| o200k_base | 17,771 | 3,587 | **79.82%** | 7,685 / 643 | 1,039 |
+| cl100k_base | 17,595 | 3,533 | **79.92%** | 7,619 / 637 | 1,007 |
+
+Accounting is `2*definition + 2*arguments + complete result`. It includes both
+requests' standing definitions, generated arguments and their replay. The complete
+normalized output equals the pre-feature snapshot byte-for-byte, and the contents
+and complete inventory of all 32 files are checked. Only run counters and elapsed
+times are normalized, as in the existing benchmark. No hidden helper files appear.
+
+The new gate requires **at least 78% on both tokenizers**, not an argument-only
+percentage. Its fixture is
+[`batch-reuse-baseline.json`](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/tests/efficiency/batch-reuse-baseline.json),
+with SHA-256 `589960c417006630872c16fae9ae5be4f5cdbdddbf86dda9fd9377651352055a`.
+
+This workload benefits from substantial repeated source and input. Unique-input,
+large-result, or already-file-backed jobs need not see that gain. Saving a reusable
+program/input file was already an alternative when extra workspace artifacts and
+setup were acceptable; this is not a claim of 80% over that different workflow.
+
+### Existing workload stays separate
+
+The original six-call schedule, its argument hash, all 13 logical operations,
+failures, decision boundaries and complete outputs remain unchanged. It already
+uses saved programs and does not exercise the new source defaults. Clearer shorter
+standing guidance offsets the new option's schema cost:
+
+| Tokenizer | At start of this pass | Now | Additional reduction | Versus original non-batched baseline |
+| --- | ---: | ---: | ---: | ---: |
+| o200k_base | 10,191 | 9,841 | **3.43%** | 65.02% |
+| cl100k_base | 10,067 | 9,724 | **3.41%** | 65.07% |
+
+The definition measures 631/626 tokens, versus 681/675 at the start. The original
+traffic gate was strengthened from 40% to 65%, without changing its baseline. An
+initial shorter guidance draft failed the existing recovery/surface checks; the
+copyable offset recovery and explicit selector/view guidance were restored rather
+than removing those requirements. There is no claim of 70--80% on this workload.
+
+### Verification and boundaries
+
+New source/overlay regressions and the reuse gate failed before implementation.
+The strengthened existing traffic gate also failed first. Current verification:
+239 package tests, both tokenizers' gates, lint, actual Pi argument validation and
+TUI smoke, actual network-denied OMP execution, and 71 targeted tests on an isolated
+Spark copy under Node v24.16.0. The actual-host probes exercise shared source,
+object overlays and independent guest copies.
+
+The existing stress runner passed 33,024 independent reads, 20 commits/140 conflicts,
+cancellation, complete-source fidelity and program batches. On Apple M5 Max,
+Node v26.7.0, the 300-sample, eight-file check measured pristine-warm median/p95
+1.645/2.390 ms versus unbatched-cold p95 13.848 ms; its existing acceptance check
+passed. This is a runtime smoke measurement, **not a new end-to-end speedup claim**.
+
+Complete-output and file equality prove the tested contracts, not unchanged
+live-model quality. There was no provider/model A/B evaluation, no reasoning-budget
+change, and no compression feature enabled. Deployment, session restart and
+publication are separate; installed OMP packages were not changed by this pass.
+
+## Unreleased optimization pass (2026-09-19)
+
+Measured against the working tree immediately before this pass, **including the
+unreleased papercut fixes**, not against a published release or the older baselines
+below. Machine: Apple M5 Max, 18 CPUs, 48 GiB RAM, macOS arm64, Node v26.7.0.
+
+| Measurement | Before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| Definition tokens, o200k_base | 699 | 658 | 5.87% |
+| Definition tokens, cl100k_base | 691 | 651 | 5.79% |
+| Fixed six-call traffic, o200k_base | 10,317 | 10,030 | 2.78% |
+| Fixed six-call traffic, cl100k_base | 10,179 | 9,899 | 2.75% |
+| 200-row report packaging, median | 0.1665 ms | 0.1314 ms | 21.09% |
+| Nested source packaging, median | 0.0366 ms | 0.0240 ms | 34.53% |
+
+A subsequent Cortex papercut follow-up adds explicit data-limit, workspace-write,
+and inherited-timeout guidance. That later definition measures 674/667 tokens
+(o200k_base/cl100k_base), with fixed-workload totals of 10,142/10,011. The table
+above records the optimization checkpoint, before that additional guidance.
+
+The Mac/Spark recheck adds optional-read recovery and removes the unsupported BMP
+attachment advertisement. The resulting definition is 681/675 tokens, with fixed
+traffic totals of 10,191/10,067. Both frozen-workload gates still pass. Verification
+now includes 235 Mac package tests, 51 focused tests on an isolated Spark source
+copy (Node v24.16.0), and actual Pi/OMP smoke on Mac. Installed OMP packages were
+not updated by either follow-up.
+
+Token savings come only from shorter standing guidance. Arguments, decision
+boundaries and complete logical result text remain unchanged. No compression,
+elision, lower output limits, or history rewriting was introduced or enabled.
+
+Packaging now copies only changed branches and skips an escaped-source rendering
+when the existing complete raw rendering is provably shorter. The benchmark runs
+10,000 measured iterations per payload after warmup. Complete packaged-output
+SHA-256 hashes match before/after, including typed values, emitted text, images,
+logs and truncation flags. Local acceptance: identical hashes and at least 10%
+lower median packaging time for both fixtures; this is not a timing-sensitive CI
+gate or an end-to-end agent speed claim.
+
+Successful runs no longer leave a 250 ms drain timer alive; early completion of
+pending calls clears its fallback timer. A cold child-process probe exited at
+267 ms before versus 17 ms after, while result delivery itself remained about
+17 ms in both. Cancellation and the 250 ms bound on stuck calls remain tested.
+The 300-sample, eight-file benchmark measured prewarmed median/p95 of
+1.904/2.743 ms before and 1.765/2.530 ms after. These filesystem timings are noisy;
+no generalized I/O speedup is claimed, and prewarming/model latency is excluded.
+
+Reproduce the local latency and stress checks:
+
+~~~sh
+SUPERNOVA_MEASURE_SAMPLES=300 npm run measure --prefix packages/pi-supernova
+node packages/pi-supernova/tests/efficiency/stress.mjs
+~~~
+
+Verification: 229 package tests, both tokenizers' existing frozen-workload gates,
+lint, actual Pi loader/TUI and OMP execution smoke tests, plus the stress runner
+(33,024 independent reads, write contention, cancellation and source fidelity).
+No version bump, installation update, commit or publication is part of this pass.
+
 ## Workload
 
 The baseline is a frozen, non-batched implementation snapshot with program-file
@@ -72,12 +220,12 @@ text contributes to totals through later history, not as a second charge.
 
 Observed for 0.6.0 on 2026-09-15, on an Apple M5 Max running macOS and Node v26.7.0.
 
-| Tokenizer | Non-batched baseline | Batched baseline (d444eb7) | Current | Further reduction | Total reduction |
+| Tokenizer | Non-batched baseline | Batched baseline (d444eb7) | 0.6.0 | Further reduction | Total reduction |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | o200k_base | 28,130 | 18,535 | 9,843 | **46.90%** | **65.01%** |
 | cl100k_base | 27,841 | 18,310 | 9,726 | **46.88%** | **65.07%** |
 
-The gate requires at least 40% reduction on **each tokenizer for the complete
+The gate now requires at least 65% reduction on **each tokenizer for the complete
 workload**, not for every scenario individually. Token counts and reductions are
 computed from the recorded baseline and fresh execution results, not constants
 returned by the runtime. A second gate requires another 19% against the measured
@@ -86,7 +234,7 @@ as the original workload: removing a decision boundary cannot satisfy this gate.
 
 ### Definition and result accounting
 
-The current serialized definition is 602 tokens with o200k_base and 595 with
+The 0.6.0 serialized definition was 602 tokens with o200k_base and 595 with
 cl100k_base, versus 908 and 901 in the frozen non-batched baseline. It retains
 command signatures, complete-read and JSON limits, array-read failure rules,
 transaction boundaries, batch defaults and edit/view guidance on every request.

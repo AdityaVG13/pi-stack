@@ -1,10 +1,84 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import stringWidth from "string-width";
 import { renderSupernovaResult } from "../../index.js";
 import { engineFixture } from "../helpers/engine.mjs";
 
 const theme = { fg: (_, text) => text, bg: (_, text) => text, bold: text => text };
+
+test("a completed JavaScript-only batch is shown as execution, not an absence of calls", async t => {
+  const f = await engineFixture(t);
+  const result = await f.tool.execute("pure-batch", {code:"return data;", data:{shared:true}, programs:[{}, {data:{local:true}}, {data:null}]}, undefined, undefined, {cwd:f.root});
+  assert.deepEqual(result.details.result, [{shared:true}, {local:true}, null]);
+  for (const expanded of [false, true]) {
+    const card = renderSupernovaResult(result, {expanded}, theme, {state:{}});
+    const text = card.render(120).join("\n");
+    assert.match(text, /JavaScript-only execution/);
+    assert.doesNotMatch(text, /no adapter calls/);
+    for (const width of [1, 2, 40, 80, 120]) for (const line of card.render(width)) assert.ok(stringWidth(line) <= width);
+  }
+});
+
+test("host error flags preserve thrown diagnostics and replace cached success styling", async t => {
+  const f = await engineFixture(t);
+  const failure = await f.execute('await write("undone.txt","candidate"); throw Error("thrown-ui-sentinel");').then(() => assert.fail("must reject"), error => error);
+  const trace = failure.supernovaResult.details.trace;
+  const result = {content:[{type:"text",text:failure.message}]};
+  for (const host of ["pi", "omp"]) {
+    const state = {trace};
+    const context = host === "pi" ? {state,isError:false} : {code:"throw Error()"};
+    const options = {expanded:false,isPartial:true,state,isError:false};
+    renderSupernovaResult({details:{ok:true,trace}}, options, theme, context).render(120);
+    context.isError = host === "pi";
+    options.isPartial = false;
+    options.isError = host === "omp";
+    for (const expanded of [false,true]) {
+      options.expanded = expanded;
+      const card = renderSupernovaResult(result, options, theme, context);
+      const text = card.render(120).join("\n");
+      assert.match(text, /failed/);
+      assert.match(text, /thrown-ui-sentinel/);
+      assert.doesNotMatch(text, /JavaScript-only execution|nova: complete|✓\s+write/);
+      for (const width of [1,2,40,80,120]) for (const line of card.render(width)) assert.ok(stringWidth(line) <= width);
+    }
+  }
+  await assert.rejects(fs.access(f.root+"/undone.txt"), {code:"ENOENT"});
+  const plain = renderSupernovaResult({content:[{type:"text",text:"error handling documentation"}]}, {expanded:false}, theme, {state:{},isError:false}).render(120).join("\n");
+  assert.match(plain, /error handling documentation/);
+  assert.doesNotMatch(plain, /failed|JavaScript-only execution/);
+});
+
+test("failed batches show the original cause and mixed commit/rollback totals without false write ticks", async t => {
+  const f = await engineFixture(t);
+  const result = await f.tool.execute("batch-ui", {programs:[
+    {code:'await write("kept.txt","kept"); return "first";'},
+    {code:'await write("undone.txt","candidate"); throw Error("batch-ui-sentinel");'},
+    {code:'await write("unstarted.txt","BAD");'},
+  ]}, undefined, undefined, {cwd:f.root});
+  const snapshot = JSON.stringify(result);
+  for (const expanded of [false,true]) {
+    const card = renderSupernovaResult(result, {expanded}, theme, {state:{}});
+    const text = card.render(120).join("\n");
+    assert.match(text, /batch-ui-sentinel/);
+    assert.match(text, /committed=1.*rolledBack=1/);
+    assert.doesNotMatch(text, /✓\s+write/);
+    for (const width of [1,2,40,80,120]) for (const line of card.render(width)) assert.ok(stringWidth(line) <= width);
+  }
+  assert.equal(JSON.stringify(result), snapshot, "rendering must not mutate execution evidence");
+  assert.equal(await fs.readFile(f.root+"/kept.txt","utf8"), "kept");
+  for (const file of ["undone.txt","unstarted.txt"]) await assert.rejects(fs.access(f.root+"/"+file), {code:"ENOENT"});
+});
+
+test("recovered checkpoint rollback remains visible without marking the successful program failed", async t => {
+  const f = await engineFixture(t);
+  const result = await f.execute('await write("kept.txt","kept"); await edit(async()=>{await write("undone.txt","candidate");throw Error("recover");}).catch(()=>{}); return "recovered";');
+  const card = renderSupernovaResult(result, {expanded:true}, theme, {state:{}});
+  const text = card.render(120).join("\n");
+  assert.match(text, /committed=1.*rolledBack=1/);
+  assert.match(text, /recovered/);
+  assert.doesNotMatch(text, /failed|✓\s+write/);
+});
 
 test("actual edit results remain readable and fresh across repaint and terminal resize", async t => {
   const f = await engineFixture(t);

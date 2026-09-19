@@ -32,8 +32,8 @@ it("batch admission rejects malformed, sparse, nested and oversized plans before
     await assert.rejects(run(f,programs),/no programs ran/);
   }
 
-  await assert.rejects(run(f,[write],{code:"return 1"}),/cannot combine/);
-  await assert.rejects(run(f,[write],{file:"another.js"}),/cannot combine/);
+  await assert.rejects(run(f,[write],{code:"return 1",file:"another.js"}),/code OR file/);
+  await assert.rejects(run(f,[write],{file:" "}),/code OR file/);
   await assert.rejects(fs.stat(path.join(f.root,"never.txt")),{code:"ENOENT"});
 });
 
@@ -214,7 +214,7 @@ it("failed cutovers compose file reuse, JSON, checkpoints, argv, images and repa
   const source = [
     'globalThis.executions=(globalThis.executions||0)+1; if(globalThis.executions!==1)throw Error("guest reused");',
     'await write(data.path,JSON.stringify({version:1,payload:data.payload}));',
-    'const rejected=await edit(async()=>{await edit(data.path,data.oldText,data.newText); await write("rejected.txt","bad"); throw Error("reject candidate");});',
+    'const rejected=await edit(async()=>{await edit(data.path,data.oldText,data.newText); await write("rejected.txt","bad"); throw Error("reject candidate");}).catch(error=>({ok:false,error:error.message}));',
     'if(rejected.ok || await read({path:data.path,json:".version"})!==1)throw Error("checkpoint leaked");',
     'await edit(data.path,data.oldText,data.newText);',
     'const args={command:process.execPath,args:["-e",data.verifier,data.path,data.literal]}; const before=JSON.stringify(args);',
@@ -298,4 +298,73 @@ it("shared batch data counts once against admission and never bypasses its cap",
   const cyclic = {}; cyclic.self = cyclic;
   await assert.rejects(run(f,[write],{data:cyclic}),/no programs ran/);
   await assert.rejects(fs.stat(path.join(f.root,"never-shared.txt")),{code:"ENOENT"});
+});
+
+
+it("shared program source preserves overrides, fresh guests and live file loading", async t => {
+  const f = await engineFixture(t);
+  const code = 'if(globalThis.used)throw Error("guest reused"); globalThis.used=true; return data;';
+  await f.write("shared.js",code);
+  await f.write("override.js",'return "file override";');
+  for (const source of [{code},{file:"shared.js"}]) for (const parallel of [false,true]) {
+    const result = await run(f,[{}, {data:null}, {code:'return "code override";'}, {file:"override.js"}],{...source,data:{literal:"λ😀\r\n"},parallel});
+    assert.equal(result.details.ok,true);
+    assert.deepEqual(result.details.result,[{literal:"λ😀\r\n"},null,"code override","file override"]);
+    assert.equal(result.details.returnTruncated,false);
+  }
+  const changed = await run(f,[{code:'return await edit("shared.js","return data;","return 42;");'},{}],{file:"shared.js"});
+  assert.equal(changed.details.ok,true);
+  assert.equal(changed.details.result[1],42,"a shared file is loaded per run, not snapshotted before earlier commits");
+});
+
+it("explicit object overlays are shallow, prototype-safe and isolated without changing replacement defaults", async t => {
+  const f = await engineFixture(t);
+  const defaults = JSON.parse('{"nested":{"original":true},"flag":true,"text":"λ😀\\r\\n","__proto__":{"literal":1}}');
+  const local = {nested:{local:true},flag:false,count:0,empty:"",nil:null};
+  for (const parallel of [false,true]) {
+    const result = await run(f,[{data:local},{}],{code:'const value=JSON.parse(JSON.stringify(data)); data.nested.mutated=true; return value;',data:defaults,mergeData:true,parallel});
+    assert.equal(result.details.ok,true);
+    assert.deepEqual(result.details.result,[{...defaults,...local},defaults]);
+    assert.equal(Object.hasOwn(result.details.result[0],"__proto__"),true);
+    assert.equal(result.details.result[0].nested.original,undefined,"nested objects are replaced, never recursively merged");
+    assert.deepEqual(local.nested,{local:true});
+    assert.deepEqual(defaults.nested,{original:true});
+  }
+  const replacement = await run(f,[{data:local},{data:null},{data:false}],{code:'return data;',data:defaults});
+  assert.deepEqual(replacement.details.result,[local,null,false]);
+});
+
+it("shared defaults reject malformed flags and oversized inputs before any program, while preserving failure commits", async t => {
+  const f = await engineFixture(t);
+  const write = {code:'await write("never-defaults.txt","bad");'};
+  for (const options of [
+    {mergeData:"yes",data:{}}, {mergeData:true}, {mergeData:true,data:[]},
+    {code:"return 1",file:"ambiguous.js"}, {code:" "}, {file:0},
+    {code:"x".repeat(48000)}, {data:"x".repeat(48000)},
+  ]) await assert.rejects(run(f,[write],options),/no programs ran/);
+  for (const data of [null,false,0,"",[]]) await assert.rejects(run(f,[write,{code:'return data;',data}],{data:{},mergeData:true}),/no programs ran/);
+  await assert.rejects(f.tool.execute("lone-merge",{...write,mergeData:true},undefined,undefined,{cwd:f.root}),/mergeData applies to the programs array; no commands ran/);
+  await assert.rejects(fs.stat(path.join(f.root,"never-defaults.txt")),{code:"ENOENT"});
+  const code = 'await write(data.path,data.text); if(data.fail)throw Error("preserved failure"); return data.text;';
+  const stopped = await run(f,[{data:{path:"kept-default.txt"}},{data:{path:"rolled-default.txt",fail:true}},{data:{path:"unrun-default.txt"}}],{code,data:{text:"exact\r\n"},mergeData:true});
+  assert.equal(stopped.details.ok,false);
+  assert.equal(stopped.details.attempted,2);
+  assert.deepEqual(stopped.details.mutations.committed,1);
+  assert.deepEqual(stopped.details.mutations.rolledBack,1);
+  assert.match(modelText(stopped),/preserved failure/);
+  assert.equal(await fs.readFile(path.join(f.root,"kept-default.txt"),"utf8"),"exact\r\n");
+  for(const name of ["rolled-default.txt","unrun-default.txt"])await assert.rejects(fs.stat(path.join(f.root,name)),{code:"ENOENT"});
+});
+
+
+it("shared source counts once without raising admission or worker code limits", async t => {
+  const f = await engineFixture(t);
+  const code = "/*"+"source documentation\n".repeat(400)+"*/ return data;";
+  const programs = Array.from({length:8},(_,data)=>({code,data}));
+  assert.ok(JSON.stringify(programs).length>48000);
+  await assert.rejects(run(f,programs),/exceeds.*no programs ran/);
+  const result = await run(f,programs.map(({data})=>({data})),{code});
+  assert.equal(result.details.ok,true);
+  assert.deepEqual(result.details.result,[0,1,2,3,4,5,6,7]);
+  await assert.rejects(run(f,[{}],{code:"/*"+"x".repeat(48000)+"*/ return 1;"}),/exceeds.*no programs ran/);
 });

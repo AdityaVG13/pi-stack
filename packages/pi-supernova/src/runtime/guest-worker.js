@@ -242,7 +242,7 @@ async function runSpeculation(fn, token, checkpointScope, drainReads, enqueueHos
 
     if (began) await enqueueHost(() => rpc("speculateRollback", []));
 
-    return { ok: false, committed: false, error: err instanceof Error ? err.message : String(err) };
+    throw err;
   }
 }
 

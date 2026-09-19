@@ -10,6 +10,8 @@ it("multi-operation traffic retains every observation and passes both replay-inc
 
   for (const row of report.reports) {
     t.diagnostic(row.encoding + ": " + row.currentPass.before + " -> " + row.currentPass.after + " (" + row.currentPass.savedPercent + "% further; " + row.traffic.savedPercent + "% versus non-batched baseline)");
+    t.diagnostic(row.encoding + " this pass, unchanged mixed workload: " + row.thisPass.before + " -> " + row.thisPass.after + " (" + row.thisPass.savedPercent + "%)");
+    t.diagnostic(row.encoding + " shared program/object defaults: " + row.sharedProgramReuse.before + " -> " + row.sharedProgramReuse.after + " (" + row.sharedProgramReuse.savedPercent + "%; identical outputs and all 32 files)");
     t.diagnostic(row.encoding + " shared input: " + row.sharedData.before + " -> " + row.sharedData.after + " (" + row.sharedData.savedPercent + "%; identical complete outputs)");
   }
 });

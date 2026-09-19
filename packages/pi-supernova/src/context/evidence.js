@@ -36,7 +36,7 @@ const EVIDENCE_DEFAULTS = {
 const IDENT = /[A-Za-z_$][\w$]*/g;
 
 // Verb forms only: "call sites" is a concept, "who calls X" is a usage question.
-const RELATION_WORDS = new Set(["calls", "caller", "callers", "uses", "usages", "used", "using", "imports", "imported", "depends", "references", "referenced", "invokes", "invoked"]);
+const RELATION_WORDS = new Set(["calls", "called", "caller", "callers", "uses", "usages", "used", "using", "imports", "imported", "depends", "references", "referenced", "invokes", "invoked"]);
 
 const HUB_FRACTION = 0.25;
 
@@ -575,6 +575,23 @@ function collectSpans(chosenFiles, overlayText, index, maxSpanLines) {
   return spans;
 }
 
+// Usage queries naming an exact identifier must contain that identifier outside
+// its declaration. Keep the matching line in the bounded window, even in long bodies.
+function usageSpans(spans, profile, maxSpanLines) {
+  if (profile.answerType !== "usage" || !profile.subjects.length) return spans;
+  return spans.flatMap(span => {
+    for (let i = span.start - 1; i < span.sourceEnd; i++) {
+      const words = span.lines.idents[i];
+      const matched = profile.subjects.some(subject =>
+        words.filter(word => word === subject).length > Number(span.lines.defNames[i] === subject.toLowerCase()));
+      if (!matched) continue;
+      const start = Math.max(span.start, i - 1);
+      return [{ ...span, start, end: Math.min(span.sourceEnd, start + maxSpanLines - 1) }];
+    }
+    return [];
+  });
+}
+
 function fuseScores(profile, graphNorm, hierNorm, rho) {
   const [primary, secondary] = profile.route === "relational" ? [graphNorm, hierNorm] : [hierNorm, graphNorm];
 
@@ -626,7 +643,7 @@ export async function selectEvidence({ query, root, searchDir, index, overlayTex
 
   if (profile.keywords.length === 0) throw new Error("evidence requires at least one searchable concept keyword");
   const { files: chosenFiles, fileScores } = candidateFiles(await listedFiles(root, searchDir, pendingPaths, index), profile, index, opts.maxCandidateFiles, overlayText);
-  const spans = collectSpans(chosenFiles, overlayText, index, opts.maxSpanLines);
+  const spans = usageSpans(collectSpans(chosenFiles, overlayText, index, opts.maxSpanLines), profile, opts.maxSpanLines);
 
   if (spans.length === 0) return { route: profile.route, spans: [] };
   const { picks, fused } = pickEvidence(spans, fileScores, profile, opts);

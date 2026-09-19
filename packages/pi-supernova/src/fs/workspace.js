@@ -100,7 +100,7 @@ export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = f
   const trimmed = assertFilesystemPath(inputPath, opName);
   const resolvedCwd = getResolvedCwd(cwd);
   const target = path.resolve(resolvedCwd, trimmed);
-  assertInside(path.relative(resolvedCwd, target), `${opName} path escapes workspace: paths resolve relative to ${resolvedCwd}`);
+  assertInside(path.relative(resolvedCwd, target), `${opName} path escapes workspace: ${JSON.stringify(trimmed)} resolves to ${target}, outside ${resolvedCwd}. Use a workspace-relative path (for example artifacts/output.log); external destinations require a separately authorized command`);
 
   if (!allowRoot && target === resolvedCwd) {
     throw new Error(`${opName} path cannot be the workspace root directory`);
@@ -122,7 +122,7 @@ export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = f
     realNearest.set(target, probe);
   }
 
-  assertInside(path.relative(realRoot, probe), `${opName} path escapes workspace through symlink`);
+  assertInside(path.relative(realRoot, probe), `${opName} path escapes workspace through symlink: ${JSON.stringify(trimmed)} resolves through ${probe}, outside ${realRoot}. Use a workspace-relative path without an external symlink`);
 
   return target;
 }

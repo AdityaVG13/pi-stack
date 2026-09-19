@@ -91,7 +91,7 @@ function remapReadError(err, target) {
   if (err.code === "EISDIR") throw new Error("read path is a directory, not a file: " + target);
 
   if (err.code === "ENOENT") {
-    const missing = new Error("no such file: " + target + ' (locate it with read using a directory path or source question)');
+    const missing = new Error("no such file: " + target + ' (locate it with read using a directory path or source question; use Promise.allSettled for optional reads to retain successful siblings)');
     missing.code = "ENOENT";
     throw missing;
   }
