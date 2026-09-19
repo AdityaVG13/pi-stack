@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+## [0.8.1] - 2026-09-19
+
+### Fixed
+
+- Reads, windows, edits and appends reject **non-UTF-8** files with the path and
+  a conversion hint instead of returning U+FFFD, which an edit or append could
+  have written back as corruption. Prefix windows still drop one partial
+  character at the byte cut; diff/receipt snapshots stay tolerant so an explicit
+  `replace:true` still overwrites any file.
+- Unknown options now fail loudly on every command: `read` (for example a
+  foreign `{start,end}` window, which used to return the whole file) and
+  `bash`/`write`/`edit` (`env`, `maxOutputChars`, `mode`, `all` were dropped
+  silently). Each error names the option and the supported set.
+- Filesystem failures name the path or command: write and edit no longer say
+  "read path is a directory"; `ENOTDIR`/`EACCES`/`EPERM`/`EROFS`/`ENOSPC` no
+  longer leak raw codes or the `.supernova-<uuid>.new` temporary; `bash cwd`
+  must be a directory (`spawn ENOTDIR` is gone).
+- `readWindow` no longer leaks an unhandled rejection while `finally` awaits
+  `file.close()`; failing window reads settle cleanly.
+- Edit target misses report the closest matching line with its exact bytes
+  instead of only the file head; multi-edit failures name the entry
+  (`edit 2 of 3`); `edit(path,{oldText,newText}|{edits}|{patch})` dispatches.
+- Syntax errors quote the offending source line and column with a caret;
+  `file:` programs name the file, and invalid UTF-8 names the file too.
+- JSON projection reports the parse position with the offending line when V8
+  provides one, and ignores one leading BOM (also in write checks).
+- Timeout and batch-deadline messages report elapsed time against the limit, and
+  a deadline-killed program is no longer reported as a plain program failure.
+
+### Internals
+
+- 259 package tests, actual Pi + OMP host smoke, isolated Spark run, a
+  536-program stress pass, and both frozen token gates.
+
 ## [0.8.0] - 2026-09-19
 
 ### Added
