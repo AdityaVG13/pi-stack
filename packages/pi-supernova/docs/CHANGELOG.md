@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## [0.8.2] - 2026-09-19
+
+### Fixed
+
+- Shell commands preserve quoted executable paths. Parser failures suggest
+  literal argv for embedded scripts or a quoted heredoc, without rewriting or
+  automatically retrying commands.
+- Invalid timeouts and null-byte arguments fail before flushing staged files.
+  Bounded command labels keep long scripts from crowding out diagnostics.
+- Program deadlines retain pending shell output during bounded termination;
+  explicit cancellation is no longer misreported as a timeout.
+- Parallel batches enforce shared output, log and image budgets instead of
+  reporting success after overflow. Queued entries stop, in-flight results and
+  completed commits remain, and aggregate logs stay capped.
+
+### Changed
+
+- Guidance explicitly batches known reads/checks and edits/verification in one
+  invocation, and states that the outer deadline includes all waits and commands.
+
+### Internals
+
+- 267 package tests (384 repository tests), 2,328 stress invocations, actual
+  Pi + OMP host checks, lint and both frozen token gates passed on macOS/Node 26.7.
+
 ## [0.8.1] - 2026-09-19
 
 ### Fixed
