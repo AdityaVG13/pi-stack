@@ -12,47 +12,56 @@ Ordinary JavaScript control flow remains available; the guest command bindings
 are only `read`, `edit`, `write`, and `bash`. Supernova supplies retrieval,
 transactional file operations, batching, bounded results and the grouped nova UI.
 
-## Unreleased
+## What is new in 0.8.0
 
 - **Shared program source:** top-level `code` or `file` supplies a batch default;
-  entries may override it. No temporary program file is required for inline reuse.
+  entries may override it. A shared program is sent once instead of in every entry,
+  and defaults count once against the 48,000-character admission cap.
 - **Explicit object defaults:** `mergeData:true` shallowly overlays per-entry data
-  onto common data. Existing whole-input replacement remains the default.
+  onto common data (entry keys win; nested objects are replaced). Whole-input
+  replacement remains the default.
+- **Checkpoint failures throw:** a failed `edit(async () => {...})` rolls back and
+  rethrows its original cause; catch explicitly when rejecting a candidate is
+  intentional. Ignored failures no longer report success.
+- **Accurate failure cards:** the nova card reads the host's error flag, shows the
+  original cause and `committed`/`rolledBack` totals, marks writes whose
+  persistence cannot be attributed as attempted, and labels pure JavaScript runs
+  instead of "complete".
+- **Bounded, explicit reads:** errors state both limits (`160 lines / 8192
+  characters`) with copyable recovery (`offset`, `about`, `complete:true`, and
+  `Promise.allSettled` for optional siblings). Markdown edits skip code-reference
+  searches; exact-symbol evidence excludes generic matches.
+- **Fail-closed images:** unsupported formats (for example BMP) fail before model
+  delivery with PNG-conversion guidance, and sets over 16 images / 20 MiB report
+  aggregate sizes instead of silently omitting attachments. Pending changes roll back.
+- **Shell follows the program clock:** `bash()` inherits the program's `timeoutMs`;
+  explicit per-command limits still win.
 
-- Failed `edit` checkpoints now roll back and **throw**. Catch explicitly when
-  rejecting a candidate is intentional; ignored failures no longer report success.
-- Read errors state both size limits and executable recovery examples. Markdown
-  edits skip code-reference searches; exact-symbol usage evidence excludes generic
-  matches and keeps late references inside the returned window.
-- Returned image sets over 16 images / 20 MiB fail with aggregate counts and bytes,
-  rather than silently omitting attachments. Pending file changes roll back.
+### Tokens: 0.7.1 to 0.8.0 (`js-tiktoken`, `o200k_base` / `cl100k_base`)
 
-- **`parallel: true` on `programs`:** independent entries run at once (up to 8),
-  keep result order, and do not stop siblings on failure. Sequential is still
-  the default.
-- **JSON `.length`:** `read({path, json:".items.length"})` returns the array
-  length without dumping the array.
-- Prefer `edit` for a file you already read; `write` still replaces the file.
+| Metric | 0.7.1 | 0.8.0 | Change |
+|---|---:|---:|---:|
+| Standing definition per request | 596 / 588 | 631 / 626 | +35 / +38 |
+| Frozen 6-call mixed workload, total traffic | 9,596 / 9,458 | 9,841 / 9,724 | +2.6% / +2.8% |
+| 16-program job with shared source + data (32 files) | 17,771 / 17,595 | 3,587 / 3,533 | -79.8% / -79.9% |
+| 8 programs sharing a 48-path input | 16,309 / 14,649 | 5,499 / 5,197 | -66.3% / -64.5% |
 
-## What is new in 0.7.0
+Rows 3-4 deliver identical complete outputs and files; only argument placement
+changes. Row 2 repeats no inputs, so it pays the +35-token guidance and nothing
+else. Method, gates and limits: [TOKEN_COSTS.md](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/TOKEN_COSTS.md).
 
-- **Faster batches:** guest workers pipeline their successor, so sequential
-  programs run about twice as fast with no token cost.
-- **Hardened guest:** `process.kill` is sealed out; patch hunks report
-  relocation and ambiguous hunks fail instead of misapplying.
-- **Leaner receipts:** multi-edit output caps at 32 matches with exact totals,
-  write receipts go workspace-relative, evidence/outline reads go compact.
+### Speed: engine micro-benchmarks (Apple M5 Max, Node 26.7)
 
-## What is new in 0.6.0
+| Benchmark | Before | After | Change |
+|---|---:|---:|---:|
+| Package 200-row report (median, 10k iterations) | 0.1665 ms | 0.1314 ms | -21% |
+| Package nested source object (median) | 0.0366 ms | 0.0240 ms | -35% |
+| Idle worker exit | 267 ms | 17 ms | -94% |
+| 8-file read wave p50 / p95 (300 samples) | 1.90 / 2.74 ms | 1.77 / 2.53 ms | -7% / -8% |
+| Cold unbatched p95 vs coalesced warm p95 (8 reads) | 13.85 ms | 2.39 ms | -83% |
 
-- **Shared batch input:** supply top-level `data` once; each program gets an
-  independent copy unless it supplies its own replacement data.
-- **Conflict protection:** byte snapshots survive partial reads and body-cache
-  eviction; receipt generation cannot silently rebase a pending write.
-- **Read fidelity:** staged declarations remain discoverable in large/new files,
-  line windows preserve source endings, and `complete` always means the whole file.
-- **Explicit failures:** incompatible read modes, budget-limited matches, captured
-  overrides and conflicting new-file aliases no longer silently change outcomes.
+Identical output hashes before and after. Local engine benchmarks, not end-to-end
+agent latency or provider time.
 
 See the [changelog](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/CHANGELOG.md)
 and [token measurements](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/TOKEN_COSTS.md).
