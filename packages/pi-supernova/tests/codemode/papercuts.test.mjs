@@ -353,6 +353,22 @@ it("filesystem permission failures name the path or command with guidance", asyn
   await fs.chmod(path.join(f.root,"ro-dir"),0o755);
 });
 
+it("bash, write and edit reject unknown options instead of ignoring them", async t => {
+  const f = await engineFixture(t);
+  await f.write("note.txt","one\n");
+  await assert.rejects(f.execute('return await write({path:"m.txt",content:"x",mode:493});'), /write does not accept option "mode"/);
+  await assert.rejects(f.execute('return await bash({command:"true",env:{A:"1"}});'), /bash does not accept option "env"/);
+  await assert.rejects(f.execute('return await bash({command:"true",maxOutputChars:64});'), /bash does not accept option "maxOutputChars"/);
+  await assert.rejects(f.execute('return await edit("note.txt",{oldText:"one",newText:"1",all:true});'), /edit does not accept option "all"/);
+  // Supported options keep working.
+  await f.execute('return await write({path:"m.txt",content:"x"});');
+  assert.equal(await fs.readFile(path.join(f.root,"m.txt"),"utf8"),"x");
+  const shell = await f.execute('return await bash({command:"printf",args:["ok"]});');
+  assert.equal(shell.details.result,"ok");
+  await f.execute('return await edit("note.txt",{oldText:"one",newText:"1"});');
+  assert.equal(await fs.readFile(path.join(f.root,"note.txt"),"utf8"),"1\n");
+});
+
 it("multi-edit failures name the failing entry", async t => {
   const f = await engineFixture(t);
   await f.write("multi.txt","one\ntwo\nthree\n");

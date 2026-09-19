@@ -26,8 +26,17 @@ function normalizeArgv(args) {
   } else args._directArgv = true;
 }
 
+const BASH_OPTION_KEYS = ["command", "args", "cwd", "timeout", "timeoutMs", "_directArgv"];
+
+/** Unknown options used to be dropped silently: env/maxOutputChars never applied. */
+function assertBashOptions(args) {
+  const unknown = Object.keys(args).filter(key => !BASH_OPTION_KEYS.includes(key));
+
+  if (unknown.length) throw new Error("bash does not accept option " + unknown.map(key => JSON.stringify(key)).join(", ") + "; supported options are command, args, cwd, timeout, timeoutMs");
+}
 export function normalizeBash(command, opts) {
   const args = isObject(command) ? { ...opts, ...command } : { command, ...opts };
+  assertBashOptions(args);
   normalizeArgv(args);
 
   if (args.timeout !== undefined && args.timeoutMs === undefined) args.timeoutMs = args.timeout * 1000;

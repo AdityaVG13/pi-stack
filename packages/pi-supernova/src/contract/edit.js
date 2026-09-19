@@ -87,9 +87,19 @@ function classifyReplacements(args) {
   return { kind: "edits", command: "edit", args };
 }
 
+const EDIT_OPTION_KEYS = ["path", "oldText", "newText", "edits", "patch"];
+
+/** A view object carries host fields; only named replacements are validated. */
+function assertEditOptions(args) {
+  const unknown = Object.keys(args).filter(key => !EDIT_OPTION_KEYS.includes(key));
+
+  if (unknown.length) throw new Error("edit does not accept option " + unknown.map(key => JSON.stringify(key)).join(", ") + "; supported options are path, oldText, newText, edits, patch");
+}
+
 function classifyNamedEdit(p, oldText, newText) {
   const args = namedEditArgs(p, oldText, newText);
   assertNamedEditMode(args, oldText, newText);
+  assertEditOptions(args);
 
   return args.patch !== undefined ? classifyPatch(args) : classifyReplacements(args);
 }
