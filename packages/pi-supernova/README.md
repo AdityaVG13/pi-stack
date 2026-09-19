@@ -12,7 +12,35 @@ Ordinary JavaScript control flow remains available; the guest command bindings
 are only `read`, `edit`, `write`, and `bash`. Supernova supplies retrieval,
 transactional file operations, batching, bounded results and the grouped nova UI.
 
-## What is new in 0.8.0
+## What is new in 0.8.2
+
+This patch release fixes shell failure handling, cancellation and parallel-batch
+limits, and makes one-call batching guidance explicit.
+
+- **Shell quoting stays intact:** quoted executable paths are no longer unwrapped.
+  Shell syntax errors suggest literal `bash({command,args})` with `data` for
+  embedded scripts, or a quoted heredoc. Commands are not rewritten or retried.
+- **Validation before commit:** invalid timeouts and null-byte
+  arguments are rejected before the shell boundary flushes staged files.
+- **Useful failure output:** long command labels are bounded so the original
+  stderr is not crowded out by a repeated script.
+- **Timeouts retain diagnostics:** the outer program deadline stops the worker
+  and gives pending host calls a bounded drain to retain shell output. Explicit
+  cancellation is reported separately from timeout. The outer `timeoutMs` covers
+  every wait and command, including `sleep`.
+- **Parallel budgets fail honestly:** exceeding the shared output, log or image
+  allowance marks the batch failed and stops queued entries. Already-running
+  entries settle; their results and completed commits remain. Aggregate logs stay
+  capped rather than multiplying the allowance per guest.
+- **Batch known work in one call:** combine independent reads/checks with
+  `Promise.all`, then sequence edits and verification in the same program. Use
+  another invocation when returned evidence is needed for the next decision.
+
+Verified on **macOS / Node 26.7**: 267 package tests (384 repository tests),
+2,328 stress invocations, actual Pi/OMP host checks, lint and both token-budget
+checks. This is not a claim of exhaustive platform or formal mutation testing.
+
+## 0.8.0 features and measurements
 
 - **Shared program source:** top-level `code` or `file` supplies a batch default;
   entries may override it. A shared program is sent once instead of in every entry,
@@ -81,14 +109,12 @@ Local checkout installs are for development, not distribution:
 pi install /path/to/pi-stack/packages/pi-supernova
 ```
 
-Git pushes do not update npm installations. Publish the new npm version first;
-then reinstall it in the host. Reinstall explicitly when an existing version
-range excludes the new minor version (`^0.6.0` excludes `0.7.0`). After 0.7.0 is
-published, pin that release with:
+Git pushes do not update npm installations. Publish the new npm version first,
+then reinstall it in your host. To pin **0.8.2** once it is published:
 
 ```bash
-pi install npm:pi-supernova@0.7.0
-omp install npm:pi-supernova@0.7.0
+pi install npm:pi-supernova@0.8.2
+omp install npm:pi-supernova@0.8.2
 ```
 
 In Pi, `pi list` shows the configured package sources. A local path uses that

@@ -27,7 +27,7 @@ omp install npm:pi-deferred-context-engine
 Needs Pi or OMP and Node 22+. Supernova source lookups also require `rg` on PATH. Package details live in each folder's README.
 
 See the [API and examples](./packages/pi-supernova/README.md),
-[0.8.0 changes](./packages/pi-supernova/docs/CHANGELOG.md), and
+[0.8.2 fixes](./packages/pi-supernova/docs/CHANGELOG.md), and
 [workload-specific token measurements](./packages/pi-supernova/docs/TOKEN_COSTS.md).
 Publishing and installing the npm release are separate from pushing this repo.
 After updating, fully restart Pi/OMP; `/reload` can retain older JavaScript modules.
