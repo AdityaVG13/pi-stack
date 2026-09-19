@@ -134,3 +134,31 @@ it("a memory-limit trip without tracked structures still reports the RSS delta",
   assert.match(message, /\+400\.0MB in 100ms \(0 host calls\)/);
   assert.match(message, /~400\.0MB untracked/);
 });
+
+it("the outer program deadline retains pending shell diagnostics and finalizes its trace", async t => {
+  const f = await engineFixture(t);
+  await assert.rejects(f.tool.execute("outer-deadline", {
+    code:'return await bash("printf OUTER_TIMEOUT_DIAGNOSTIC; sleep 10");', timeoutMs:1000,
+  }, undefined, undefined, {cwd:f.root}), error => {
+    assert.match(error.message, /timed out/);
+    assert.match(error.message, /OUTER_TIMEOUT_DIAGNOSTIC/);
+    assert.match(error.message, /timeoutMs/);
+    const row = error.supernovaResult.details.trace.find(row => row.name === "bash");
+    assert.equal(row.ok, false);
+    assert.match(row.error, /OUTER_TIMEOUT_DIAGNOSTIC/);
+    return true;
+  });
+  assert.equal((await f.execute("return 42;")).details.result, 42);
+});
+
+it("explicit cancellation is not described as a timeout needing a larger limit", async t => {
+  const f = await engineFixture(t);
+  const controller = new AbortController();
+  await assert.rejects(f.tool.execute("cancelled", {code:'await write("cancelled.txt","pending"); while(true){}'}, controller.signal, update => {
+    if (update.details.trace.some(row => row.name === "write" && row.ok)) controller.abort();
+  }, {cwd:f.root}), error => {
+    assert.match(error.message, /aborted/);
+    assert.doesNotMatch(error.message, /timed out|allow longer runs/);
+    return true;
+  });
+});

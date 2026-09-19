@@ -34,7 +34,7 @@ it("file admission rejects ambiguity, non-files, invalid UTF-8 and invalid synta
   assert.equal((await run(f,{file:"empty.js"})).details.result,42);
   await assert.rejects(run(f,{file:"empty.js"},AbortSignal.abort()),/aborted/);
   await f.write("empty.js",'await new Promise(()=>{}); await write("never.txt","bad");');
-  await assert.rejects(run(f,{file:"empty.js",timeoutMs:100}),/timed out or aborted/);
+  await assert.rejects(run(f,{file:"empty.js",timeoutMs:100}),/supernova timed out:/);
   await assert.rejects(fs.stat(path.join(f.root,"never.txt")), {code:"ENOENT"});
 });
 

@@ -81,21 +81,6 @@ export function resultDiff(response) {
   return isObject(details) ? details.diff : undefined;
 }
 
-/** Unwrap a single matching quote pair around the whole string (`'git status'`). */
-export function unwrapIfFullyQuoted(s) {
-  if (s.length < 2) return s;
-  const q = s[0];
-
-  if (q !== "'" && q !== '"') return s;
-
-  if (s[s.length - 1] !== q) return s;
-  const inner = s.slice(1, -1);
-
-  if (inner.includes(q)) return s;
-
-  return inner;
-}
-
 function totalContentLines(text) {
   if (text === "") return 1;
 

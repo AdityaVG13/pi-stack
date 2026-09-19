@@ -256,7 +256,7 @@ function formatBashFailure(command, res) {
   const output = String(res.value).trimEnd();
   const suffix = Number.isInteger(exitCode) ? " (exit " + exitCode + ")" : "";
 
-  return "command failed" + suffix + ": " + command + (output ? "\n" + output : "");
+  return "command failed" + suffix + ": " + truncateChars(command, 240, "command").text + (output ? "\n" + output : "");
 }
 
 function markTruncatedOutput(res, text) {

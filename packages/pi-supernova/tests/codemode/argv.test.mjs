@@ -73,3 +73,58 @@ it("object-form bash keeps its own cwd over a second options argument", {skip:pr
 
   assert.equal(result.details.result.trim(), await fs.realpath(path.join(f.root, "sub")));
 });
+
+it("invalid shell inputs do not flush staged files or count as external attempts", async t => {
+  const f = await engineFixture(t);
+  const invalid = [
+    '{command:"true",timeoutMs:0}', '{command:"true",timeoutMs:NaN}',
+    '{command:"true",timeout:-1}', '{command:"true\\0"}',
+    '{command:process.execPath,args:["-e","bad\\0argument"]}',
+  ];
+  for (const [i, args] of invalid.entries()) {
+    const file = `uncommitted-${i}.txt`;
+    await assert.rejects(f.execute(`await write(${JSON.stringify(file)},"pending"); await bash(${args});`), error => {
+      assert.match(error.message, /positive finite number|null bytes/);
+      assert.equal(error.supernovaResult.details.mutations.committed, 0);
+      assert.equal(error.supernovaResult.details.mutations.external, 0);
+      assert.equal(error.supernovaResult.details.mutations.rolledBack, 1);
+      return true;
+    });
+    await assert.rejects(fs.stat(path.join(f.root, file)), {code:"ENOENT"});
+  }
+});
+
+it("shell syntax failures explain literal argv without rerunning or rewriting the command", async t => {
+  const f = await engineFixture(t);
+  const command = 'python3 -c "\nprint(f"nested ({1})")\n"';
+  await assert.rejects(f.execute(`return await bash(${JSON.stringify(command)});`), error => {
+    assert.match(error.message, /syntax error/);
+    assert.match(error.message, /literal argv/);
+    assert.match(error.message, /data\.script/);
+    assert.equal(error.supernovaResult.details.mutations.external, 1);
+    return true;
+  });
+  // The suggested argv route preserves the embedded quotes and shell metacharacters.
+  const script = 'process.stdout.write("nested ($HOME) \'quoted\'")';
+  const result = await f.execute(`return await bash({command:process.execPath,args:["-e",${JSON.stringify(script)}]});`);
+  assert.equal(result.details.result, "nested ($HOME) 'quoted'");
+});
+
+it("a quoted executable path is passed to the shell unchanged", {skip:process.platform === "win32"}, async t => {
+  const f = await engineFixture(t);
+  await f.write("quoted executable", "#!/bin/sh\nprintf quoted-path-ok\n");
+  await fs.chmod(path.join(f.root, "quoted executable"), 0o755);
+  const result = await f.execute(`return await bash(${JSON.stringify("'./quoted executable'")});`);
+  assert.equal(result.details.result, "quoted-path-ok");
+});
+
+it("long shell failures keep diagnostics instead of echoing the entire script", async t => {
+  const f = await engineFixture(t);
+  const command = "# " + "payload-".repeat(5000) + "\nprintf FINAL_DIAGNOSTIC >&2; exit 7";
+  await assert.rejects(f.execute(`return await bash(${JSON.stringify(command)});`), error => {
+    assert.match(error.message, /exit 7/);
+    assert.match(error.message, /FINAL_DIAGNOSTIC/);
+    assert.ok(error.message.length < 2000, "a command label must not crowd out the diagnostic");
+    return true;
+  });
+});

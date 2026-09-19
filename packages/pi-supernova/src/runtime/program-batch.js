@@ -156,16 +156,35 @@ class ProgramBatch {
     this.collectImages(result, i);
   }
 
+  parallelBudgetStop(settled) {
+    const results = settled.filter(Boolean);
+    let images = 0, bytes = 0, labelChars = 0;
+    for (const [i, result] of settled.entries()) {
+      let imageSeq = 0;
+      for (const block of result?.content ?? []) if (block.type === "image" && isString(block.data)) {
+        images++;
+        bytes += Buffer.byteLength(block.data, "base64");
+        labelChars += ("program " + (i + 1) + " image " + (++imageSeq)).length + 1;
+      }
+    }
+    let kind;
+    if (images > 16 || bytes > 20 * 1024 * 1024) kind = "image";
+    else if (results.some(result => result.details?.returnTruncated) || programBatchText(results, this.programs.length).length + labelChars > this.config.maxReturnChars) kind = "output";
+    else if (results.some(result => result.details?.logTruncated) || results.reduce((n, result) => n + (result.details?.logs?.length ?? 0), 0) > (this.config.maxLogLines ?? 100)) kind = "log";
+    return kind ? "batch " + kind + " budget exceeded; completed commits remain" : "";
+  }
+
   async runParallel() {
     const limit = Math.min(this.programs.length, MAX_PARALLEL_PROGRAMS);
     const settled = Array.from({ length: this.programs.length });
     let next = 0;
 
     await Promise.all(Array.from({length: limit}, async () => {
-      while (next < this.programs.length && !this.combined.aborted && performance.now() < this.deadline) {
+      while (next < this.programs.length && !this.stopped && !this.combined.aborted && performance.now() < this.deadline) {
         const i = next++;
         settled[i] = await this.runOne(this.programs[i], i);
         this.live[i] = [];
+        this.stopped ||= this.parallelBudgetStop(settled);
       }
     }));
 
@@ -174,7 +193,7 @@ class ProgramBatch {
       this.takeSettled(settled[i], i);
     }
 
-    if (settled.includes(undefined) || this.combined.aborted || performance.now() >= this.deadline) this.stopped = "batch deadline or cancellation; earlier commits remain" + this.deadlineNote();
+    if ((!this.stopped && settled.includes(undefined)) || this.combined.aborted || performance.now() >= this.deadline) this.stopped = "batch deadline or cancellation; earlier commits remain" + this.deadlineNote();
   }
 
   sequentialStop(result, i) {
@@ -222,6 +241,8 @@ class ProgramBatch {
     const failed = this.results.filter(result => result.details?.ok === false).length;
     const bounded = this.boundedText(failed);
     const content = [{type:"text",text:bounded.text}];
+    const logs = this.results.flatMap(result => result.details?.logs ?? []);
+    const logLimit = this.config.maxLogLines ?? 100;
     this.images.forEach((image,i) => content.push({type:"text",text:this.imageLabels[i]},image));
 
     // Return a typed stop report instead of throwing away earlier results/images.
@@ -230,7 +251,7 @@ class ProgramBatch {
       programs:this.results,attempted:this.results.length,total:this.programs.length,stopped:this.stopped,parallel:this.parallel,
       result:bounded.truncated ? bounded.text : this.results.map(result=>result.details?.result),
       returnTruncated:bounded.truncated || this.results.some(result=>result.details?.returnTruncated),
-      logTruncated:this.results.some(result=>result.details?.logTruncated),logs:this.results.flatMap(result=>result.details?.logs ?? []),trace:this.trace,mutations:mutationTotals(this.results)}};
+      logTruncated:logs.length > logLimit || this.results.some(result=>result.details?.logTruncated),logs:logs.slice(0,logLimit),trace:this.trace,mutations:mutationTotals(this.results)}};
   }
 
   async run() {

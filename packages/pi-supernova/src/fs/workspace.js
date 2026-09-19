@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { constants } from "node:os";
 import { isString } from "../shared/decode.js";
+import { truncateChars } from "../output/format.js";
 
 let cachedCwd = null;
 
@@ -211,7 +212,10 @@ function attachCommandIO(state, options, argv, timeoutMs) {
     clearTimeout(state.escalation);
     options.signal?.removeEventListener("abort", onAbort);
   };
-  state.timer = setTimeout(() => terminateCommand(state, new Error("command timed out after " + timeoutMs + "ms: " + (options.commandLabel ?? argv.join(" ")))), timeoutMs);
+  state.timer = setTimeout(() => terminateCommand(state, new Error(
+    "command timed out after " + timeoutMs + "ms: " + truncateChars(options.commandLabel ?? argv.join(" "), 240, "command").text
+    + "\nhint: Increase this bash timeoutMs and the outer supernova timeoutMs, or split the work. Sleeps and every command in a shell chain share the same limit."
+  )), timeoutMs);
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", chunk => { state.stdout = appendCommandOutput(state, state.stdout, chunk); });

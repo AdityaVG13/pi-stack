@@ -17,7 +17,10 @@ function normalizeArgv(args) {
       throw new Error(`${ARGV_ERROR}; args[${i}] is ${type}; check the supplied data fields and pass each argument as a string`);
     }
   }
-  args.args = args.args.map(String);
+  args.args = args.args.map((arg, i) => {
+    if (arg.includes("\0")) throw new Error(`bash args[${i}] must not contain null bytes`);
+    return String(arg);
+  });
 
   if (process.platform === "win32") {
     delete args._directArgv;
@@ -37,9 +40,17 @@ function assertBashOptions(args) {
 export function normalizeBash(command, opts) {
   const args = isObject(command) ? { ...opts, ...command } : { command, ...opts };
   assertBashOptions(args);
+  if (!isString(args.command) || !args.command.trim()) throw new Error("bash requires a non-empty command string");
+  if (args.command.includes("\0")) throw new Error("bash command must not contain null bytes");
   normalizeArgv(args);
 
   if (args.timeout !== undefined && args.timeoutMs === undefined) args.timeoutMs = args.timeout * 1000;
+  // Reject before the host's external-mutation barrier can flush staged files.
+  if (args.timeoutMs !== undefined) {
+    const timeout = Number(args.timeoutMs);
+    if (!Number.isFinite(timeout) || timeout <= 0) throw new Error("command timeoutMs must be a positive finite number");
+    args.timeoutMs = Math.max(1, Math.min(2_147_483_647, Math.floor(timeout)));
+  }
 
   return args;
 }

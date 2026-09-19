@@ -10,7 +10,8 @@ import { errorContext } from "../shared/syntax-context.js";
 
 const WORKER_URL = new URL("./guest-worker.js", import.meta.url);
 
-const ABORT_MESSAGE = "supernova timed out or aborted: pass timeoutMs to allow longer runs, or split the program";
+const ABORT_MESSAGE = "supernova aborted";
+const TIMEOUT_MESSAGE = "supernova timed out: increase the outer timeoutMs (and any shorter bash timeoutMs), or split the program; sleeps count toward the deadline";
 
 const MEMORY_POLL_MS = 50;
 
@@ -281,6 +282,7 @@ class GuestRun {
     this.hostError = undefined;
     this.notifyingHost = false;
     this.aborting = false;
+    this.abortOutcome = undefined;
     this.pending = new Set();
     this.inputController = new AbortController();
     this.rpcCount = 0;
@@ -320,15 +322,18 @@ class GuestRun {
     try { this.nova.cancel?.(); } catch {} finally { this.notifyingHost = false; }
   }
 
-  abort() {
+  abort(timedOut = false) {
     if (this.finished || this.aborting) return;
     this.aborting = true;
+    this.accepting = false;
+    this.abortOutcome = this.fail((timedOut ? TIMEOUT_MESSAGE : ABORT_MESSAGE) + " (ran " + this.wall() + "ms of " + this.timeoutMs + "ms)");
     this.cancelHost();
 
-    try { this.onTimeout?.(); } catch {}
+    if (timedOut) { try { this.onTimeout?.(); } catch {} }
 
-    this.aborting = false;
-    this.finish(this.fail(ABORT_MESSAGE + " (ran " + Math.round(this.wall()) + "ms of " + this.timeoutMs + "ms)"));
+    // Stop the guest immediately, then use the bounded host drain to retain
+    // shell diagnostics and wait for process-tree termination before returning.
+    void this.complete(this.abortOutcome);
   }
 
   postResult(message) {
@@ -365,6 +370,10 @@ class GuestRun {
     void killWorker(this.handle);
     await this.drainPending(outcome);
     if (this.finished) return;
+    if (this.abortOutcome) {
+      const diagnostic = this.hostError && this.hostError !== "aborted" ? "\n" + this.hostError : "";
+      outcome = this.fail(this.abortOutcome.error + diagnostic);
+    }
     this.finish(outcome.ok && this.hostError ? this.fail(this.hostError) : outcome);
   }
 
@@ -448,7 +457,7 @@ class GuestRun {
   }
 
   async attachWorker() {
-    if (this.wall() >= this.timeoutMs) { this.abort(); return false; }
+    if (this.wall() >= this.timeoutMs) { this.abort(true); return false; }
     this.handle = acquireWorker(this.config);
     await this.handle.ready;
     if (this.finished || this.signal?.aborted) { this.abort(); return false; }
@@ -459,7 +468,7 @@ class GuestRun {
     this.handle.worker.on("message", this.onMessage);
     this.handle.worker.on("error", this.onError);
     this.handle.worker.on("exit", this.onExit);
-    if (this.wall() >= this.timeoutMs) { this.abort(); return false; }
+    if (this.wall() >= this.timeoutMs) { this.abort(true); return false; }
     this.available = available;
 
     return true;
@@ -488,7 +497,7 @@ class GuestRun {
   start() {
     return new Promise((resolve) => {
       this.resolve = resolve;
-      this.timer = setTimeout(() => this.abort(), Math.min(this.timeoutMs, 2147483647));
+      this.timer = setTimeout(() => this.abort(true), Math.min(this.timeoutMs, 2147483647));
       this.memTimer = setInterval(() => {
         const now = rssBytes();
 

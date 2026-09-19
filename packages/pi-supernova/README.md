@@ -135,6 +135,21 @@ payloads are not repeated in owned direct-execution errors;
 stdout/stderr, exit status and source context remain. Session environment variables are taken
 from the current execution context, not inherited from a different parent session.
 
+Shell strings are executed unchanged, including quoted executable paths. For inline
+Python/Node scripts, prefer literal argv with `data` instead of nested shell quotes:
+
+```json
+{
+  "code": "return await bash({command:\"python3\",args:[\"-c\",data.script]});",
+  "data": {"script": "q = {'name': 'example'}\nprint(f\"{q['name']}\")\n"}
+}
+```
+
+Shell syntax errors keep the original diagnostic and suggest argv or a quoted
+heredoc; commands are never automatically rewritten or retried. Invalid timeouts
+and null-byte arguments fail before flushing staged changes. Failure labels are
+bounded so a large script cannot crowd out its stderr.
+
 Source questions locate a declaration in one command. An exact
 declaration match uses one bounded direct ripgrep search, without a prerequisite
 file listing, persistent index, embeddings or summarization. A transient filename
@@ -349,6 +364,9 @@ Set `parallel: true` with `programs` to run independent entries concurrently
 in submission order. A failed entry does not stop siblings. Two entries writing
 the same file race: the losing commit reports a conflict. Sequential remains the
 default. `parallel` and `mergeData` are invalid on a lone `code` or `file` call.
+Budget overflow marks the batch failed and stops queued entries; already-running
+entries settle and their completed commits remain. Parallel execution does not
+multiply the aggregate output, log, or image allowance.
 
 The outer deadline, host-call budget, log allowance, text budget and image limits
 are shared across the batch. Individual read budgets are not reduced. Every
@@ -380,10 +398,13 @@ For long archive scans, use resumable chunks or a host background-job tool and w
 progress records under `.work`. Shell commands inherit the current program
 `timeoutMs` unless they specify their own; increasing the outer deadline no longer
 leaves a hidden 60-second shell cap. Set the inner `bash` timeout shorter than the
-outer program timeout (for example 10 seconds inside a 20-second program) to retain
-bounded shell diagnostics. A hard guest deadline cannot guarantee pending shell
-output delivery; progress files survive shell execution but staged VFS writes may
-roll back.
+outer program timeout (for example 10 seconds inside a 20-second program). The outer
+deadline covers **all** waits and commands, including `sleep`; a shell's own `timeout`
+command does not extend it. On a deadline or cancellation, the worker stops and
+pending host calls get a bounded 250ms drain to retain owned-shell diagnostics and
+finalize process termination. Non-cooperating host executors may still outlive that
+drain. Cancellation is reported separately from timeout; neither triggers a retry.
+Progress files survive shell execution but staged VFS writes may roll back.
 
 Large returned objects are bounded previews, not retained artifacts. Select fields
 and array windows before returning, rather than parsing a truncated preview.
@@ -431,6 +452,12 @@ bash. Arbitrary returned objects still have bounded previews, not implicit
 continuation handles.
 
 ## Execution and automatic batching
+
+Put already-known independent reads and checks in **one** Supernova program using
+`Promise.all` (or `Promise.allSettled` when failures should remain independent).
+Sequence edits and their known verification in that same program. Start another
+invocation only when the returned evidence is needed to decide what to do next;
+use focused read windows to keep the combined result within its output budget.
 
 Compatible independently started reads coalesce at the worker/host boundary.
 No additional batching command is required. Individual promises preserve their

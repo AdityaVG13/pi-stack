@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import { isString } from "../shared/decode.js";
-import { unwrapIfFullyQuoted } from "../fs/text-ops.js";
+import { normalizeBash } from "../contract/bash.js";
 import { sourceForReferences } from "../fs/source-window.js";
 import { resolveWorkspacePath, runCommand, clearPathCache } from "../fs/workspace.js";
 
@@ -17,7 +17,7 @@ export function createBash(ctx) {
   function bashCommand(params, literal) {
     if (params?.command !== undefined && !isString(params.command)) throw new Error("bash command must be a string");
     if (literal && (!isString(params.command) || params.args.some(arg => !isString(arg)))) throw new Error("bash argv requires a command string and an array of string args");
-    const command = literal ? String(params.command) : unwrapIfFullyQuoted(String(params?.command ?? "").trim());
+    const command = String(params?.command ?? "");
 
     if (!command.trim()) throw new Error("bash requires command");
 
@@ -32,6 +32,7 @@ export function createBash(ctx) {
   }
 
   async function bash(params, signal) {
+      params = normalizeBash(params);
       const cwd = getCwd();
       const { literal, command, argv } = parseBash(params);
       const targetCwd = params?.cwd ? await resolveWorkspacePath(cwd, params.cwd, "bash cwd", true) : cwd;
@@ -49,7 +50,7 @@ export function createBash(ctx) {
         res = await runCommand(argv, {
           cwd: targetCwd,
           env: hooks.commandEnv(),
-          commandLabel: literal ? command : undefined,
+          commandLabel: command,
           timeoutMs: params?.timeoutMs === undefined ? config.timeoutMs : params.timeoutMs,
           signal,
           maxOutputChars: config.maxCallResultChars,
@@ -67,7 +68,12 @@ export function createBash(ctx) {
       const { stdout, stderr } = res;
       let text = combineBashText(stdout, stderr);
 
-      if (res.exitCode !== 0) text += await sourceForReferences(cwd, targetCwd, text, signal, ledger);
+      if (res.exitCode !== 0) {
+        if (!literal && /\bbash: (?:-c: )?line \d+: (?:syntax error|unexpected EOF)/.test(stderr)) {
+          text += '\nhint: Bash could not parse the command. For embedded scripts use literal argv, e.g. bash({command:"python3",args:["-c",data.script]}), or a quoted heredoc for shell pipelines. Do not blindly retry: earlier commands may have run.';
+        }
+        text += await sourceForReferences(cwd, targetCwd, text, signal, ledger);
+      }
 
       return {
         content: [{ type: "text", text }],
