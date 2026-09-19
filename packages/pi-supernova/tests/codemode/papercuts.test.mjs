@@ -279,6 +279,50 @@ it("timeout failures report elapsed time against the program limit", async t => 
   });
 });
 
+it("path errors name the path, not the caller, and explain unusable parents", async t => {
+  const f = await engineFixture(t);
+  await f.write("afile","x");
+  await fs.mkdir(path.join(f.root,"adir"));
+  await assert.rejects(f.execute('return await write("adir","x");'), error => {
+    assert.match(error.message,/path is a directory, not a file/);
+    assert.doesNotMatch(error.message,/read path is a directory/);
+    return true;
+  });
+  await assert.rejects(f.execute('return await edit("adir","a","b");'), /path is a directory, not a file/);
+  await assert.rejects(f.execute('return await read("afile/child.txt");'), /a parent component .* is a file, not a directory/);
+  await assert.rejects(f.execute('return await write("afile/child.txt","x");'), /a parent component .* is a file, not a directory/);
+});
+
+it("non-UTF-8 files fail closed on read, window, edit and append without touching bytes", async t => {
+  const f = await engineFixture(t);
+  const latin1 = Buffer.from("caf\xe9 na\xefve\n","latin1");
+  await fs.writeFile(path.join(f.root,"latin1.txt"),latin1);
+  await assert.rejects(f.execute('return await read("latin1.txt",{complete:true});'), /not valid UTF-8/);
+  await assert.rejects(f.execute('return await read("latin1.txt",1,1);'), /not valid UTF-8/);
+  await assert.rejects(f.execute('return await edit("latin1.txt","caf","COF");'), /not valid UTF-8/);
+  await assert.rejects(f.execute('return await write({path:"latin1.txt",content:"more",append:true});'), /not valid UTF-8/);
+  assert.equal((await fs.readFile(path.join(f.root,"latin1.txt"))).toString("hex"),latin1.toString("hex"));
+  const replaced = await f.execute('return await write({path:"latin1.txt",content:"plain\\n",replace:true});');
+  assert.match(String(replaced.details.result),/wrote latin1\.txt/);
+  assert.equal(await fs.readFile(path.join(f.root,"latin1.txt"),"utf8"),"plain\n");
+});
+
+it("failing window reads do not leak unhandled rejections", async t => {
+  const f = await engineFixture(t);
+  await fs.writeFile(path.join(f.root,"latin1.txt"),Buffer.from("caf\xe9\n","latin1"));
+  const leaks = [];
+  const onLeak = (reason) => leaks.push(reason);
+
+  process.on("unhandledRejection",onLeak);
+  try {
+    await assert.rejects(f.execute('return await read("latin1.txt",1,1);'), /not valid UTF-8/);
+    await assert.rejects(f.execute('return await read("latin1.txt",{complete:true});'), /not valid UTF-8/);
+    await new Promise(resolve => setTimeout(resolve,50));
+  } finally { process.off("unhandledRejection",onLeak); }
+
+  assert.deepEqual(leaks.map(reason => String(reason?.message ?? reason).slice(0,40)),[]);
+});
+
 it("multi-edit failures name the failing entry", async t => {
   const f = await engineFixture(t);
   await f.write("multi.txt","one\ntwo\nthree\n");

@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isString } from "../shared/decode.js";
+import { decodeUtf8Strict } from "../shared/utf8.js";
 import { createHash, randomUUID } from "node:crypto";
 
 // Serialize validation + replacement across Supernova transactions in this host.
@@ -67,9 +68,10 @@ function overlayOrThrow(overlay, maxBytes, label) {
 }
 
 function assertReadableFile(stat, target) {
-  if (stat.isDirectory()) throw new Error("read path is a directory, not a file: " + target);
+  // Callers are reads, writes, edits and patch application: name the path, not the caller.
+  if (stat.isDirectory()) throw new Error("path is a directory, not a file: " + target);
 
-  if (!stat.isFile()) throw new Error("read requires a regular file: " + target);
+  if (!stat.isFile()) throw new Error("path is not a regular file: " + target);
 }
 
 async function readLimitedBytes(file, stat, maxBytes, label, signal) {
@@ -88,7 +90,9 @@ async function readLimitedBytes(file, stat, maxBytes, label, signal) {
 }
 
 function remapReadError(err, target) {
-  if (err.code === "EISDIR") throw new Error("read path is a directory, not a file: " + target);
+  if (err.code === "EISDIR") throw new Error("path is a directory, not a file: " + target);
+
+  if (err.code === "ENOTDIR") throw new Error("cannot use path: a parent component of " + target + " is a file, not a directory");
 
   if (err.code === "ENOENT") {
     const missing = new Error("no such file: " + target + ' (locate it with read using a directory path or source question; use Promise.allSettled for optional reads to retain successful siblings)');
@@ -258,7 +262,7 @@ export class CausalVfs {
     return [...new Set(this.overlays.flatMap(overlay => [...overlay.keys()]))];
   }
 
-  async read(target, { preserveRead = false, maxBytes, label = "read input" } = {}) {
+  async read(target, { preserveRead = false, maxBytes, label = "read input", strict = true } = {}) {
     const overlay = this.getOverlay(target);
 
     if (overlay !== undefined) return overlayOrThrow(overlay, maxBytes, label);
@@ -281,7 +285,7 @@ export class CausalVfs {
       // Hash the actual bytes, not a lossy UTF-8 decode/re-encode.
       if (!preserveRead || !this.expected.has(target)) this.expected.set(target, textSignature(bytes));
 
-      return bytes.toString("utf8");
+      return strict ? decodeUtf8Strict(bytes, target) : bytes.toString("utf8");
     } catch (err) {
       remapReadError(err, target);
     }

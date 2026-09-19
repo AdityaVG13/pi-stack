@@ -8,6 +8,7 @@ import { selectEvidence } from "../context/evidence.js";
 import { WorkspaceIndex } from "../context/repo-index.js";
 import { outlineFile } from "../context/outline.js";
 import { MAX_JSON_BYTES, jsonProjector } from "../fs/json-read.js";
+import { decodeUtf8Strict, decodeUtf8Window } from "../shared/utf8.js";
 import { normalizeRead, classifyRead, needsProbe, SESSION_URI, buildJsonRouting, buildSelectionRouting, routingText } from "../contract/read.js";
 import { resolveWorkspacePath, runCommand, relativeSlash } from "../fs/workspace.js";
 import {
@@ -231,12 +232,17 @@ export function createRead(ctx) {
     try { return await fs.open(targetPath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0)); }
     catch (error) {
       if (error.code === "ENOENT") throw missingFile(targetPath);
+      if (error.code === "ENOTDIR") throw new Error("cannot use path: a parent component of " + targetPath + " is a file, not a directory");
+      if (error.code === "EISDIR") throw new Error("path is a directory, not a file: " + targetPath);
       throw error;
     }
   }
 
   async function finishFileWindow(targetPath, stat, startLine, scan) {
-    const text = Buffer.concat(scan.parts, scan.collected).toString("utf8");
+    // A truncated window can cut a multi-byte character; a window that reached
+    // EOF must decode strictly, so a binary file cannot masquerade as text.
+    const bytes = Buffer.concat(scan.parts, scan.collected);
+    const text = scan.startByte + scan.collected >= stat.size ? decodeUtf8Strict(bytes, targetPath) : decodeUtf8Window(bytes);
     const satisfied = (scan.done && scan.startByte + scan.collected >= scan.doneByte) || scan.startByte + scan.collected >= stat.size;
     const whole = startLine === 1 && scan.startByte === 0 && scan.startByte + scan.collected >= stat.size;
     await vfs.recordExpected(targetPath, stat);
@@ -263,7 +269,11 @@ export function createRead(ctx) {
 
       if (!scan.started) return emptyWindow(targetPath, stat);
 
-      return finishFileWindow(targetPath, stat, startLine, scan);
+      // Await inside the try: returning the promise directly leaves its
+      // rejection unobserved while the finally awaits file.close().
+      const window = await finishFileWindow(targetPath, stat, startLine, scan);
+
+      return window;
     } finally {
       await file.close();
     }

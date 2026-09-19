@@ -402,7 +402,8 @@ async function snapshotLargeFile(vfs, target, overlay, signal) {
 }
 
 async function snapshotSmallFile(vfs, target, overlay) {
-  try { return overlay !== undefined ? overlay : await vfs.read(target, { maxBytes: WRITE_DIFF_MAX_READ_BYTES, preserveRead: true }); }
+  // Diff/receipt snapshot only: a lossy decode is acceptable and must not block a replace.
+  try { return overlay !== undefined ? overlay : await vfs.read(target, { maxBytes: WRITE_DIFF_MAX_READ_BYTES, preserveRead: true, strict: false }); }
   catch (error) {
     if (error?.code !== "ENOENT") throw error;
 
@@ -413,6 +414,8 @@ async function snapshotSmallFile(vfs, target, overlay) {
 async function existingStat(target) {
   try { return await fs.stat(target); }
   catch (error) {
+    if (error.code === "ENOTDIR") throw new Error("cannot use path: a parent component of " + target + " is a file, not a directory");
+
     if (error.code !== "ENOENT") throw error;
   }
 }

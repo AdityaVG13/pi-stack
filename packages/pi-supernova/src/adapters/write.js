@@ -58,13 +58,17 @@ export function createWrite(ctx) {
   }
 
   async function applyAppend(target, content, snap) {
-    let { previous: prevText, overlay, existingBytes } = snap;
+    const { overlay, existingBytes } = snap;
 
     if (existingBytes > WRITE_APPEND_MAX_READ_BYTES) throw new Error("append input exceeds " + WRITE_APPEND_MAX_READ_BYTES + " bytes; stream it with bash redirection instead");
+    // Append needs the real content: the diff snapshot may be a lossy decode, and
+    // concatenating that would silently corrupt a non-UTF-8 file.
+    let prevText;
 
-    if (existingBytes !== undefined && existingBytes > WRITE_DIFF_MAX_READ_BYTES) {
-      try { prevText = overlay !== undefined ? overlay : await vfs.read(target, { maxBytes: WRITE_APPEND_MAX_READ_BYTES, preserveRead: true }); }
-      catch (error) { if (error.code !== "ENOENT") throw error; }
+    try { prevText = overlay !== undefined ? overlay : await vfs.read(target, { maxBytes: WRITE_APPEND_MAX_READ_BYTES, preserveRead: true }); }
+    catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      prevText = "";
     }
 
     return { content: prevText + content, prevText, removedLines: undefined };
