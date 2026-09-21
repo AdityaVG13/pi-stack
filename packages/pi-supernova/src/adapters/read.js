@@ -1,30 +1,29 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isString, isNumber, assertModelImageMime } from "../shared/decode.js";
+import { isString } from "../shared/decode.js";
+import { readResult, asReadResult, READ_VALUE, READ_BYTES, MAX_READ_VALUE_BYTES } from "../shared/result.js";
 import { extractStructuralSurface } from "../context/surface.js";
-import { pickSpan } from "../context/spans.js";
-import { executeSnap, tokenizeQuery, stem } from "../context/snap.js";
+import { executeSnap, tokenizeQuery } from "../context/snap.js";
 import { selectEvidence } from "../context/evidence.js";
-import { WorkspaceIndex } from "../context/repo-index.js";
-import { outlineFile } from "../context/outline.js";
-import { MAX_JSON_BYTES, jsonProjector } from "../fs/json-read.js";
-import { decodeUtf8Strict, decodeUtf8Window } from "../shared/utf8.js";
-import { normalizeRead, classifyRead, needsProbe, SESSION_URI, buildJsonRouting, buildSelectionRouting, routingText } from "../contract/read.js";
-import { resolveWorkspacePath, runCommand, relativeSlash } from "../fs/workspace.js";
-import {
-  textResult, sliceLinesRawInfo, sliceLinesRaw,
-  normalizeReadWindow, resolveReadPath, probeExistingPath,
-  sourceLines, lineStartIndex, lineTextRange, contentLineInfo,
-  formatDirectoryEntry, formatLsEntry, MAX_DIRECTORY_ENTRIES,
-  jsonStringLength, maxJsonStringPrefix,
-} from "../fs/text-ops.js";
-import { imageTooLarge, missingFile, IMAGE_MAX_BYTES, LARGE_FILE_BYTES, ABOUT_TOKEN_MAX, IMAGE_MIME, RAW_JSON_CHARS, RAW_SOURCE_CHARS, RAW_SOURCE_LINES, ROUTING_MAX_CHARS } from "./errors.js";
-import { outlineOptions, recordOutlineOrigins, createReferenceFinder } from "./refs.js";
-import { sourceContext, parsePosition } from "../shared/syntax-context.js";
+import { normalizeRead, classifyRead, needsProbe } from "../contract/read.js";
+import { resolveWorkspacePath, relativeSlash } from "../fs/workspace.js";
+import { normalizeReadWindow, resolveReadPath, probeExistingPath } from "../fs/text-ops.js";
+import { createDirectoryReader } from "../fs/directory.js";
+import { createWindowReader } from "../fs/read-window.js";
+import { resolveSessionResource } from "../fs/session-resource.js";
+import { ABOUT_TOKEN_MAX } from "./errors.js";
+import { projectJson } from "./read-json.js";
+import { createImageReader } from "./read-image.js";
+import { createTextReader } from "./read-text.js";
+import { createFocusedReader } from "./read-focus.js";
 
 export function createRead(ctx) {
   const { getCwd, vfs, config, index, ledger, hooks, reads } = ctx;
-  const referenceFinder = createReferenceFinder(index, vfs);
+  const readDirectory = createDirectoryReader(vfs);
+  const readWindow = createWindowReader(vfs);
+  const readTextFile = createTextReader(ctx, readWindow);
+  const maybeImage = createImageReader(vfs);
+  const focusAbout = createFocusedReader(vfs, readBudget);
   async function sourceRead(query, searchDir, signal, params = {}) {
     params = { ...params, resolve: params.resolve !== false };
     const cwd = getCwd();
@@ -50,7 +49,7 @@ export function createRead(ctx) {
   async function openSource(result, params, signal, resolvedPath, query) {
     const cwd = getCwd();
 
-    if (result.status !== "found") return textResult(JSON.stringify(result), { isSnap: true });
+    if (result.status !== "found") return readResult(result, { isSnap: true });
     signal?.throwIfAborted();
     const target = resolvedPath ?? path.resolve(cwd, result.path);
     const bounded = await sourceIsBounded(target, query, params);
@@ -68,297 +67,67 @@ export function createRead(ctx) {
   function openedSource(result, params, block, details) {
     const { firstLine, lastLine, sourceChars, nextOffset, complete } = details;
 
-    if (lastLine < firstLine) return textResult(JSON.stringify({ status: "incomplete", path: result.path, line: result.line, signature: result.signature ?? "", confidence: result.confidence ?? 0, context: result.context ?? [], message: "offset is beyond the end of " + result.path }), { ...details, isSnap: true });
+    if (lastLine < firstLine) return readResult({ status: "incomplete", path: result.path, line: result.line, signature: result.signature ?? "", confidence: result.confidence ?? 0, context: result.context ?? [], message: "offset is beyond the end of " + result.path }, { ...details, isSnap: true });
 
     return foundSource(result, params, block, details, firstLine, lastLine, sourceChars, nextOffset, complete);
   }
 
   function foundSource(result, params, block, details, firstLine, lastLine, sourceChars, nextOffset, complete) {
     const source = { status: "found", path: result.path, line: result.line, lines: [firstLine, lastLine],
-      text: block.text.slice(0, sourceChars), complete, nextOffset };
+      text: block.text.slice(0, sourceChars), complete };
+    if (nextOffset !== undefined) source.nextOffset = nextOffset;
 
-    return textResult(params.resolve ? JSON.stringify(source) : "// " + result.path + ":" + firstLine + "-" + lastLine + "\n" + block.text,
+    return readResult(params.resolve ? source : "// " + result.path + ":" + firstLine + "-" + lastLine + "\n" + block.text,
       { ...details, isSnap: true });
   }
 
-  function overlayDirRows(dirPath, rows) {
-    let truncated = false;
-
-    for (const file of vfs.getOverlayPaths()) {
-      if (rows.size >= MAX_DIRECTORY_ENTRIES) return true;
-      const relative = path.relative(dirPath, file);
-
-      if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) continue;
-      const [name, child] = relative.split(path.sep);
-      rows.set(name, child === undefined
-        ? formatDirectoryEntry(name, "file", Buffer.byteLength(vfs.getOverlay(file), "utf8"))
-        : formatDirectoryEntry(name, "dir"));
+  async function addBatchItem(state, index, raw, onItem) {
+    const bytes = raw[READ_BYTES];
+    if (!onItem) {
+      if (state.bytes + bytes > MAX_READ_VALUE_BYTES) throw new Error("batched read exceeds " + MAX_READ_VALUE_BYTES + " bytes; use individual reads");
+    } else if (!state.streamed && state.bytes + bytes > 65536) {
+      state.streamed = true;
+      const retained = state.items.splice(0);
+      await Promise.all(retained.map(async (item,i) => { if (item) await onItem(i,item); }));
     }
-
-    return truncated;
+    if (state.streamed) await onItem(index,raw);
+    else { state.items[index] = raw; state.bytes += bytes; }
   }
 
-  async function diskDirRows(dirPath, rows, signal) {
-    let entries;
-
-    try { entries = await fs.readdir(dirPath, { withFileTypes: true }); } catch (error) {
-      if (error.code !== "ENOENT" || rows.size === 0) throw error;
-      entries = [];
-    }
-
-    for (let i = 0; i < entries.length; i++) {
-      if ((i & 127) === 0) signal?.throwIfAborted();
-      if (rows.size >= MAX_DIRECTORY_ENTRIES) return true;
-      if (!rows.has(entries[i].name)) rows.set(entries[i].name, await formatLsEntry(dirPath, entries[i]));
-    }
-
-    return false;
-  }
-
-  async function readDirectory(dirPath, signal) {
-    signal?.throwIfAborted();
-    const rows = new Map();
-    let truncated = overlayDirRows(dirPath, rows);
-    truncated = await diskDirRows(dirPath, rows, signal) || truncated;
-
-    const values = [...rows.values()];
-    const text = values.join("\n") + (truncated ? "\n[directory listing truncated at " + MAX_DIRECTORY_ENTRIES + " entries]" : "");
-
-    return textResult(text, { path: dirPath, directory: true, count: rows.size, entries: values, outputTruncated: truncated });
-  }
-
-  function overlayWindow(overlay, startLine, lineCount) {
-    const window = sliceLinesRawInfo(overlay, startLine, lineCount);
-    const satisfied = lineCount === undefined || lineCount === 0 || window.text === "" || window.count >= lineCount || window.eof;
-
-    return { text: window.text, satisfied, whole: window.whole };
-  }
-
-  function skipToStart(scan, bytesRead, linesSeen, startLine) {
-    let begin = 0;
-
-    while (begin < bytesRead && linesSeen < startLine - 1) if (scan[begin++] === 10) linesSeen++;
-
-    return { begin, linesSeen, started: linesSeen >= startLine - 1 };
-  }
-
-  function clipWanted(scan, begin, bytesRead, linesSeen, wantedLines) {
-    let end = bytesRead;
-    let done = false;
-    let doneAt = -1;
-
-    if (wantedLines === Infinity) return { end, linesSeen, done, doneAt };
-
-    for (let i = begin; i < bytesRead; i++) {
-      if (scan[i] !== 10) continue;
-      linesSeen++;
-      if (linesSeen !== wantedLines) continue;
-      end = i + 1;
-      done = true;
-      doneAt = end;
-      break;
-    }
-
-    return { end, linesSeen, done, doneAt };
-  }
-
-  function consumeScanChunk(scan, bytesRead, state) {
-    let { linesSeen, started, startByte, position, startLine, wantedLines, maxBytes, collected, parts } = state;
-    let begin = 0;
-    let done = false;
-    let doneByte = -1;
-
-    if (!started) {
-      const skip = skipToStart(scan, bytesRead, linesSeen, startLine);
-      linesSeen = skip.linesSeen;
-      if (!skip.started) return { ...state, linesSeen, skip: true, done: false, doneByte: -1 };
-      started = true;
-      begin = skip.begin;
-      startByte = position + begin;
-    }
-
-    const clip = clipWanted(scan, begin, bytesRead, linesSeen, wantedLines);
-    linesSeen = clip.linesSeen;
-    if (clip.done) { done = true; doneByte = position + clip.doneAt; }
-    collected = takeScanSlice(scan, begin, clip, position, startByte, maxBytes, collected, parts);
-
-    return { linesSeen, started, startByte, done, doneByte, collected, parts, skip: false };
-  }
-
-  function takeScanSlice(scan, begin, clip, position, startByte, maxBytes, collected, parts) {
-    const takeBegin = position === startByte ? begin : Math.max(0, startByte - position);
-    const takeEnd = Math.min(clip.end, takeBegin + Math.max(0, maxBytes + 1 - collected));
-
-    if (takeEnd > takeBegin) {
-      parts.push(Buffer.from(scan.subarray(takeBegin, takeEnd)));
-      collected += takeEnd - takeBegin;
-    }
-
-    return collected;
-  }
-
-  async function scanFileWindow(file, stat, startLine, lineCount, maxBytes, signal) {
-    const wantedLines = lineCount === undefined ? Infinity : startLine + lineCount - 1;
-    const scan = Buffer.alloc(64 * 1024);
-    const parts = [];
-    let position = 0;
-    let linesSeen = 0;
-    let started = startLine === 1;
-    let startByte = started ? 0 : -1;
-    let done = false;
-    let doneByte = -1;
-    let collected = 0;
-
-    while (position < stat.size && !done && collected <= maxBytes) {
-      signal?.throwIfAborted();
-      const { bytesRead } = await file.read(scan, 0, scan.length, position);
-
-      if (bytesRead <= 0) break;
-      const chunk = consumeScanChunk(scan, bytesRead, { linesSeen, started, startByte, position, startLine, wantedLines, maxBytes, collected, parts });
-      linesSeen = chunk.linesSeen;
-      started = chunk.started;
-      startByte = chunk.startByte;
-      done = chunk.done;
-      doneByte = chunk.doneByte;
-      collected = chunk.collected;
-      position += bytesRead;
-      if (chunk.skip) continue;
-    }
-
-    return { parts, collected, started, startByte, done, doneByte, position };
-  }
-
-  async function openReadFile(targetPath) {
-    try { return await fs.open(targetPath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0)); }
+  async function readBatchItem(params, target, index, signal, state, onItem) {
+    let raw;
+    try { raw = asReadResult(await readSingle({...params,path:target,target:undefined},getCwd(),target,signal)); }
     catch (error) {
-      if (error.code === "ENOENT") throw missingFile(targetPath);
-      if (error.code === "ENOTDIR") throw new Error("cannot use path: a parent component of " + targetPath + " is a file, not a directory");
-      if (error.code === "EISDIR") throw new Error("path is a directory, not a file: " + targetPath);
-      if (error.code === "EACCES" || error.code === "EPERM") throw new Error("permission denied reading " + targetPath + ": check the file mode (for example bash chmod)");
-      throw error;
+      signal?.throwIfAborted();
+      state.errors[index] = error.message;
+      raw = readResult(error.message,{path:target});
+      raw.isError = true;
     }
+    await addBatchItem(state,index,raw,onItem);
   }
 
-  async function finishFileWindow(targetPath, stat, startLine, scan) {
-    // A truncated window can cut a multi-byte character; a window that reached
-    // EOF must decode strictly, so a binary file cannot masquerade as text.
-    const bytes = Buffer.concat(scan.parts, scan.collected);
-    const text = scan.startByte + scan.collected >= stat.size ? decodeUtf8Strict(bytes, targetPath) : decodeUtf8Window(bytes);
-    const satisfied = (scan.done && scan.startByte + scan.collected >= scan.doneByte) || scan.startByte + scan.collected >= stat.size;
-    const whole = startLine === 1 && scan.startByte === 0 && scan.startByte + scan.collected >= stat.size;
-    await vfs.recordExpected(targetPath, stat);
-
-    return { text, satisfied, whole };
+  async function readBatch(params, signal, onItem) {
+    const state = {items:[],errors:Array(params.path.length).fill(null),bytes:0,streamed:false};
+    // Delivery/acknowledgement stays inside the same eight-operation scheduler
+    // slot as I/O. A busy guest cannot cause unbounded host/message-queue buffering.
+    const settled = await Promise.allSettled(params.path.map((target,index) =>
+      reads.schedule("read",()=>readBatchItem(params,target,index,signal,state,onItem),signal)));
+    const failed = settled.find(result=>result.status === "rejected");
+    if (failed) throw failed.reason;
+    signal?.throwIfAborted();
+    const response = readResult("",{count:params.path.length,batch:true,independent:params._independent===true,
+      jsonMany:Array.isArray(params.json),streamed:state.streamed,
+      items:state.streamed ? [] : state.items.map(raw=>raw[READ_VALUE]),itemErrors:state.errors,
+      errors:state.errors.flatMap((message,i)=>message ? [{path:params.path[i],message}] : [])});
+    response.isError = params._independent!==true && state.errors.some(Boolean);
+    return response;
   }
 
-  function emptyWindow(targetPath, stat) {
-    return { text: "", satisfied: true, whole: stat.size === 0 };
-  }
-
-  async function readWindow(targetPath, startLine, lineCount, maxBytes, signal) {
-    const overlay = vfs.getOverlay(targetPath);
-
-    if (overlay !== undefined) return overlayWindow(overlay, startLine, lineCount);
-    const file = await openReadFile(targetPath);
-
-    try {
-      const stat = await file.stat();
-
-      if (!stat.isFile()) throw new Error("read requires a regular file: " + targetPath);
-      if (lineCount === 0) return emptyWindow(targetPath, stat);
-      const scan = await scanFileWindow(file, stat, startLine, lineCount, maxBytes, signal);
-
-      if (!scan.started) return emptyWindow(targetPath, stat);
-
-      // Await inside the try: returning the promise directly leaves its
-      // rejection unobserved while the finally awaits file.close().
-      const window = await finishFileWindow(targetPath, stat, startLine, scan);
-
-      return window;
-    } finally {
-      await file.close();
-    }
-  }
-
-  async function readAdapter(params, signal) {
+  async function readAdapter(params, signal, onItem) {
     signal?.throwIfAborted();
     params = normalizeRead(normalizeReadWindow(params));
-    const cwd = getCwd();
-    const targetParam = params.path;
-
-    if (Array.isArray(targetParam)) {
-
-      const results = await Promise.all(targetParam.map(async p => {
-        try {
-          const res = await readAdapter({ ...params, path: p, target: undefined }, signal);
-          const block = res.content?.[0];
-          const item = block?.type === "image" ? block
-            : res.details?.directory === true && Array.isArray(res.details.entries) ? res.details.entries
-            : block?.text ?? "";
-
-          return { text: item };
-        } catch (error) {
-          signal?.throwIfAborted();
-
-          return { text: `[read error: ${p}] ${error.message}`, error: { path: p, message: error.message } };
-        }
-      }));
-
-      signal?.throwIfAborted();
-      const response = textResult("", { count: results.length, batch: true, independent: params._independent === true, items: results.map(r => r.text), itemErrors: results.map(r => r.error?.message ?? null), errors: results.filter(r => r.error).map(r => r.error) });
-      response.isError = params._independent !== true && results.some(r => r.error);
-
-      return response;
-    }
-
-    return reads.schedule("read", () => readSingle(params, cwd, targetParam, signal), signal);
-  }
-
-  function sessionUriParts(uri) {
-    const match = /^(agent|artifact):\/\/([^/?#]+)$/i.exec(uri);
-
-    if (!match) throw new Error("session resource reads support bare agent://<id> and artifact://<number>; use offset/limit for pagination");
-    const kind = match[1].toLowerCase();
-    const id = decodeURIComponent(match[2]);
-
-    if (!id || id === "." || id === ".." || (/[/\\]/u.test(id) || Array.from(id).some(char => char.charCodeAt(0) < 32)) || (kind === "artifact" && !/^\d+$/.test(id))) throw new Error("invalid session resource ID");
-
-    return { kind, id };
-  }
-
-  async function findArtifactFile(root, id, uri, signal) {
-    const matches = [];
-    let count = 0;
-
-    for await (const entry of await fs.opendir(root)) {
-      signal?.throwIfAborted();
-
-      if (++count > 4096) throw new Error("session artifact lookup exceeded its directory budget");
-
-      if (entry.name.startsWith(id + ".") && !entry.isDirectory()) matches.push(entry.name);
-    }
-
-    if (matches.length !== 1) throw new Error(matches.length ? "ambiguous session artifact: " + uri : "session artifact not found: " + uri);
-
-    return matches[0];
-  }
-
-  async function resolveSessionResource(uri, signal) {
-    const { kind, id } = sessionUriParts(uri);
-    const dir = hooks.artifactsDir?.();
-
-    if (!isString(dir) || !dir) throw new Error("this host session does not expose an artifacts directory for " + uri);
-    signal?.throwIfAborted();
-    const root = await fs.realpath(dir);
-    const file = kind === "artifact" ? await findArtifactFile(root, id, uri, signal) : id + ".md";
-    const target = await fs.realpath(path.join(root, file));
-
-    if (!target.startsWith(root + path.sep)) throw new Error("session resource escapes its artifacts directory");
-
-    if (!(await fs.stat(target)).isFile()) throw new Error("session resource is not a file: " + uri);
-    signal?.throwIfAborted();
-
-    return target;
+    if (Array.isArray(params.path)) return readBatch(params,signal,onItem);
+    return reads.schedule("read",async()=>asReadResult(await readSingle(params,getCwd(),params.path,signal)),signal);
   }
 
   async function readSingle(params, cwd, targetParam, signal) {
@@ -369,7 +138,7 @@ export function createRead(ctx) {
     const snapScope = (scoped, hit) => hit?.directory ? hit.path : scoped ? resolveReadPath(cwd, params.path) : cwd;
     const kinds = {
       session: async () => {
-        const target = await resolveSessionResource(params.path, signal);
+        const target = await resolveSessionResource(params.path, signal, hooks);
 
         return params.resolve
           ? openSource({ status: "found", path: params.path, line: params.offset ?? 1 }, params, signal, target)
@@ -382,7 +151,7 @@ export function createRead(ctx) {
       open: () => openSource({ status: "found", path: relOf(cls.existing), line: params.offset ?? 1 }, params, signal),
       file: () => readFile(cls.existing ? cls.existing.path : resolveReadPath(cwd, params.path), params, undefined, undefined, undefined, signal),
       dir: () => readDirectory(cls.existing.path, signal),
-      missing: () => textResult(JSON.stringify({ status: "not_found", path: null, line: null, signature: "", confidence: 0, context: [] }), { isSnap: true }),
+      missing: () => readResult({ status: "not_found", path: null, line: null, signature: "", confidence: 0, context: [] }, { isSnap: true }),
     };
     const run = kinds[cls.kind];
 
@@ -391,252 +160,8 @@ export function createRead(ctx) {
     return run();
   }
 
-  function aboutStems(about, requireStem) {
-    const tokens = tokenizeQuery(about).tokens;
-
-    if (tokens.length > 16) throw new Error("about is too broad; use at most 16 keywords");
-    const stems = [...new Set(tokens.map(token => stem(token).slice(0, 128)))];
-
-    if (requireStem && !stems.length) throw new Error("about needs at least one searchable keyword");
-
-    return stems;
-  }
-
-  function overlayHits(overlay, stems, signal) {
-    const hits = [];
-    let line = 1;
-    let start = 0;
-
-    while (start <= overlay.length) {
-      signal?.throwIfAborted();
-      const newline = overlay.indexOf("\n", start);
-      const end = newline < 0 ? overlay.length : newline + 1;
-      const row = overlay.slice(start, newline < 0 ? end : newline).replace(/\r$/, "").toLowerCase();
-
-      if (stems.some(st => row.includes(st))) {
-        hits.push(line);
-        if (hits.length >= 200) break;
-      }
-
-      if (end === overlay.length) break;
-      start = end;
-      line++;
-    }
-
-    return { hits, lineCount: line };
-  }
-
-  function overlayWindows(rel, overlay, hits, lineCount, budget) {
-    const out = [];
-    let cursor = 1;
-    let used = 0;
-    let truncated = hits.length >= 200;
-
-    for (const hit of hits) {
-      const from = Math.max(cursor, hit - 3);
-      const first = lineStartIndex(overlay, from);
-      const last = lineTextRange(overlay, Math.min(hit + 3, lineCount)).end;
-      const body = overlay.slice(first, last);
-
-      if (used + body.length > budget) { truncated = true; break; }
-      if (out.length && from > cursor) out.push("...");
-      out.push(`// ${rel}:${from}\n${body}`);
-      used += body.length;
-      cursor = Math.max(cursor, hit + 4);
-    }
-
-    return { out, truncated };
-  }
-
-  async function focusDisk(rel, about, targetPath, stems, budget, signal) {
-    const args = ["rg", "--fixed-strings", "--ignore-case", "--line-number", "--before-context", "3", "--after-context", "3"];
-
-    for (const token of stems) args.push("-e", token);
-    args.push("--", targetPath);
-    const observed = await fs.stat(targetPath);
-    const res = await runCommand(args, { cwd: path.dirname(targetPath), timeoutMs: 15000, maxOutputChars: budget, signal });
-
-    if (res.exitCode === 0 || res.exitCode === 1) await vfs.recordExpected(targetPath, observed);
-    if (res.exitCode === 1) return textResult("// " + rel + " · no matching text\n", { path: targetPath, outputTruncated: false, complete: false });
-    if (res.exitCode !== 0) throw new Error(res.stderr.trim() || `rg exited ${res.exitCode}`);
-    const marker = res.outputTruncated ? "\n[focused read truncated; narrow about or use read(path, line, count)]" : "";
-
-    return textResult("// " + rel + " · focused text windows (not a complete file); read(path, line, count) for raw text\n" + res.stdout + marker,
-      { path: targetPath, outputTruncated: res.outputTruncated, complete: false });
-  }
-
-  async function focusAbout({ rel, about, overlay, targetPath, signal }) {
-    const stems = aboutStems(about, overlay === undefined);
-    const budget = readBudget(false);
-
-    if (overlay === undefined) return focusDisk(rel, about, targetPath, stems, budget, signal);
-    const { hits, lineCount } = overlayHits(overlay, stems, signal);
-    const { out, truncated } = overlayWindows(rel, overlay, hits, lineCount, budget);
-
-    if (!out.length) return textResult("// " + rel + (hits.length
-      ? " · matching text exceeds view budget; first match at line " + hits[0] + "; use read(path, line, count)\n"
-      : " · no matching staged text\n"), { path: targetPath, outputTruncated: truncated, complete: false });
-    const marker = truncated ? "\n[focused read truncated; narrow about or use read(path, line, count)]" : "";
-
-    return textResult("// " + rel + " · focused staged text windows (not a complete file)\n" + out.join("\n") + marker, { path: targetPath, outputTruncated: truncated, complete: false });
-  }
-
   function readBudget(resolve) {
     return Math.max(1, Math.min(config.maxCallResultChars ?? 65536, config.maxReturnChars ?? 32000) - (resolve ? 1024 : 256));
-  }
-
-  function encodeJsonParts(project, document, rel, selectors, budget) {
-    const parts = [];
-    let remaining = budget;
-    let index = 0;
-
-    try {
-      for (const value of project(document)) {
-        const encoded = JSON.stringify(value);
-
-        if (encoded.length > remaining) {
-          const routed = routingText(buildSelectionRouting(rel, selectors[index] ?? "selector", value, encoded.length));
-          remaining = Math.max(0, remaining - routed.length);
-          parts.push(routed);
-          index++;
-          continue;
-        }
-
-        remaining -= encoded.length;
-        parts.push(encoded);
-        index++;
-      }
-    } catch (error) {
-      throw new Error("JSON selection failed for " + rel + " (" + selectors.join(", ") + "): " + (error instanceof Error ? error.message : String(error)));
-    }
-
-    return parts;
-  }
-
-  /** RFC 8259 lets parsers ignore one leading BOM; files from Windows tools carry it. */
-  const stripBom = text => text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-
-  async function projectJson(rel, targetPath, params) {
-    const project = jsonProjector(params.json);
-    const text = await vfs.read(targetPath, { maxBytes: MAX_JSON_BYTES, label: "JSON input" });
-    let document;
-
-    try { document = JSON.parse(stripBom(text)); }
-    catch (error) {
-      const position = parsePosition(error.message, text);
-
-      throw new Error("invalid JSON in " + rel + ": " + error.message + "; the entire document must parse before projection" + (position ? sourceContext(text, position.line, position.column) : ""));
-    }
-
-    const many = Array.isArray(params.json);
-    const selectors = many ? params.json.map(String) : [params.json === true ? "." : String(params.json)];
-    const parts = encodeJsonParts(project, document, rel, selectors, readBudget(false) - (many ? params.json.length + 1 : 0));
-
-    return textResult(many ? "[" + parts.join(",") + "]" : parts[0], { path: targetPath, json: true, complete: true });
-  }
-
-  async function readImage(rel, targetPath, mime, signal) {
-    const staged = vfs.getOverlay(targetPath);
-
-    if (staged !== undefined) {
-      const size = Buffer.byteLength(staged, "utf8");
-
-      if (size > IMAGE_MAX_BYTES) throw imageTooLarge(rel, size);
-
-      return Buffer.from(staged);
-    }
-
-    let file;
-
-    try { file = await fs.open(targetPath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0)); }
-    catch (error) {
-      if (error.code === "ENOENT") throw missingFile(targetPath);
-      throw error;
-    }
-
-    try {
-      const stat = await file.stat();
-
-      if (!stat.isFile()) throw new Error("image read requires a regular file: " + targetPath);
-      if (stat.size > IMAGE_MAX_BYTES) throw imageTooLarge(rel, stat.size);
-      const bytes = await file.readFile({ signal });
-      await vfs.recordExpected(targetPath, stat);
-
-      return bytes;
-    } finally { await file.close(); }
-  }
-
-  async function loadText(targetPath, params, query, budget, signal) {
-    const canWindow = params.complete !== true && !isString(params?.about) && !isString(query);
-
-    if (!canWindow) {
-      return { text: await vfs.read(targetPath, { maxBytes: 64 * 1024 * 1024 }), windowed: false, windowSatisfied: true, windowWhole: false };
-    }
-
-    const startLine = isNumber(params?.offset) ? Math.max(1, Math.floor(params.offset)) : 1;
-    const lineCount = isNumber(params?.limit) ? Math.max(0, Math.floor(params.limit)) : undefined;
-    const window = await readWindow(targetPath, startLine, lineCount, budget * 4 + 1024, signal);
-
-    return { text: window.text, windowed: true, windowSatisfied: window.satisfied, windowWhole: window.whole === true };
-  }
-
-  async function maybeOutline(cwd, rel, targetPath, text, params, entry) {
-    if (!isString(params?.about)) return null;
-    const outline = entry && outlineFile(entry, rel, params.about, outlineOptions(params, await referenceFinder(cwd, targetPath), config));
-
-    if (!outline) return null;
-    recordOutlineOrigins(ledger, rel, outline.text);
-
-    return textResult(outline.text, { path: targetPath, outline: true, expanded: outline.expanded, declarations: outline.declarations });
-  }
-
-  function resolveSpan(entry, sourceLine, query, params) {
-    if (!params.resolve || !isString(query) || !entry) return { offset: params?.offset, limit: params?.limit, viewComplete: undefined };
-    const span = pickSpan(WorkspaceIndex.spansOf(entry), { line: sourceLine, name: query });
-
-    if (!span) return { offset: params?.offset, limit: params?.limit, viewComplete: undefined };
-    const spanLines = span.end - span.start + 1;
-
-    return { offset: span.start, limit: isNumber(params.limit) ? Math.min(params.limit, spanLines) : spanLines, viewComplete: (isNumber(params.limit) ? Math.min(params.limit, spanLines) : spanLines) >= spanLines };
-  }
-
-  function jsonFits(sliced, budget) {
-    return jsonStringLength(sliced) <= budget;
-  }
-
-  function jsonRoutingResult(rel, targetPath, text) {
-    const routing = routingText(buildJsonRouting(rel, text));
-
-    if (routing.length > ROUTING_MAX_CHARS) throw new Error("routing response exceeds its budget");
-
-    return textResult(routing, { path: targetPath, routed: true, complete: false });
-  }
-
-  async function routeWindowedJson(rel, targetPath) {
-    try {
-      return jsonRoutingResult(rel, targetPath, await vfs.read(targetPath, { maxBytes: MAX_JSON_BYTES, label: "JSON input" }));
-    } catch { return null; }
-  }
-
-  async function clipToBudget(rel, targetPath, sliced, firstLine, budget, explicit, params) {
-    if (!explicit && !params.resolve && path.extname(targetPath).toLowerCase() === ".json") {
-      const routed = await routeWindowedJson(rel, targetPath);
-
-      if (routed) return routed;
-
-      throw new Error("incomplete JSON read of " + rel + "; use the json selector option to parse the whole document before projection, or explicit offset/limit for raw text windows");
-    }
-
-    const cap = params.resolve ? maxJsonStringPrefix(sliced, budget - 160) : budget - 160;
-
-    const end = sliced.lastIndexOf("\n", cap);
-
-    if (end < 0) throw new Error(`line ${firstLine} exceeds the read budget; use bash to inspect a bounded substring`);
-    const body = sliced.slice(0, end + 1);
-    const next = firstLine + body.split("\n").length - 1;
-    ledger.recordOrigin(rel, firstLine, sourceLines(body), explicit);
-
-    return textResult(body + `\n[read truncated; continue with read({path:${JSON.stringify(rel)}, offset:${next}})]`, { path: targetPath, outputTruncated: true, nextOffset: next, firstLine, lastLine: next - 1, sourceChars: body.length, complete: false, viewComplete: false });
   }
 
   function assertAbout(params) {
@@ -645,105 +170,11 @@ export function createRead(ctx) {
     }
   }
 
-  function rawReadSelected(params) {
-    return params.json !== undefined || isString(params.about) || params.outline === true || params.complete === true
-      || isNumber(params.offset) || isNumber(params.limit) || params.resolve === true || params.evidence === true;
-  }
-
-  function checkRawSize(rel, targetPath, loaded, params) {
-    if (rawReadSelected(params)) return null;
-    if (SESSION_URI.test(rel)) return null;
-    if (loaded.windowed && loaded.windowWhole !== true) return null;
-    const n = loaded.text.length;
-    const ext = path.extname(targetPath).toLowerCase();
-
-    if (ext === ".json" && n > RAW_JSON_CHARS) {
-      try { return jsonRoutingResult(rel, targetPath, loaded.text); }
-      catch { throw new Error("raw JSON read of " + rel + " is " + n + " chars; use json:\".field\" (or .length), offset/limit, or complete:true"); }
-    }
-
-    const lines = contentLineInfo(loaded.text).count;
-
-    if (n > RAW_SOURCE_CHARS || lines > RAW_SOURCE_LINES) {
-      const p = JSON.stringify(rel);
-      throw new Error(`raw read of ${rel} is ${lines} lines / ${n} characters; path-only limit is ${RAW_SOURCE_LINES} lines / ${RAW_SOURCE_CHARS} characters. Use read(${p}, {offset:1, limit:80}) for a window, read(${p}, {about:"keywords"}) for matches, or read(${p}, {complete:true}) for the whole file within the read budget`);
-    }
-
-    return null;
-  }
-
-  async function maybeImage(rel, targetPath, signal) {
-    const mime = IMAGE_MIME[path.extname(targetPath).toLowerCase()];
-
-    if (!mime) return null;
-    assertModelImageMime(mime);
-    const bytes = await readImage(rel, targetPath, mime, signal);
-
-    if (bytes.length > IMAGE_MAX_BYTES) throw imageTooLarge(rel, bytes.length);
-
-    return { content: [{ type: "image", mimeType: mime, data: bytes.toString("base64") }], details: { path: targetPath } };
-  }
-
-  function viewOffset(span, sourceLine, loaded, budget) {
-    if (span.offset !== undefined) return span.offset;
-    if (sourceLine && loaded.text.length > budget) return Math.max(1, sourceLine - 2);
-
-    return 1;
-  }
-
-  function viewOverBudget(sliced, loaded, budget, params) {
-    return sliced.length > budget || (params.resolve && !jsonFits(sliced, budget)) || (loaded.windowed && !loaded.windowSatisfied);
-  }
-
-  function fileView(loaded, span, sourceLine, budget, params) {
-    const offset = viewOffset(span, sourceLine, loaded, budget);
-    const firstLine = isNumber(offset) ? Math.max(1, Math.floor(offset)) : 1;
-    const sliced = loaded.windowed ? loaded.text : sliceLinesRaw(loaded.text, offset, span.limit);
-
-    return { firstLine, sliced, overBudget: viewOverBudget(sliced, loaded, budget, params) };
-  }
-
-  function assertComplete(rel, sliced, loaded, budget, params) {
-    if (params.complete === true && (sliced !== loaded.text || sliced.length > budget || (params.resolve && !jsonFits(sliced, budget)))) {
-      throw new Error(`incomplete read of ${rel}: complete:true requires the entire file within the read budget (${budget} characters). Use read(${JSON.stringify(rel)}, {offset:1, limit:80}) for a window, json:".field" for JSON reports, edit() for replacements, or bash({command,args}) with a bounded parser for large text/JSONL files`);
-    }
-  }
-
-  function textFileResult(rel, targetPath, loaded, span, view, explicit) {
-    const slicedLines = view.sliced.length <= LARGE_FILE_BYTES ? sourceLines(view.sliced) : null;
-
-    if (slicedLines) ledger.recordOrigin(rel, view.firstLine, slicedLines, explicit);
-
-    return textResult(view.sliced, { path: targetPath, firstLine: view.firstLine, lastLine: view.firstLine + (slicedLines?.length ?? contentLineInfo(view.sliced).count) - 1, sourceChars: view.sliced.length, complete: loaded.windowed ? loaded.windowWhole : view.sliced === loaded.text, viewComplete: span.viewComplete });
-  }
-
-  async function readTextFile(targetPath, params, sourceLine, rel, query, signal) {
-    const explicit = isNumber(params?.offset) || isNumber(params?.limit);
-    const budget = readBudget(params.resolve);
-    const loaded = await loadText(targetPath, params, query, budget, signal);
-    const routed = checkRawSize(rel, targetPath, loaded, params);
-
-    if (routed) return routed;
-    index.touch(rel);
-    const needsIndex = isString(params?.about) || (params.resolve && isString(query));
-    const entry = needsIndex ? WorkspaceIndex.fromText(targetPath, loaded.text) : null;
-    const outlined = await maybeOutline(getCwd(), rel, targetPath, loaded.text, params, entry);
-
-    if (outlined) return outlined;
-    const span = resolveSpan(entry, sourceLine, query, params);
-    const view = fileView(loaded, span, sourceLine, budget, params);
-    assertComplete(rel, view.sliced, loaded, budget, params);
-
-    if (view.overBudget) return await clipToBudget(rel, targetPath, view.sliced, view.firstLine, budget, explicit, params);
-
-    return textFileResult(rel, targetPath, loaded, span, view, explicit);
-  }
-
   async function readFile(targetPath, params, sourceLine, displayPath, query, signal) {
     const rel = displayPath ?? relativeSlash(getCwd(), targetPath);
     assertAbout(params);
 
-    if (params.json !== undefined) return projectJson(rel, targetPath, params);
+    if (params.json !== undefined) return projectJson(rel, targetPath, params, vfs);
     const image = await maybeImage(rel, targetPath, signal);
 
     if (image) return image;
@@ -776,7 +207,7 @@ export function createRead(ctx) {
         signal,
       });
 
-      return textResult(JSON.stringify(res), res);
+      return readResult(res, res);
   }
 
   function evidenceOptions(params) {
@@ -801,7 +232,7 @@ export function createRead(ctx) {
 
       for (const span of res.spans) ledger.recordOrigin(span.path, span.lines[0], span.text.split("\n"));
 
-      return textResult(JSON.stringify(res), { route: res.route, count: res.spans.length });
+      return readResult(res, { route: res.route, count: res.spans.length });
   }
 
   async function surface(params, signal) {
@@ -813,7 +244,7 @@ export function createRead(ctx) {
       const ext = path.extname(target);
       const outline = extractStructuralSurface(text, ext);
 
-      return textResult(JSON.stringify(outline), { path: target, count: outline.items.length });
+      return readResult(outline, { path: target, count: outline.items.length });
   }
 
   return {

@@ -145,7 +145,7 @@ function consumeLiteral(text, i, stack, prev, rust) {
     if (lifetime && text[end] !== "'") return { end, prev: "value" };
   }
 
-  if (c === '"' || c === "'" || c === "`") return consumeQuoted(text, i, stack);
+  if (['"', "'", "`"].includes(c)) return consumeQuoted(text, i, stack);
 
   if (c !== "/") return null;
 

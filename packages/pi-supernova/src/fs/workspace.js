@@ -1,3 +1,4 @@
+import {remapReadError} from "./file-io.js";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
@@ -44,7 +45,7 @@ async function realpathNearest(target) {
     try {
       return await fs.realpath(probe);
     } catch (err) {
-      if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") throw err;
+      if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") remapReadError(err, target);
       const parent = path.dirname(probe);
 
       if (parent === probe) throw err;

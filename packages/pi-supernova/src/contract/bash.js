@@ -44,6 +44,12 @@ export function normalizeBash(command, opts) {
   if (args.command.includes("\0")) throw new Error("bash command must not contain null bytes");
   normalizeArgv(args);
 
+  normalizeTimeout(args);
+
+  return args;
+}
+
+function normalizeTimeout(args) {
   if (args.timeout !== undefined && args.timeoutMs === undefined) args.timeoutMs = args.timeout * 1000;
   // Reject before the host's external-mutation barrier can flush staged files.
   if (args.timeoutMs !== undefined) {
@@ -52,5 +58,4 @@ export function normalizeBash(command, opts) {
     args.timeoutMs = Math.max(1, Math.min(2_147_483_647, Math.floor(timeout)));
   }
 
-  return args;
 }

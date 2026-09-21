@@ -71,3 +71,25 @@ it("completion retains no drain timer, but still cancels and bounds pending call
   assert.equal(drains, 2);
   assert.equal(pending.size, 0);
 });
+
+it("streamed reads publish early items but hold the final result until the host barrier settles", async () => {
+  const {buildGuestApi}=await import("../../src/runtime/guest-api.js");
+  let deliver, finish;
+  const started=Promise.withResolvers();
+  const api=buildGuestApi(async (_method, _args, onItem) => {
+    deliver=onItem; started.resolve();
+    return new Promise(resolve=>{finish=resolve;});
+  },true);
+  let first=false,last=false;
+  const a=api.read("a.txt").then(value=>{first=true; return value;});
+  const b=api.read("b.txt").then(value=>{last=true; return value;});
+  await started.promise;
+  deliver(0,{ok:true,typed:true,value:"first"});
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(first,true);
+  deliver(1,{ok:true,typed:true,value:"last"});
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(last,false,"the last promise must not outrun its RPC/barrier");
+  finish({ok:true,typed:true,streamed:true});
+  assert.deepEqual(await Promise.all([a,b]),["first","last"]);
+});

@@ -1,127 +1,15 @@
+import { fileChunks } from "./file-io.js";
+export {MAX_DIRECTORY_ENTRIES,formatDirectoryEntry,formatLsEntry} from './directory.js';
+export {textResult,resultDiff} from '../shared/result.js';
+import {sliceLinesRaw,lineNumberAt,formatNumberedLine,numberedPreview,lineStartIndex,lineEndIndex,lineTextRange,contentLineInfo} from './lines.js';
+export * from './lines.js';
+export {jsonStringLength,maxJsonStringPrefix} from './json-size.js';
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { homedir } from "node:os";
 import { isString, isNumber, isObject } from "../shared/decode.js";
 import { assertFilesystemPath } from "./workspace.js";
 import { MAX_DIFF_MATCHES } from "./diff.js";
-
-const JSON_TWO_BYTE = new Set([0x22, 0x5c, 8, 9, 10, 12, 13]);
-
-function jsonAsciiWidth(c) {
-  if (JSON_TWO_BYTE.has(c)) return 2;
-
-  if (c < 32) return 6;
-
-  return 1;
-}
-
-function jsonUnitWidth(s, i) {
-  const c = s.charCodeAt(i);
-
-  if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) {
-    const d = s.charCodeAt(i + 1);
-
-    if (d >= 0xDC00 && d <= 0xDFFF) return { add: 2, skip: 2 };
-
-    return { add: 6, skip: 1 };
-  }
-
-  if (c >= 0xD800 && c <= 0xDFFF) return { add: 6, skip: 1 };
-
-  return { add: jsonAsciiWidth(c), skip: 1 };
-}
-
-/** UTF-16 length of JSON.stringify(s) for a string, without allocating the JSON. */
-export function jsonStringLength(s) {
-  let n = 2;
-
-  for (let i = 0; i < s.length; ) {
-    const unit = jsonUnitWidth(s, i);
-    n += unit.add;
-    i += unit.skip;
-  }
-
-  return n;
-}
-
-/** Largest prefix whose JSON.stringify length is <= limit. */
-export function maxJsonStringPrefix(s, limit) {
-  let used = 2;
-  let i = 0;
-
-  while (i < s.length) {
-    const unit = jsonUnitWidth(s, i);
-
-    if (used + unit.add > limit) break;
-    used += unit.add;
-    i += unit.skip;
-  }
-
-  return i;
-}
-
-export function textResult(text, details) {
-  return {
-    content: [{ type: "text", text: String(text ?? "") }],
-    details: details || {},
-  };
-}
-
-export function resultDiff(response) {
-  let details = response?.details;
-
-  if (isString(details)) {
-    try {
-      details = JSON.parse(details);
-    } catch {
-      return undefined;
-    }
-  }
-
-  return isObject(details) ? details.diff : undefined;
-}
-
-function totalContentLines(text) {
-  if (text === "") return 1;
-
-  return contentLineInfo(text).count + (text.endsWith("\n") ? 1 : 0);
-}
-
-function emptySliceInfo(text, totalLines) {
-  return { text: "", end: totalLines, total: totalLines, count: 0, eof: true, whole: totalLines === 1 && text === "" };
-}
-
-function sliceWindow(text, startIndex, count, totalLines) {
-  const endExclusive = Math.min(totalLines, startIndex + count);
-  const start = lineStartIndex(text, startIndex + 1);
-  const end = lineEndIndex(text, start, endExclusive - startIndex);
-  let selected = text.slice(start, end);
-  const eof = endExclusive >= totalLines || (endExclusive === totalLines - 1 && text.endsWith("\n"));
-
-  if (endExclusive < totalLines && !selected.endsWith("\n")) selected += "\n";
-
-  return { text: selected, end: endExclusive, total: totalLines, count: endExclusive - startIndex, eof, whole: startIndex === 0 && eof };
-}
-
-export function sliceLinesRawInfo(text, offset, limit) {
-  const totalLines = totalContentLines(text);
-
-  if (!isNumber(offset) && !isNumber(limit)) {
-    return { text, end: totalLines, total: totalLines, count: totalLines, eof: true, whole: true };
-  }
-
-  const startIndex = (isNumber(offset) ? Math.max(1, Math.floor(offset)) : 1) - 1;
-  const count = isNumber(limit) ? Math.max(0, Math.floor(limit)) : totalLines;
-
-  if (count === 0 || startIndex >= totalLines) return emptySliceInfo(text, totalLines);
-
-  return sliceWindow(text, startIndex, count, totalLines);
-}
-
-/** Read-window slicing preserves the selected lines' own line ending. */
-export function sliceLinesRaw(text, offset, limit) {
-  return sliceLinesRawInfo(text, offset, limit).text;
-}
 
 export function readLineParam(value, name) {
   if (value === undefined) return undefined;
@@ -171,40 +59,6 @@ export async function probeExistingPath(cwd, targetParam, vfs) {
 
     return null;
   }
-}
-
-export const EDIT_PREVIEW_LINES = 16;
-
-export const MAX_DIRECTORY_ENTRIES = 10000;
-
-export function sourceLines(content) {
-  const raw = content.split("\n");
-
-  if (raw.at(-1) === "") raw.pop();
-
-  return raw;
-}
-
-export function lineNumberAt(content, index) {
-  let line = 1;
-
-  for (let i = 0; i < index; i++) if (content.charCodeAt(i) === 10) line++;
-
-  return line;
-}
-
-export function formatNumberedLine(n, text) {
-  return String(n).padStart(5) + " " + text;
-}
-
-export function numberedPreview(content, cap = EDIT_PREVIEW_LINES) {
-  const { count, preview } = contentLineInfo(content, cap);
-
-  if (count === 0) return "0 lines";
-  const body = preview.map((line, i) => formatNumberedLine(i + 1, line)).join("\n");
-  const suffix = count + " lines total";
-
-  return body + "\n" + suffix;
 }
 
 function lineAt(content, n) {
@@ -281,38 +135,6 @@ export function applyReplacements(target, content, requestedEdits) {
   }
 
   return { updated, matches };
-}
-
-export function lineStartIndex(content, line) {
-  let index = 0;
-
-  for (let current = 1; current < line; current++) {
-    const next = content.indexOf("\n", index);
-
-    if (next < 0) return content.length;
-    index = next + 1;
-  }
-
-  return Math.min(index, content.length);
-}
-
-export function lineEndIndex(content, startIndex, lineCount) {
-  let index = startIndex;
-
-  for (let i = 0; i < lineCount; i++) {
-    const next = content.indexOf("\n", index);
-
-    if (next < 0) return content.length;
-    index = next + 1;
-  }
-
-  return index;
-}
-
-export function lineTextRange(content, line) {
-  const start = lineStartIndex(content, line);
-
-  return { start, end: lineEndIndex(content, start, 1) };
 }
 
 export function shiftDiffLines(diff, delta) {
@@ -429,7 +251,7 @@ export async function countContentLines(target, signal) {
     let last = -1;
     let total = 0;
 
-    for await (const chunk of file.createReadStream({ autoClose: false, signal })) {
+    for await (const chunk of fileChunks(file, signal)) {
       for (let i = 0; i < chunk.length; i++) if (chunk[i] === 10) newlines++;
       last = chunk.at(-1);
       total += chunk.length;
@@ -437,26 +259,6 @@ export async function countContentLines(target, signal) {
 
     return total === 0 ? 0 : newlines + (last === 10 ? 0 : 1);
   } finally { await file.close(); }
-}
-
-export function contentLineInfo(text, previewLimit = 0) {
-  if (text === "") return { count: 0, preview: [], newlines: 0 };
-  const preview = [];
-  let count = 0;
-  let start = 0;
-
-  while (start <= text.length) {
-    const newline = text.indexOf("\n", start);
-    const end = newline < 0 ? text.length : newline;
-
-    if (end === text.length && end === start && text.endsWith("\n")) break;
-    if (preview.length < previewLimit) preview.push(text.slice(start, end).replace(/\r$/, ""));
-    count++;
-    if (newline < 0) break;
-    start = newline + 1;
-  }
-
-  return { count, preview, newlines: count - Number(!text.endsWith("\n")) };
 }
 
 export function boundedEditDiff(target, original, matches) {
@@ -497,26 +299,4 @@ export function boundedWriteDiff(target, content, removed) {
     displayLineCount: (removed ?? 0) + added.count,
     lines: added.preview.map((text, i) => ({ type: "add", lineNum: i + 1, text })),
   };
-}
-
-export function formatDirectoryEntry(name, type, size = 0) {
-  const sizeSuffix = size ? `, ${size} bytes` : "";
-
-  return `${name}${type === "dir" ? "/" : ""} (${type}${sizeSuffix})`;
-}
-
-export async function formatLsEntry(dirPath, entry) {
-  const isDir = entry.isDirectory();
-  const isSym = entry.isSymbolicLink();
-  const typeLabel = isDir ? "dir" : isSym ? "sym" : "file";
-  let size = 0;
-
-  try {
-    if (!isDir && !isSym) {
-      const st = await fs.stat(path.join(dirPath, entry.name));
-      size = st.size;
-    }
-  } catch {}
-
-  return formatDirectoryEntry(entry.name, typeLabel, size);
 }

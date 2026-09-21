@@ -20,13 +20,15 @@ const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "supernova-hosts-"));
 
-const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=";
 
 await fs.writeFile(path.join(root, "pixel.png"), Buffer.from(png, "base64"));
 
 const sourceBody = "export function hostToken() {\n  return 1;\n}\n";
 
 await fs.writeFile(path.join(root, "auth.js"), sourceBody);
+await fs.writeFile(path.join(root,"large.txt"),"x".repeat(80000));
+await fs.writeFile(path.join(root,"large.json"),JSON.stringify({rows:Array.from({length:2000},(_,id)=>({id,active:id%2===0,padding:"x".repeat(64)}))}));
 
 const code = `
   await write("state.txt", "before");
@@ -36,13 +38,15 @@ const code = `
   const text = await Promise.all([a,b]);
   const shell = await bash("printf smoke");
   const argv = await bash({command:"printf",args:["%s","literal $HOME"]});
+  const largeData = {lengths:(await read(["large.txt","large.txt"],{complete:true})).map(text=>text.length),
+    active:(await read({path:"large.json",json:".rows"})).filter(row=>row.active).length};
   const source = await read({query:"hostToken",resolve:true});
   if (source.status !== "found") throw Error("source handoff failed");
   await write("caller.js","hostToken();");
   const edited = await edit(source.path,"return 1","return 2");
   const warning = await write("invalid.json","{");
   const diagnostic = await bash("printf auth.js:2; exit 1").catch(error => error.message);
-  return {text,shell,argv,source,edited,warning,diagnostic,rawSource:await read("hostToken"),rejected:!checkpoint.ok,alias:typeof nova,image:await read("pixel.png")};
+  return {text,shell,argv,source,edited,warning,diagnostic,largeData,rawSource:await read("hostToken"),rejected:!checkpoint.ok,alias:typeof nova,image:await read("pixel.png")};
 `;
 
 await fs.writeFile(path.join(root, "program.js"), code);
@@ -53,6 +57,7 @@ function verify(result) {
   assert.equal(result.details.result.shell, "smoke");
   assert.equal(result.details.result.argv, "literal $HOME");
   assert.equal(result.details.result.rejected, true);
+  assert.deepEqual(result.details.result.largeData,{lengths:[80000,80000],active:1000});
   assert.equal(result.details.result.alias, "undefined");
   assert.equal(result.details.result.source.path, "auth.js");
   assert.equal(result.details.result.source.text, sourceBody);
@@ -220,7 +225,8 @@ const child = await runOmp("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow de
   env: { ...process.env, PI_CODING_AGENT_DIR: path.join(root, "omp-config"), PI_SUPERNOVA_CONFIG: path.join(packageRoot, "src/config/config.default.json"), SUPERNOVA_HOST_PROGRAM: path.join(root, "program.js"), SUPERNOVA_HOST_OUTPUT: path.join(root, "omp-result.json") },
 });
 
-assert.equal(child.status, 0, child.stderr + child.stdout);
+const hostOutput = await fs.readFile(path.join(root,"omp-result.json"),"utf8").catch(()=>"");
+assert.equal(child.status, 0, hostOutput + "\n" + child.stderr + child.stdout);
 
 verify(JSON.parse(await fs.readFile(path.join(root, "omp-result.json"), "utf8")));
 

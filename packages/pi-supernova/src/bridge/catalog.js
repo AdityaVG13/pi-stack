@@ -2,10 +2,11 @@ import { isString } from "../shared/decode.js";
 
 /** Optimal string alignment distance: insert/delete/substitute/adjacent-transpose cost 1. */
 function osaCell(a, b, rows, i, j) {
-  const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+  const cost = Number(a[i - 1] !== b[j - 1]);
   let best = Math.min(rows[i - 1][j] + 1, rows[i][j - 1] + 1, rows[i - 1][j - 1] + cost);
 
-  if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) best = Math.min(best, rows[i - 2][j - 2] + 1);
+  // At a boundary, the missing character cannot equal an in-range character.
+  if (a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) best = Math.min(best, rows[i - 2][j - 2] + 1);
 
   return best;
 }

@@ -1,6 +1,91 @@
 # Changelog
 
-## Unreleased
+## [0.9.0] - 2026-09-20
+
+### Changed
+
+- Split read routing, filesystem I/O and commits, guest commands and worker
+  lifecycle, host tool ownership and tracing, evidence selection, and rendering
+  into focused modules. Public entrypoints and guest command modes remain supported.
+- Reuse bounded file reads, query analysis, overlay lookup, line and JSON
+  helpers, diff assembly, and error formatting instead of parallel implementations.
+
+- `Promise.all` overlaps native edits, patches and writes to distinct files, up
+  to eight operations at once. Same-file operations remain ordered using canonical
+  commit destinations; existing alias-conflict protections remain in place.
+- Removed the duplicate guest operation queue. The host owns read/mutation,
+  shell, override and checkpoint barriers, and waits for in-flight siblings before
+  crossing them. File identities are resolved only after external mutations finish.
+- Batching and explicit `programs` / `parallel:true` execution remain supported;
+  standing guidance distinguishes these from per-file concurrency.
+
+### Fixed
+
+- Aggregate display-text clipping no longer fails sequential/parallel program
+  batches or prevents later entries from running. The combined display remains
+  bounded and marks truncation; execution, deadline, log and image failures retain
+  their stop behavior.
+- PNG/JPEG/GIF/WebP reads and returned attachments validate canonical base64,
+  matching signatures/MIME, and fully decoded pixels before shell boundaries or
+  final commit/model delivery. PNG framing/CRC checks reject the exact corrupt
+  fixture that caused repeated Codex errors. Tests also cover CRC-correct invalid
+  pixels, truncated streams, format mismatches, animated inputs, and rollback.
+- Sharp 0.35.4 decoding runs in an isolated Node/Bun runtime process: at most
+  32 million pixels across frames, one raster at a time, with cancellation and a
+  5-second watchdog. This also fixes native dependency resolution in compiled OMP.
+  Text-only calls do not load Sharp; a bounded cache retains only 16 successful
+  content digests. Decoder installation failures reject rather than attach blindly.
+
+- Native reads carry typed values across RPC rather than serialized display text.
+  Full text reads and exact line windows use the 64 MiB byte ceiling, not the
+  former 160-line / 8192-character or 31,744-character presentation restrictions.
+  JSON selections retain their types under separate input/storage safety limits.
+- Large coalesced and explicit read batches stream with acknowledgements inside
+  eight I/O slots; the small-batch path still uses one reply. Sibling cancellation
+  drains delivery as well as I/O, and final promises wait for the host barrier.
+- Directory entries remain arrays, metadata stats overlap, and exceeding 10,000
+  unique entries fails explicitly instead of returning an apparently complete list.
+- Final formatting runs in the worker. Large string arrays, objects and logs are
+  bounded before rendering expansion; sparse positions and Unicode display stay
+  valid. Hidden metadata cannot bypass the transfer budget. Source previews keep
+  exact continuation and edit guards without shortening internal source values.
+- Removed unused native routing producers and obsolete display-sized read caps;
+  legacy external-tool decoding remains. Staged windows retain the disk byte cap.
+
+- Cancelled bounded reads and CAS signing use abort-checked file-handle reads,
+  avoiding a second unhandled stream error that crashed Node and Bun even when
+  the read rejection was caught. Byte caps and file-version checks are retained.
+- Memory enforcement uses worker-local heap and external-buffer usage, not
+  process-wide RSS growth from the host or sibling workers. Node's native heap
+  cap remains; Bun sampling remains best-effort for non-yielding code. Memory
+  failures cancel and drain pending host calls before returning.
+
+- Guest stack locations are recognized in both V8 and Bun/JSC; asynchronous
+  failures identify the source await consistently without moving direct throws.
+- Commit I/O uses the shared filesystem promises export, so fault injection
+  exercises real partial replacement and failed recovery on both Node and Bun.
+- Permission failures during canonical-path resolution retain the affected path
+  and actionable guidance instead of leaking raw EACCES errors on Bun.
+- JSON projection recovers missing parse locations for inputs up to 65,536
+  characters, with a bounded diagnostic scan and no second value tree. Native
+  JSON.parse remains authoritative; caret columns and BOM handling are aligned.
+
+### Verification
+
+- Complete package suites: 315 passed on Node 26.7 and 315 passed on Bun 1.4
+  on macOS, with zero failures or skips, including failure-first image validation
+  and batch-clipping regressions, animated-image preservation, cache invalidation,
+  cancellation, and decoder-watchdog recovery. All five former Bun failures remain fixed. Frozen token
+  snapshots are unchanged; obsolete internal-display-cap assertions now verify
+  full data while preserving real memory, parsing, rollback and edit guards.
+- Lint, frozen token gates, the repository release check, and actual
+  Pi 0.86.1 / OMP 18.2.6 host checks passed.
+  The fatal cancellation was reproduced against the old Spark installation and
+  the fixed package passed Node/Bun checks in an isolated copy; no installed
+  copy was patched.
+- See TOKEN_COSTS.md for the refactor's measured gains and small-operation costs.
+  Full image decoding adds image-only work and a native dependency; it is not
+  presented as a general latency improvement or proof of provider acceptance.
 
 ## [0.8.2] - 2026-09-19
 

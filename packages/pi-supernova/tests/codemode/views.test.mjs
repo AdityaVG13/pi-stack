@@ -30,7 +30,7 @@ it("a stale view refuses to write and rolls back the program", async t => {
   assert.equal(await fs.readFile(path.join(f.root, "note.txt"), "utf8"), original);
 });
 
-it("a budget-clipped view is not editable", async t => {
+it("a display-clipped view is not editable but the complete internal view is", async t => {
   const f = await engineFixture(t);
   const body = "export function largeToken() {\r\n" + "  // λ😀 payload\r\n".repeat(4000) + "}\r\n";
   await f.write("large.js", body);
@@ -38,11 +38,11 @@ it("a budget-clipped view is not editable", async t => {
   assert.equal(view.status, "found");
   assert.equal(view.complete, false);
   assert.ok(view.nextOffset > view.lines[0], "fixture must clip so nextOffset is the corruption signal");
-  await assert.rejects(f.execute(`
-    const v = await read({query:"largeToken",resolve:true});
-    await edit(v, "export function largeToken() { return 0; }\\n");
-  `), /edit view is incomplete/);
-  assert.equal(await fs.readFile(path.join(f.root, "large.js"), "utf8"), body);
+  await assert.rejects(f.tool.execute("clipped-view",{code:'await edit(data,"replacement");',data:view},undefined,undefined,{cwd:f.root}),/edit view is incomplete/);
+  assert.equal(await fs.readFile(path.join(f.root,"large.js"),"utf8"),body);
+  const replacement="export function largeToken() { return 0; }\n";
+  await f.execute('const v=await read({query:"largeToken",resolve:true}); await edit(v,'+JSON.stringify(replacement)+');');
+  assert.equal(await fs.readFile(path.join(f.root,"large.js"),"utf8"),replacement);
 });
 
 it("edit(view, old, new) is unique inside the view, not the file", async t => {
@@ -138,4 +138,15 @@ it("a view edit maps duplicate replacement text to the actual span for reference
   const text = modelText(result);
   assert.match(text, /calibrate also referenced in caller\.js:1/);
   assert.doesNotMatch(text, /measure also referenced/);
+});
+
+it("a source view that fits the display retains its final non-newline line and completeness", async t => {
+  const f=await engineFixture(t);
+  const body="export function fitView() {\n"+"  // padding\n".repeat(1400)+"  return 42;\n}";
+  await f.write("fits.js",body);
+  const result=await f.execute('return await read({query:"fitView",resolve:true});');
+  assert.equal(result.details.returnTruncated,false);
+  assert.equal(result.details.result.text,body);
+  assert.equal(result.details.result.complete,true);
+  assert.equal(Object.hasOwn(result.details.result,"nextOffset"),false);
 });

@@ -81,12 +81,11 @@ test("parallel batches still enforce the shared host-call budget", async (t) => 
   assert.ok(a.capped + b.capped > 0, "expected budget errors once the shared cap was hit");
 });
 
-test("parallel batches fail honestly on shared text, log and image budgets", async t => {
+test("parallel batches fail honestly on shared log and image budgets", async t => {
   const f = await engineFixture(t);
   const cases = [
-    {kind:"output", code:'return "x".repeat(20000);'},
     {kind:"log", code:'for(let i=0;i<80;i++)console.log("line",i); return 1;'},
-    {kind:"image", code:'return Array.from({length:9},()=>({type:"image",mimeType:"image/png",data:"AA=="}));'},
+    {kind:"image", code:'return Array.from({length:9},()=>({type:"image",mimeType:"image/png",data:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="}));'},
   ];
   for (const {kind, code} of cases) {
     const result = await f.tool.execute("budget-" + kind, {parallel:true, programs:[{code},{code}]}, undefined, undefined, {cwd:f.root});
@@ -96,22 +95,24 @@ test("parallel batches fail honestly on shared text, log and image budgets", asy
     assert.ok(modelText(result).length <= 32000);
     assert.ok(result.details.logs.length <= 100);
     assert.ok(result.content.filter(block => block.type === "image").length <= 16);
-    if (kind === "output") assert.equal(result.details.returnTruncated, true);
     if (kind === "log") assert.equal(result.details.logTruncated, true);
     assert.equal(result.details.attempted, 2);
   }
 });
 
-test("parallel output overflow stops queued entries without losing in-flight commits", async t => {
+test("parallel text clipping continues queued entries and preserves all commits", async t => {
   const f = await engineFixture(t);
   const result = await f.tool.execute("queued-budget", {
     parallel:true,
     programs:Array.from({length:12}, (_, i) => ({code:`await write("entry-${i}.txt","kept"); return "x".repeat(40000);`})),
   }, undefined, undefined, {cwd:f.root});
-  assert.equal(result.details.ok, false);
-  assert.match(result.details.error, /output budget exceeded/);
-  assert.equal(result.details.attempted, 8, "only the initial wave should start");
-  assert.equal(result.details.mutations.committed, 8);
-  for (let i = 0; i < 8; i++) assert.equal(await fs.readFile(path.join(f.root, `entry-${i}.txt`), "utf8"), "kept");
-  for (let i = 8; i < 12; i++) await assert.rejects(fs.stat(path.join(f.root, `entry-${i}.txt`)), {code:"ENOENT"});
+  assert.equal(result.details.ok, true, modelText(result));
+  assert.equal(result.isError, false);
+  assert.equal(result.details.returnTruncated, true);
+  assert.match(modelText(result), /^ok: programs 12\/12/);
+  assert.match(modelText(result), /batch output truncated/);
+  assert.ok(modelText(result).length <= 32000);
+  assert.equal(result.details.attempted, 12, "text clipping must not stop queued work");
+  assert.equal(result.details.mutations.committed, 12);
+  for (let i = 0; i < 12; i++) assert.equal(await fs.readFile(path.join(f.root, `entry-${i}.txt`), "utf8"), "kept");
 });

@@ -112,7 +112,7 @@ it("nested framing retains compact scalar output and escapes unpaired UTF-16", (
 it("result packaging copies only changed branches without mutating images, keys or sparse arrays", () => {
   const report = Object.freeze({ok:true,zero:-0,count:NaN});
   assert.equal(packageFinalReturn(report, [], {}).returnValue, report);
-  const image = Object.freeze({type:"image",mimeType:"image/png",data:"AQ=="});
+  const image = Object.freeze({type:"image",mimeType:"image/png",data:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="});
   const sparse = [];
   sparse[2] = image;
   Object.freeze(sparse);

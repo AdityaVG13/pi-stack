@@ -167,7 +167,7 @@ it("oversized multi-file returns keep every sentinel in its own framed slot", as
 
 it("sixteen returned images stay attached; overflow fails and rolls back pending writes", async t => {
   const f = await engineFixture(t);
-  const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRzkAAAAASUVORK5CYII=", "base64");
+  const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=", "base64");
   await f.write("pixel.png", pixel);
   const atCap = await f.execute(`
     await write("ledger.md", "kept-16");

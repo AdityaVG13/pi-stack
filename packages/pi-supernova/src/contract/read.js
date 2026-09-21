@@ -1,4 +1,4 @@
-import { isString, isObject, isNumber, looksLikePath } from "../shared/decode.js";
+import { errorMessage, isString, isObject, isNumber, looksLikePath } from "../shared/decode.js";
 import { sessionJsonArgs, validateJsonRead } from "../fs/json-read.js";
 
 export const SESSION_URI = /^(?:agent|artifact):\/\//i;
@@ -85,12 +85,7 @@ export function normalizeRead(params) {
 }
 
 export function needsProbe(params) {
-  if (isSessionUri(params.path)) return false;
-  if (params.evidence === true) return false;
-  if (isString(params.query)) return false;
-  if (params.outline === true) return false;
-
-  return true;
+  return !(isSessionUri(params.path) || params.evidence === true || isString(params.query) || params.outline === true);
 }
 
 /**
@@ -160,8 +155,6 @@ export const ROUTING_STATUS = "too_large";
 
 const ROUTING_PREFIX = '{"status":"too_large",';
 
-export const ROUTING_KEYS_MAX = 32;
-
 export function isRoutingPayload(value) {
   return isString(value) && value.startsWith(ROUTING_PREFIX);
 }
@@ -169,49 +162,6 @@ export function isRoutingPayload(value) {
 function isRoutingObject(parsed) {
   return isObject(parsed) && parsed.status === ROUTING_STATUS && isString(parsed.path)
     && isNumber(parsed.chars) && (Array.isArray(parsed.keys) || isNumber(parsed.length));
-}
-
-/** Shape of an over-bound JSON document for in-band routing. Throws when text is not JSON. */
-export function buildJsonRouting(rel, text) {
-  const document = JSON.parse(text);
-  const base = { status: ROUTING_STATUS, path: rel, chars: text.length };
-
-  if (Array.isArray(document)) return { ...base, length: document.length };
-
-  if (isObject(document)) {
-    const keys = Object.keys(document);
-
-    return keys.length > ROUTING_KEYS_MAX
-      ? { ...base, keys: keys.slice(0, ROUTING_KEYS_MAX), keysTruncated: true }
-      : { ...base, keys };
-  }
-
-  return base;
-}
-
-export function routingText(routing) {
-  const text = JSON.stringify(routing);
-
-  if (!isRoutingPayload(text)) throw new Error("routing payload must start with the shared marker");
-
-  return text;
-}
-
-/** Shape of one over-budget selection for in-band routing; value is already parsed. */
-export function buildSelectionRouting(rel, selector, value, chars) {
-  const base = { status: ROUTING_STATUS, path: rel, selector, chars };
-
-  if (Array.isArray(value)) return { ...base, length: value.length };
-
-  if (isObject(value)) {
-    const keys = Object.keys(value);
-
-    return keys.length > ROUTING_KEYS_MAX
-      ? { ...base, keys: keys.slice(0, ROUTING_KEYS_MAX), keysTruncated: true }
-      : { ...base, keys };
-  }
-
-  return base;
 }
 
 function decodeByArgs(args, value) {
@@ -230,6 +180,11 @@ export function decodeReadValue(args, value) {
   } catch (error) {
     if (sniffed && !decodeByArgs(args, value)) return value;
 
-    throw new Error("JSON read failed for " + String(args.path ?? args.target ?? "resource") + jsonSelectorNote(args) + ": " + (error instanceof Error ? error.message : String(error)));
+    throw jsonReadError(args, error);
   }
+}
+
+function jsonReadError(args, error) {
+  const target = String(args.path ?? args.target ?? "resource");
+  return new Error("JSON read failed for " + target + jsonSelectorNote(args) + ": " + errorMessage(error));
 }

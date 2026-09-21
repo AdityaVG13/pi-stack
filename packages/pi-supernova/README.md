@@ -12,6 +12,69 @@ Ordinary JavaScript control flow remains available; the guest command bindings
 are only `read`, `edit`, `write`, and `bash`. Supernova supplies retrieval,
 transactional file operations, batching, bounded results and the grouped nova UI.
 
+## What is new in 0.9.0
+
+- **Text clipping does not stop batches:** sequential and parallel programs keep
+  running when the combined display text exceeds its allowance. Results disclose
+  truncation; execution, deadline, host-call, log and image limits remain enforced.
+- **Decoded image validation:** PNG/JPEG/GIF/WebP reads and returned attachments
+  require matching formats, canonical base64 and decodable pixels, including all
+  GIF/WebP frames. PNG preflight checks chunk boundaries and CRCs too. Failures
+  occur before shell boundaries or final commit/delivery, with no image attached.
+- **Isolated image work:** Sharp 0.35.4 decodes at most 32 million pixels across
+  all frames, one image at a time, in a Node/Bun subprocess with a 5-second kill
+  deadline. Text-only work never loads the decoder. A bounded 16-entry digest cache
+  avoids decoding unchanged bytes again; neither image data nor file paths are cached.
+  Encoded limits remain 16 attachments / 20 MiB. Sharp's platform-specific optional
+  dependencies must be installed; decoder failure never falls back to unchecked data.
+  Local decoding does not guarantee acceptance under every provider's image policy.
+
+- **Data is not a display preview:** ordinary text reads return complete data up to
+  64 MiB; JSON selections remain actual values and directories remain arrays.
+  The former 160-line / 8192-character and 31,744-character restrictions no longer
+  constrain computation inside a program. Only returned/logged text is displayed.
+- **Large batches stay bounded:** small reads share one reply; larger items are
+  delivered with acknowledgements within eight I/O slots, not retained as one
+  giant host-side batch. Explicit arrays and coalesced reads use the same path.
+- **Output work stays in the worker:** bounded formatting avoids expanding large
+  values before clipping. Model-visible source previews retain exact ranges and
+  continuation; a clipped preview cannot be passed back as a complete edit view.
+
+- **Cancellation no longer crashes the host:** bounded reads and CAS signing use
+  abort-checked file handles instead of aborting streams. A failed read can cancel
+  sibling reads without an uncaught `AbortError` terminating OMP.
+- **Memory is charged to the guest:** worker-local heap and external buffers
+  replace process-wide RSS accounting. Bun enforcement remains best-effort.
+- **Focused internals:** read adapters, file I/O, transactions, worker lifecycle,
+  tool ownership, source ranking and rendering have separate modules. All read
+  modes, batching, checkpoints and rollback behavior remain supported.
+
+**Verified release candidate:** 315/315 package tests pass on both Node and Bun;
+actual Pi/OMP checks and clean tarball installation checks also pass. See
+[verification results and coverage limits](#verification) below.
+
+### Concurrent file operations
+
+Batching and explicit parallel programs remain supported. Within one program,
+`Promise.all` now overlaps native edits and writes to different files, up to eight
+operations at once:
+
+```js
+await Promise.all([
+  edit("src/a.js", "oldA", "newA"),
+  edit("src/b.js", "oldB", "newB"),
+]);
+return await bash("npm test");
+```
+
+Same-file operations retain submission order. Reads before/after mutations,
+`bash`, edit checkpoints, and overridden mutating tools remain ordering barriers.
+Shell calls inside one program stay sequential; use `programs` with
+`parallel:true` for explicitly independent shell workflows or separate JS workers.
+Edits still stage until program success (or a shell boundary); transactional disk
+commits retain their conflict checks. `await edit(...)` one after another is still
+sequential, and multiple replacements in one file remain one edit operation.
+
 ## What is new in 0.8.2
 
 This patch release fixes shell failure handling, cancellation and parallel-batch
@@ -28,10 +91,11 @@ limits, and makes one-call batching guidance explicit.
   and gives pending host calls a bounded drain to retain shell output. Explicit
   cancellation is reported separately from timeout. The outer `timeoutMs` covers
   every wait and command, including `sleep`.
-- **Parallel budgets fail honestly:** exceeding the shared output, log or image
+- **Parallel budgets fail honestly:** exceeding the shared log or image
   allowance marks the batch failed and stops queued entries. Already-running
   entries settle; their results and completed commits remain. Aggregate logs stay
-  capped rather than multiplying the allowance per guest.
+  capped rather than multiplying the allowance per guest. In 0.8.2 this also
+  applied to output text; 0.9.0 makes display-text clipping nonfatal.
 - **Batch known work in one call:** combine independent reads/checks with
   `Promise.all`, then sequence edits and verification in the same program. Use
   another invocation when returned evidence is needed for the next decision.
@@ -55,7 +119,7 @@ checks. This is not a claim of exhaustive platform or formal mutation testing.
   original cause and `committed`/`rolledBack` totals, marks writes whose
   persistence cannot be attributed as attempted, and labels pure JavaScript runs
   instead of "complete".
-- **Bounded, explicit reads:** errors state both limits (`160 lines / 8192
+- **Historical read limits (superseded in 0.9.0):** errors stated both limits (`160 lines / 8192
   characters`) with copyable recovery (`offset`, `about`, `complete:true`, and
   `Promise.allSettled` for optional siblings). Markdown edits skip code-reference
   searches; exact-symbol evidence excludes generic matches.
@@ -109,12 +173,24 @@ Local checkout installs are for development, not distribution:
 pi install /path/to/pi-stack/packages/pi-supernova
 ```
 
-Git pushes do not update npm installations. Publish the new npm version first,
-then reinstall it in your host. To pin **0.8.2** once it is published:
+0.9.0 adds Sharp for image validation. Keep its platform-specific optional
+dependencies enabled. For a local checkout, refresh dependencies before starting
+the host:
 
 ```bash
-pi install npm:pi-supernova@0.8.2
-omp install npm:pi-supernova@0.8.2
+npm install --prefix /path/to/pi-stack/packages/pi-supernova --include=optional
+```
+
+Install dependencies on each target machine rather than copying `node_modules`
+between operating systems or CPU architectures. Published-package installation
+resolves these dependencies through the host's package manager.
+
+Git pushes do not update npm installations. Publish the new npm version first,
+then reinstall it in your host. To pin **0.9.0** once it is published:
+
+```bash
+pi install npm:pi-supernova@0.9.0
+omp install npm:pi-supernova@0.9.0
 ```
 
 In Pi, `pi list` shows the configured package sources. A local path uses that
@@ -184,7 +260,7 @@ questions reuse lexical stemming. Source questions and focused `about` reads
 accept at most 16 keywords. Ripgrep must be available on PATH.
 
 `read(path)` stays raw text. `read("symbol")` is the same view as
-`read({query, resolve:true})` — not the file, not a path/range header:
+`read({query, resolve:true})` -- not the file, not a path/range header:
 
 ```javascript
 const v = await read("validateRefreshToken");
@@ -193,7 +269,8 @@ await edit(v, v.text.replace("token.length > 3", "token.length > 5"));
 ```
 
 The view contains `status`, `path`, the matching `line`, span `lines`, unchanged
-`text`, `complete`, and `nextOffset` when a budget clip continues. A declaration
+`text`, `complete`, and `nextOffset` when a model-facing preview continues.
+The internal view is not shortened to fit the display. A declaration
 snap is that span (`complete` is false unless the span is the whole file). Uncertain
 results report `ambiguous`, `not_found` or `incomplete` with no selected path.
 Use `{path: directory, about: question}` to narrow the scope. Scoping a query
@@ -225,17 +302,18 @@ lines. Structural warnings and source windows are not substitutes for tests.
 
 ### Safe read-modify-write
 
-Path-only `read(path)` requires at most **160 lines and 8192 UTF-16 characters**.
-A short document can exceed the character limit. For larger files use
-`read(path,{offset:1,limit:80})` (one-based lines), `read(path,{about:"keywords"})`,
-or `read(path,{complete:true})`. The default raw-text read budget is **31,744
-characters**, derived from the configured call/return budgets, not an unlimited
-full-file buffer. Large JSONL needs a bounded parser through `bash({command,args})`.
+A plain file read returns its complete text up to the **64 MiB UTF-8 I/O limit**,
+independently of model-facing character budgets. Explicit `offset`/`limit` reads
+return exact line windows, including long lines and LF/CRLF endings, or fail at
+the same byte ceiling. Staged and on-disk data obey the same ceiling.
+`complete:true` additionally rejects a window that omits part of the file.
+For larger files/JSONL, use a bounded parser through `bash({command,args})`.
 
-Plain reads are bounded views, not guaranteed full-file buffers. Use
-`read({path:"file.txt",complete:true})` when code needs the complete file; it
-throws rather than handing back partial text. Prefer `edit` for large-file
-replacements, or reconstruct exact `resolve:true` windows before writing.
+Compute on the full value and return only what the model needs. A direct large
+return is an explicitly truncated display, not a complete artifact to parse or
+write back. `resolve:true` source previews retain path/range/continuation metadata;
+clipped previews are not editable. Prefer `edit` for replacements.
+A write after reading that path still requires `edit` or explicit `replace:true`.
 Writes reject Supernova truncation markers, including legacy host-result markers.
 For intentionally writing literal marker documentation only, opt in with
 `write({path,content,allowReadArtifacts:true})`. This is a data-loss guard, not
@@ -248,6 +326,10 @@ reject changed content and conflicting symlink aliases, including new file paths
 These checks do not provide a cross-process lock or make shell/import mutations
 transactional. Extensionless filenames also support `complete:true`, for example
 `read({path:"LICENSE",complete:true})`.
+
+Directory reads return complete string-entry arrays up to **10,000 unique entries**.
+Larger listings fail with a path and bounded-parser guidance rather than silently
+returning an incomplete array. Metadata lookups overlap eight at a time.
 
 Explicit read arrays reject missing/failed paths. For typed partial outcomes use
 `Promise.allSettled(paths.map(path => read(path)))`. Successful arrays remain arrays.
@@ -378,7 +460,8 @@ programs that depend on whole-input replacement keep that behavior unless the
 caller explicitly requests `mergeData:true`.
 
 The batch stops on the first failed entry, cancellation/deadline, or exhausted
-output/log/image budget. Earlier successful commits remain; only the active
+log/image budget. Display-text clipping does not stop execution or mark a
+successful batch failed. Earlier successful commits remain; only the active
 program's uncommitted writes roll back. Admission errors throw before any program.
 Execution failures return a **typed stop report**, rather than throwing away prior
 results/images: isError and details.ok identify failure, details.programs contains
@@ -390,15 +473,16 @@ Set `parallel: true` with `programs` to run independent entries concurrently
 in submission order. A failed entry does not stop siblings. Two entries writing
 the same file race: the losing commit reports a conflict. Sequential remains the
 default. `parallel` and `mergeData` are invalid on a lone `code` or `file` call.
-Budget overflow marks the batch failed and stops queued entries; already-running
-entries settle and their completed commits remain. Parallel execution does not
-multiply the aggregate output, log, or image allowance.
+Log/image budget overflow marks the batch failed and stops queued entries;
+already-running entries settle and their completed commits remain. Text overflow
+only clips the displayed result and sets `details.returnTruncated`; queued entries
+still run. Parallel execution does not multiply the aggregate allowances.
 
 The outer deadline, host-call budget, log allowance, text budget and image limits
 are shared across the batch. Individual read budgets are not reduced. Every
-attempted program's original text is returned in length-delimited blocks; ordinary
-limits still disclose clipping. Images retain program/image labels. Split a plan
-that would exceed the aggregate output budget.
+attempted program's text is assembled in length-delimited blocks, then the combined
+display is clipped if necessary. Images retain program/image labels. Return
+summaries or use focused windows when you need every result to fit on display.
 
 Batch only continuations already chosen by the agent, such as edit then known
 verification, or create then run known audits. Keep a separate call whenever new
@@ -453,14 +537,14 @@ array length. Only own JSON properties are traversed; nothing is evaluated.
 Inputs are capped at 16 MiB, including staged files. JSON reads require regular
 files and reject named pipes without waiting for a writer. The entire input must
 be valid JSON before any selection. Each selector is budgeted before allocating
-the next slice; sparse selector/path/edit arrays are rejected. Selected JSON must
-fit the ordinary read budget. Oversized selections return a routing object
-`{status:"too_large",path,keys}` (or `length` for an array), not the requested
-array/object: check `status` before calling `.map` or `.filter`, then select
-narrower fields or slices. The input-size cap still throws before projection;
-JSON is never returned malformed or silently truncated. Oversized unwindowed
-plain .json reads also fail with a projection hint. Explicit offset/limit or
-resolve:true still allow raw inspection, but line windows are not JSON documents.
+the next slice; sparse selector/path/edit arrays are rejected. Selections have a
+separate **64 MiB estimated storage limit per read**, including aggregate
+multi-selector expansion. Within it, arrays/objects/scalars retain their actual
+values, even when larger than the display. No routing object is substituted:
+`.map` and `.filter` work on the selected array. Multi-selector values remain
+independently mutable. The input/storage safety limits throw with guidance.
+Plain .json reads are raw text, including malformed JSON; parsing is requested
+only by `json`. Explicit line windows are not necessarily JSON documents.
 Do not combine json with complete, line windows, or source views. External read
 overrides reject JSON projection rather than silently ignoring the option.
 Uncaught read errors abort the program, including `return {a:await read(...),
@@ -472,9 +556,9 @@ rollback for uncaught failures.
 Other read options, even false-valued flags, do not bypass a captured external
 read executor; its policy, transforms and failures remain authoritative.
 
-For large Markdown/log path audits, use read(path,{about:"document path"}) or
-explicit offset/limit, not complete:true. Larger JSON needs a streaming parser via
-bash. Arbitrary returned objects still have bounded previews, not implicit
+For focused Markdown/log audits, use read(path,{about:"document path"}) or
+explicit offset/limit. Use complete reads for computation within the 64 MiB
+ceiling, and return a summary. JSON over 16 MiB needs a streaming parser via bash. Arbitrary returned objects still have bounded previews, not implicit
 continuation handles.
 
 ## Execution and automatic batching
@@ -487,17 +571,28 @@ use focused read windows to keep the combined result within its output budget.
 
 Compatible independently started reads coalesce at the worker/host boundary.
 No additional batching command is required. Individual promises preserve their
-values, errors and per-read budgets. File reads have bounded parallelism; writes,
-edits, shell calls and checkpoint transitions form ordering barriers.
+values, errors and per-read safety limits. Reads and known native mutations to
+disjoint files overlap up to eight operations; same-file mutations stay ordered.
+Read/mutation transitions, shells, checkpoints and overrides remain barriers.
 
 This does **not** reorder sequential `await`s or predict future model decisions.
-An explicit path-array read uses an aggregate text budget; automatic coalescing
-retains each independent read's budget instead of silently shrinking its result.
+Explicit path arrays and automatic coalescing share the same typed delivery.
+Small batches retain the single-reply fast path; beyond 64 KiB estimated storage,
+items stream to the guest with acknowledgements. Delivery holds its I/O slot
+until acknowledged, and the final read waits for its host barrier to settle.
 
 Every program runs in a fresh worker. One pristine worker is prepared for the next
 invocation, then disposed on session shutdown. Executed workers are never reused,
 so guest globals cannot leak into a later program. Worker preparation still costs
 CPU and memory; it is moved off the next invocation's critical path, not eliminated.
+
+`maxHeapMb` sets Node's native worker heap cap. A worker-local check also limits
+heap plus external buffers to 1.5 times that value, sampled every 50 ms and before
+host calls and final results. Process-wide RSS is never charged to an individual
+guest. These samples are best-effort: Bun does not enforce Node's native heap cap,
+and non-yielding code can prevent sampling until it reaches a command or returns.
+The outer deadline still terminates non-yielding workers. This is not a hard
+process-memory or security boundary.
 
 File changes are staged until program success. A throw before an external-mutation
 barrier rolls them back. Shell execution flushes preceding changes; external shell
@@ -521,8 +616,9 @@ the active callback are rejected. Await the checkpoint before proceeding.
 
 - Plain reads are not replaced with earlier-context references. A local cache hit
   is not proof the model still retains an earlier result after compaction.
-- Oversized text reads provide an exact next-line offset. A single line too large
-  for the budget fails explicitly instead of pretending it was read completely.
+- Text and JSON computation is independent of display limits. Source previews
+  provide exact continuation; raw displayed text can be clipped and must not be
+  parsed as a complete file. I/O/storage limits still fail explicitly.
 - Model attachments support PNG, JPEG, GIF and WebP. BMP and other unsupported
   MIME types fail before attachment or commit, rather than causing a provider
   HTTP 400 on the next request. Convert those sources to PNG first; Supernova
@@ -605,18 +701,59 @@ not a claim that every third-party permission extension has been validated.
 ## Development and evidence
 
 Implementation is grouped under `src/`; all replacement tests are under `tests/`.
-The original 12 red acceptance tests were left unchanged. Additional strict tests
-cover batching fidelity, image/context retention, checkpoints, mutation ordering,
-external symlinks, deadlines, worker isolation and execution-context environment.
-The former deleted suite has not been silently reinstated.
+Read-budget assertions now test the deliberate 0.9.0 contract: complete internal
+values and bounded model-facing output. Frozen token snapshots are unchanged.
+Strict regressions cover batching fidelity, image/context retention, checkpoints,
+mutation ordering, external symlinks, deadlines, worker isolation, bounded read
+delivery, and execution-context environment.
+
+### Module boundaries
+
+| Responsibility | Modules |
+|---|---|
+| Registration and session lifecycle | `index.js` |
+| Program admission and batching | `runtime/program.js`, `runtime/batch-input.js`, `runtime/program-batch.js` |
+| Worker ownership and guest RPC | `runtime/runtime.js`, `runtime/worker-pool.js`, `runtime/guest-worker.js`, `runtime/guest-api.js` |
+| Host permissions, ordering and trace | `bridge/host-bridge.js`, `bridge/tool-registry.js`, `bridge/trace.js` |
+| Read routing and typed readers | `adapters/read.js`, `adapters/read-{text,json,image,focus}.js` |
+| Image validation and isolated decoding | `shared/png.js`, `shared/image.js`, `shared/image-worker.js` |
+| Bounded I/O and atomic transactions | `fs/file-io.js`, `fs/read-window.js`, `fs/vfs.js`, `fs/commit.js` |
+| Source search and ranking | `context/query.js`, `context/snap-search.js`, `context/source-entry.js`, `context/evidence-{graph,rank}.js` |
+| Model output and host rendering | `output/final.js`, `output/outcome.js`, `ui/host-render.js`, `ui/trace.js`, `ui/render.js` |
+
+Paths above are relative to `src/`, except `index.js`. Layer tests require an
+acyclic import graph and prohibit context modules from importing runtime code.
+
+### Verification
+
+The final 0.9.0 release candidate was verified on **macOS**:
+
+| Check | Result |
+|---|---|
+| Node 26.7 package suite | 315 passed; zero failures or skips |
+| Bun 1.4 package suite | 315 passed; zero failures or skips |
+| Pi 0.86.1 / OMP 18.2.6 | Actual host execution checks passed; Pi TUI checks passed |
+| Clean production-only tarball installation | Node/Bun and actual Pi/OMP smoke checks passed |
+| Lint, frozen token gates, repository release check and publish preflight | Passed |
+
+Failure-first regressions cover corrupt image data, malformed base64, MIME
+mismatches, decoded-pixel limits and nonfatal batch-text clipping. Additional
+checks cover animated images, content-based validation reuse, cancellation,
+decoder-watchdog recovery, and real failures after clipped output. The compiled
+OMP native-module issue is covered by the actual-host checks, not only unit tests.
+
+**Coverage limits:** a live Codex round-trip and Linux/Spark smoke checks were not
+rerun after the final image-validation changes. These results are not a claim of
+exhaustive platform coverage or guaranteed acceptance by every model provider.
 
 Test user-visible contracts through registered programs: exact source, on-disk
 results, failure/rollback, isolation, bounded output, and usable host rendering.
 Inject filesystem faults only to exercise real failure paths; do not prescribe
 private helper layouts, staging filenames, or syscall counts. New regressions must
 fail before the fix; for existing behavior, verify that a named deliberate defect
-makes the intended test fail before accepting it. Keep the original 12 acceptance
-tests unchanged. Cost gates cover avoidable search processes, per-read budgets and
+makes the intended test fail before accepting it. Preserve existing assertions unless an explicitly requested contract changes;
+then test both the new behavior and the retained safety boundary. Cost gates
+cover avoidable search processes, per-read safety limits and
 progress flooding; latency claims belong in the explicit measurement lane, not
 arbitrary wall-clock assertions.
 
@@ -632,8 +769,8 @@ npm run test:hosts --prefix packages/pi-supernova
 ```
 
 The explicit host runner requires macOS network sandboxing and fails, rather than
-skips, when prerequisites are absent. Verified locally against Pi 0.85.1 and OMP
-18.1.11: CodeMode execution, four primitives, automatic read coalescing, checkpoints,
+skips, when prerequisites are absent. Verified locally against Pi 0.86.1 and OMP
+18.2.6: CodeMode execution, four primitives, automatic read coalescing, checkpoints,
 images and failed execution. Pi's actual loader/runner and TUI are exercised; OMP
 runs in a disposable process through its actual session registry, with networking
 denied. The Pi runner supplies a minimal tool registry, not a full provider session.

@@ -1,4 +1,4 @@
-import { isFunction, isObject } from "../shared/decode.js";
+import { isFunction, isObject, isString } from "../shared/decode.js";
 
 const READ_ONLY_TOOLS = new Set(["read", "grep", "glob", "find", "ls", "snap", "evidence", "surface", "asgrep_search", "asgrep_status", "ast_grep", "web_search"]);
 
@@ -47,18 +47,18 @@ export function isMutatingTool(name, config = {}, args = {}, definition) {
   return !READ_ONLY_TOOLS.has(name);
 }
 
-function takeScheduledWave(queue, first, maxParallelReads) {
-  const wave = [first];
+function compatibleScheduledJob(job, active) {
+  return [...active].every(running =>
+    (job.name === "read" && running.name === "read") ||
+    (isString(job.key) && isString(running.key) && job.key !== running.key));
+}
 
-  if (first.name !== "read") return wave;
-
-  while (wave.length < maxParallelReads && queue[0]?.name === "read") {
-    const next = queue.shift();
-
-    if (!next.cancelled) wave.push(next);
-  }
-
-  return wave;
+async function prepareScheduledJob(job) {
+  if (!job.resolveKey) return;
+  // Key lookup is advisory. Invalid paths still run in isolation so the real
+  // adapter reports the error through its normal trace/permission checks.
+  try { job.key = await job.resolveKey(); } catch {}
+  job.resolveKey = undefined;
 }
 
 async function runScheduledJob(job) {
@@ -74,12 +74,6 @@ async function runScheduledJob(job) {
   } catch (error) { job.reject(error); }
 }
 
-function runScheduledWave(wave) {
-  // Settle each promise separately: one failed read must not discard its
-  // siblings or release a write barrier while other reads are still active.
-  return Promise.all(wave.map(runScheduledJob));
-}
-
 function attachJobAbort(job, signal, reject) {
   job.abort = () => {
     if (job.started) return;
@@ -91,34 +85,47 @@ function attachJobAbort(job, signal, reject) {
   signal?.addEventListener("abort", job.abort, { once: true });
 }
 
-/** FIFO read waves with mutation barriers; callers keep independent promises. */
+/** FIFO admission: concurrent reads or disjoint native files, otherwise a barrier. */
 export function createNativeScheduler({ maxParallelReads = 8 } = {}) {
   if (!Number.isInteger(maxParallelReads) || maxParallelReads < 1) throw new Error("maxParallelReads must be a positive integer");
   const queue = [];
+  const active = new Set();
   const stats = { calls: 0, readWaves: 0, peakParallelReads: 0 };
   let draining = false;
 
+  function start(job) {
+    if (job.name === "read") {
+      if (!active.size) stats.readWaves++;
+      stats.peakParallelReads = Math.max(stats.peakParallelReads, active.size + 1);
+    }
+    active.add(job);
+    // Each promise settles independently. Barriers still wait for every active
+    // sibling, including when Promise.all in the guest has already rejected.
+    void runScheduledJob(job).finally(() => { active.delete(job); void drain(); });
+  }
+
   async function drain() {
+    if (draining) return;
+    draining = true;
     try {
-      while (queue.length) {
-        const first = queue.shift();
-
-        if (first.cancelled) continue;
-        const wave = takeScheduledWave(queue, first, maxParallelReads);
-
-        if (first.name === "read") {
-          stats.readWaves++;
-          stats.peakParallelReads = Math.max(stats.peakParallelReads, wave.length);
-        }
-
-        await runScheduledWave(wave);
+      while (queue.length && active.size < maxParallelReads) {
+        const job = queue[0];
+        if (job.cancelled) { queue.shift(); continue; }
+        // Resolve identities after shell/override barriers, which may change
+        // symlinks. Check synchronously: a finishing job must not lose its wakeup.
+        if (job.resolveKey && [...active].some(running => !isString(running.key))) break;
+        await prepareScheduledJob(job);
+        if (job.cancelled) continue;
+        if (!compatibleScheduledJob(job, active)) break;
+        queue.shift();
+        start(job);
       }
     } finally { draining = false; }
   }
 
   return {
     stats,
-    schedule(name, run, signal) {
+    schedule(name, run, signal, resolveKey) {
       if (!NATIVE_TOOLS.includes(name) || !isFunction(run)) {
         return Promise.reject(new Error("scheduler requires a native tool and an executor"));
       }
@@ -127,16 +134,11 @@ export function createNativeScheduler({ maxParallelReads = 8 } = {}) {
       stats.calls++;
 
       return new Promise((resolve, reject) => {
-        const job = { name, run, signal, resolve, reject, started: false, cancelled: false };
+        const job = { name, run, signal, resolve, reject, resolveKey, started: false, cancelled: false };
         attachJobAbort(job, signal, reject);
         queue.push(job);
 
-        if (!draining) {
-          draining = true;
-          // Pi submits sibling tools in the same turn without model-side code.
-          // Collect those submissions before selecting the first read wave.
-          queueMicrotask(() => { void drain(); });
-        }
+        void drain();
       });
     },
   };

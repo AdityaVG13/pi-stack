@@ -1,4 +1,5 @@
-import { isObject, isString } from "../shared/decode.js";
+import {parseBatchPayload,batchTimeoutMs} from "./batch-input.js";
+import { isString } from "../shared/decode.js";
 import { truncateChars } from "../output/format.js";
 
 const textOf = result => (Array.isArray(result?.content) ? result.content : []).filter(block => block?.type === "text").map(block => block.text).join("\n");
@@ -26,66 +27,6 @@ export function programBatchText(results, total, stopped = "", failed = 0) {
 
       return "[" + i + "] " + text.length + "\n" + text + "\n";
     }).join("");
-}
-
-function assertProgramEntry(p, defaults = {}) {
-  const source = p?.code === undefined && p?.file === undefined ? defaults : p;
-
-  if (!isObject(p) || Array.isArray(p) || Object.keys(p).some(key => !["code","file","data"].includes(key)) ||
-      ((source.code === undefined) === (source.file === undefined)) || !isString(source.code ?? source.file) || !(source.code ?? source.file).trim()) {
-    throw new Error("each program requires code OR file (own or shared), with optional data; no nested batches or per-entry timeouts; no programs ran");
-  }
-}
-
-const objectData = value => isObject(value) && !Array.isArray(value);
-
-function applyBatchDefaults(parsed, mergeData) {
-  if (mergeData && !objectData(parsed.data)) throw new Error("mergeData requires top-level object data; no programs ran");
-  const source = parsed.code !== undefined ? {code:parsed.code} : parsed.file !== undefined ? {file:parsed.file} : {};
-
-  return parsed.programs.map(program => {
-    assertProgramEntry(program, source);
-    const entry = program.code === undefined && program.file === undefined ? {...source,...program} : program;
-
-    if (mergeData) {
-      if (program.data !== undefined && !objectData(program.data)) throw new Error("mergeData requires object data in every explicit entry; no programs ran");
-      // Shallow own-property overlay, including literal __proto__ keys. The
-      // runtime snapshots data again per guest; no mutable heap is shared.
-      entry.data = {...parsed.data,...program.data};
-    } else if (program.data === undefined && Object.hasOwn(parsed,"data")) entry.data = parsed.data;
-
-    return entry;
-  });
-}
-
-function parseBatchPayload(params, config) {
-  if (!Array.isArray(params.programs) || !params.programs.length || params.programs.length > 32) throw new Error("programs requires 1..32 entries; no programs ran");
-  if (params.mergeData !== undefined && params.mergeData !== true && params.mergeData !== false) throw new Error("mergeData must be boolean; no programs ran");
-  const defaults = Object.fromEntries(["code","file","data"].filter(key => params[key] !== undefined).map(key => [key,params[key]]));
-
-  if (defaults.code !== undefined || defaults.file !== undefined) assertProgramEntry(defaults);
-  for (const p of params.programs) assertProgramEntry(p, defaults);
-  const hasDefaults = Object.keys(defaults).length > 0;
-  let encoded;
-
-  try { encoded = JSON.stringify(hasDefaults ? {programs:params.programs,...defaults} : params.programs); } catch { throw new Error("programs and defaults must be JSON-serializable; no programs ran"); }
-
-  if (encoded.length > (config.maxCodeChars ?? 48000)) throw new Error("programs JSON exceeds the code character budget (including shared code/file/data); no programs ran");
-  const parsed = hasDefaults ? JSON.parse(encoded) : {programs:JSON.parse(encoded)};
-
-  if (Object.hasOwn(defaults,"data") && !Object.hasOwn(parsed,"data")) throw new Error("data must be JSON-serializable; no programs ran");
-
-  // Validate and expand every entry before executing any. Defaults count once
-  // against admission, not once for each independent guest receiving a copy.
-  return applyBatchDefaults(parsed, params.mergeData === true);
-}
-
-function batchTimeoutMs(params, config) {
-  const requestedTimeout = params.timeoutMs === undefined ? config.timeoutMs : Number(params.timeoutMs);
-
-  if (!Number.isFinite(requestedTimeout) || requestedTimeout <= 0) throw new Error("program batch timeoutMs must be a positive finite number");
-
-  return requestedTimeout;
 }
 
 const MAX_PARALLEL_PROGRAMS = 8;
@@ -136,7 +77,7 @@ class ProgramBatch {
   }
 
   collectImages(result, i) {
-    for (const block of Array.isArray(result?.content) ? result.content : []) if (block?.type === "image" && isString(block.data)) {
+    for (const block of imageBlocks(result)) {
       this.imageBytes += Buffer.byteLength(block.data,"base64");
 
       if (this.images.length >= 16 || this.imageBytes > 20*1024*1024) { this.imageDropped = true; continue; }
@@ -158,18 +99,9 @@ class ProgramBatch {
 
   parallelBudgetStop(settled) {
     const results = settled.filter(Boolean);
-    let images = 0, bytes = 0, labelChars = 0;
-    for (const [i, result] of settled.entries()) {
-      let imageSeq = 0;
-      for (const block of result?.content ?? []) if (block.type === "image" && isString(block.data)) {
-        images++;
-        bytes += Buffer.byteLength(block.data, "base64");
-        labelChars += ("program " + (i + 1) + " image " + (++imageSeq)).length + 1;
-      }
-    }
+    const {images, bytes} = imageTotals(settled);
     let kind;
     if (images > 16 || bytes > 20 * 1024 * 1024) kind = "image";
-    else if (results.some(result => result.details?.returnTruncated) || programBatchText(results, this.programs.length).length + labelChars > this.config.maxReturnChars) kind = "output";
     else if (results.some(result => result.details?.logTruncated) || results.reduce((n, result) => n + (result.details?.logs?.length ?? 0), 0) > (this.config.maxLogLines ?? 100)) kind = "log";
     return kind ? "batch " + kind + " budget exceeded; completed commits remain" : "";
   }
@@ -202,9 +134,8 @@ class ProgramBatch {
     if (this.imageDropped) stopped = "batch image budget exceeded; remaining programs did not run";
 
     if (result.details?.ok === false) stopped = "program " + (i+1) + " failed; remaining programs did not run; earlier commits remain";
-    const text = programBatchText(this.results, this.programs.length, stopped);
-
-    if (text.length + this.imageTextChars() > this.config.maxReturnChars || result.details?.returnTruncated) stopped ||= "batch output budget exceeded; remaining programs did not run; earlier commits remain";
+    // Display clipping is not an execution failure. Finish every requested entry
+    // unless a real execution/resource limit stops it; boundedText caps delivery.
 
     if (result.details?.logTruncated) stopped ||= "batch log budget exceeded; remaining programs did not run; earlier commits remain";
 
@@ -269,4 +200,19 @@ export async function runProgramBatch(id, params, signal, onUpdate, ctx, config,
   const programs = parseBatchPayload(params, config);
 
   return new ProgramBatch(id, params, signal, onUpdate, ctx, config, execute, programs, batchTimeoutMs(params, config)).run();
+}
+
+function imageBlocks(result) {
+  return (Array.isArray(result?.content) ? result.content : []).filter(block => block?.type === "image" && isString(block.data));
+}
+
+function imageTotals(settled) {
+  let images = 0, bytes = 0;
+  for (const result of settled) {
+    for (const block of imageBlocks(result)) {
+      images++;
+      bytes += Buffer.byteLength(block.data, "base64");
+    }
+  }
+  return {images, bytes};
 }

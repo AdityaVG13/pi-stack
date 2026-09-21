@@ -21,6 +21,44 @@ The benchmark uses js-tiktoken 1.0.21, pinned as a development dependency. It ru
 real Supernova programs in temporary workspaces without provider calls or downloads.
 The token regression gate also runs in the normal test suite.
 
+## 0.9.0 data-path tuning (2026-09-20)
+
+Compared with the preserved pre-tuning 0.9.0 package on Apple M5 Max / Node
+26.7.0. No provider calls, changed reasoning settings or regenerated token
+snapshots. This improves working-data fidelity and bounded execution; it is not
+an across-the-board latency reduction.
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| 800-entry directory, median / p95 (60 samples) | 13.179 / 23.356 ms | 8.966 / 12.795 ms |
+| Eight coalesced warm reads, median / p95 (80 alternating pairs) | 1.679 / 2.616 ms | 1.788 / 2.596 ms |
+| Eight unbatched cold reads, median / p95 (same pairs) | 12.719 / 15.057 ms | 13.136 / 15.224 ms |
+| Eight coalesced cold reads, median / p95 (same pairs) | 13.292 / 20.052 ms | 13.818 / 18.546 ms |
+| 200-row report formatting, median (10,000 iterations) | 0.1510 ms | 0.1595 ms |
+| Nested source formatting, median (10,000 iterations) | 0.02523 ms | 0.02480 ms |
+
+Directory results have identical full-listing hashes/counts: the median fell
+32%, p95 45%. Small-read medians instead increased about 3--7%; the new accounting
+adds about 0.009 ms to this small report formatter. Earlier non-interleaved samples
+suggested a warm-read gain, so the table uses alternating measurements rather than
+claiming a noisy speedup. Prewarm and provider time are excluded. Output hashes
+for both formatting fixtures match exactly; these are local samples, not latency
+bounds. Directory acceptance required identical data and lower median time;
+read-wave acceptance required identical complete values and unchanged 8-to-1
+coalescing, with regressions reported rather than hidden.
+
+The frozen six-call traffic is now 9,771 / 9,647 tokens (o200k_base / cl100k_base),
+versus 9,813 / 9,689 at the pre-tuning checkpoint. The difference is shorter
+standing guidance, not missing observations. Shared-source/object-input traffic
+is 3,567 / 3,511; every output and all 32 files still match the frozen snapshot.
+
+Focused regressions verify the formerly failing full-text/JSON/directory cases,
+64 two-MiB reads in a Node host capped at 128 MiB, blocked-delivery cancellation
+and follow-up use, bounded billion-character string expansions, sparse returns,
+and complete/partial source-view edit rules. Bun runs the same tests, but its
+heap flags and worker sampling do not provide Node's hard heap enforcement.
+Installed copies were not modified; publication and restart remain separate.
+
 ## Unreleased explicit batch reuse (2026-09-19)
 
 **79.82% / 79.92% less traffic on the shared-source/object-input workload, not a

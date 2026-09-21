@@ -8,7 +8,7 @@ Pi / OMP packages for [pi.dev](https://pi.dev) and [omp.sh](https://omp.sh). Eac
 | [pi-deferred-context-engine](./packages/pi-deferred-context-engine) | Hides inactive tool/skill noise; promotes matches for one run via `search_tools` | `pi install npm:pi-deferred-context-engine` · `omp install npm:pi-deferred-context-engine` |
 | [pi-supernova](./packages/pi-supernova) | One CodeMode invocation with `read`, `edit`, `write`, and `bash` inside; automatic read batching and ordered mutations | `pi install npm:pi-supernova` · `omp install npm:pi-supernova` |
 
-If you use deferred-context-engine, install it **last** so it sees tools other extensions registered. **pi-supernova** exposes one `supernova` tool on Pi and OMP: inline `code`, a saved `file`, or sequential `programs`, with optional literal `data`. The four commands live inside CodeMode, not as native-tool replacements. See its README for context, security, and host-verification boundaries.
+If you use deferred-context-engine, install it **last** so it sees tools other extensions registered. **pi-supernova** exposes one `supernova` tool on Pi and OMP: inline `code`, a saved `file`, or a `programs` batch (sequential or `parallel:true`), with optional literal `data`. The four commands live inside CodeMode, not as native-tool replacements. See its README for context, security, and host-verification boundaries.
 
 the UI in the TUI for pi-supernova does NOT look good, i'll try and fix it with Astra
 
@@ -26,8 +26,14 @@ omp install npm:pi-deferred-context-engine
 
 Needs Pi or OMP and Node 22+. Supernova source lookups also require `rg` on PATH. Package details live in each folder's README.
 
+**Supernova 0.9.0** keeps complete text/JSON data inside programs, overlaps
+mutations to distinct files, and clips display text without stopping batches.
+Image attachments are fully decoded in an isolated, bounded process before
+model delivery. The package README records the 315-test Node/Bun results,
+actual Pi/OMP and clean-install checks, and remaining coverage limits.
+
 See the [API and examples](./packages/pi-supernova/README.md),
-[0.8.2 fixes](./packages/pi-supernova/docs/CHANGELOG.md), and
+[0.9.0 release notes](./packages/pi-supernova/docs/CHANGELOG.md), and
 [workload-specific token measurements](./packages/pi-supernova/docs/TOKEN_COSTS.md).
 Publishing and installing the npm release are separate from pushing this repo.
 After updating, fully restart Pi/OMP; `/reload` can retain older JavaScript modules.

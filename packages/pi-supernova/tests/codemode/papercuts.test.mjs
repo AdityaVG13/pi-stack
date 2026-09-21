@@ -4,24 +4,19 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { engineFixture, modelText } from "../helpers/engine.mjs";
 import { quickCheck } from "../../src/fs/check.js";
+import { jsonErrorContext, parsePosition } from "../../src/shared/syntax-context.js";
 
-it("raw-read failures state both limits and executable recovery forms", async t => {
-  const f = await engineFixture(t);
-  const body = ("x".repeat(89) + "\n").repeat(133);
-  await f.write("NORTHSTAR.md", body);
-  await assert.rejects(f.execute('return await read("NORTHSTAR.md");'), error => {
-    assert.match(error.message, /133 lines.*11970 characters/);
-    assert.match(error.message, /160 lines.*8192 characters/);
-    assert.ok(error.message.includes('read("NORTHSTAR.md", {offset:1, limit:80})'));
-    assert.ok(error.message.includes('read("NORTHSTAR.md", {complete:true})'));
-    return true;
-  });
-  assert.match(f.tool.description, /160 lines.*8192 characters/);
+it("read guidance separates data limits from display limits and supports executable windows", async t => {
+  const f=await engineFixture(t);
+  const body=("x".repeat(89)+"\n").repeat(133);
+  await f.write("NORTHSTAR.md",body);
+  assert.equal((await f.execute('return await read("NORTHSTAR.md");')).details.result,body);
+  assert.match(f.tool.description,/64 MiB internally/);
   assert.ok(f.tool.description.includes('read(path,{offset:1,limit:80})'));
-  assert.equal((await f.execute('return await read("NORTHSTAR.md",{offset:1,limit:80});')).details.result, body.slice(0, 7200));
-  assert.equal((await f.execute('return await read("NORTHSTAR.md",{complete:true});')).details.result, body);
-  await f.write("history.jsonl", "{\"text\":\"message\"}\n".repeat(8000));
-  await assert.rejects(f.execute('return await read("history.jsonl",{complete:true});'), /31744 characters.*bash/s);
+  assert.equal((await f.execute('return await read("NORTHSTAR.md",{offset:1,limit:80});')).details.result,body.slice(0,7200));
+  assert.equal((await f.execute('return await read("NORTHSTAR.md",{complete:true});')).details.result,body);
+  await f.write("history.jsonl",'{"text":"message"}\n'.repeat(8000));
+  assert.equal((await f.execute('return (await read("history.jsonl",{complete:true})).trimEnd().split("\\n").length;')).details.result,8000);
 });
 
 it("an ignored failed checkpoint fails the program with its original cause", async t => {
@@ -102,12 +97,17 @@ it("missing argv data identifies the offending argument without running or commi
 
 it("oversized returned image sets fail with aggregate sizes instead of losing attachments", async t => {
   const f = await engineFixture(t);
-  await f.write("small.png", "image");
+  const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=","base64");
+  await f.write("small.png", pixel);
   const fits = await f.execute('return await read(Array(16).fill("small.png"));');
   assert.equal(fits.content.filter(x => x.type === "image").length, 16);
-  await assert.rejects(f.execute('await write("receipt.txt","pending"); return await read(Array(17).fill("small.png"));'), /17 images.*85 bytes.*16.*20 MiB/s);
+  await assert.rejects(f.execute('await write("receipt.txt","pending"); return await read(Array(17).fill("small.png"));'), /17 images.*1156 bytes.*16.*20 MiB/s);
   await assert.rejects(fs.stat(path.join(f.root, "receipt.txt")), {code:"ENOENT"});
-  await f.write("large.png", Buffer.alloc(4 * 1024 * 1024));
+  // Valid 4 MiB PNG: insert a checksummed ancillary text chunk before IEND.
+  const padding = Buffer.alloc(4 * 1024 * 1024 - pixel.length,32);
+  padding.writeUInt32BE(padding.length-12); padding.write("tEXt",4); padding.write("Comment\0",8);
+  padding.writeUInt32BE(0x01de4622,padding.length-4);
+  await f.write("large.png", Buffer.concat([pixel.subarray(0,-12),padding,pixel.subarray(-12)]));
   await assert.rejects(f.execute('return await read(Array(6).fill("large.png"));'), error => {
     assert.match(error.message, /6 images.*25165824 bytes.*20 MiB/s);
     assert.equal(error.supernovaResult.content.filter(x => x.type === "image").length, 0);
@@ -202,7 +202,7 @@ it("unsupported image formats fail before model delivery and roll back pending w
   await assert.rejects(f.execute('await write("pending.txt","not committed"); return await read("screen.bmp");'), noImages);
   await assert.rejects(fs.stat(path.join(f.root,"pending.txt")),{code:"ENOENT"});
   const images = [
-    {type:"image",mimeType:"image/png",data:"iVBORw0KGgo="},
+    {type:"image",mimeType:"image/png",data:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="},
     {type:"image",mimeType:"image/bmp",data:bmp.toString("base64")},
   ];
   await assert.rejects(f.tool.execute("returned-bmp", {code:'await write("pending.txt","not committed"); return data;',data:images}, undefined, undefined, {cwd:f.root}), noImages);
@@ -438,4 +438,54 @@ it("write checks accept a BOM-prefixed JSON document as valid", async t => {
   const f = await engineFixture(t);
   const receipt = await f.tool.execute("write-bom",{code:'return await write("bom-report.json", data.content);',data:{content:"\uFEFF{\"ok\":true}"},timeoutMs:2000},undefined,undefined,{cwd:f.root});
   assert.doesNotMatch(String(receipt.details.result),/check:/);
+});
+
+it("JSON context recovers failing tokens without native offsets or a second value tree", () => {
+  const marked = [
+    '{\n  "a": 1,\n  "b": |,\n}', '{"a":1,|}', '[1,|]', '{"a" |1}',
+    '{"a":1 |"b":2}', '[1 |2]', '{"a":1}|false', '[|,1]',
+    '{"a":[true,null,{"b":|}]}', '{"a":0|1}', '{"a":1|e}',
+    '{"a":|-.2}', '{"a":|undefined}', '{"a":|NaN}',
+    '{"a":|"bad\\x20"}', '\n |',
+  ];
+  for (const input of marked) {
+    const offset = input.indexOf("|");
+    const source = input.replace("|", "");
+    assert.throws(() => JSON.parse(source), SyntaxError, source);
+    const before = source.slice(0, offset).split("\n");
+    const position = " (near line " + before.length + " column " + (before.at(-1).length + 1) + ")";
+    const context = jsonErrorContext("JSON Parse error", source);
+    assert.ok(context.startsWith(position), source + context);
+    assert.ok(context.endsWith("^"), context);
+  }
+  const values = [null, true, false, 0, -1, 1.2, 1e27, [], {}, [1, "comma,]}", null],
+    {quote:'"', escape:"\\", emoji:"😀", control:"\u0000", nested:{items:[false]}}];
+  for (const value of values) assert.equal(jsonErrorContext("no offset", "\n" + JSON.stringify(value, null, 2)), "");
+  assert.equal(jsonErrorContext("no offset", " ".repeat(64 * 1024) + "?"), "", "diagnostic fallback must remain bounded");
+});
+
+it("native JSON locations use zero-based caret columns", () => {
+  const source = '{"a":1,}';
+  for (const message of ["invalid JSON (line 1 column 8)", "invalid JSON at position 7"]) {
+    assert.deepEqual(parsePosition(message, source), {line:1, column:7});
+    assert.equal(jsonErrorContext(message, source), '\n  {"a":1,}\n         ^');
+  }
+});
+
+it("guest failures identify the actual source await without moving direct throws", async t => {
+  const f = await engineFixture(t);
+  const cases = [
+    ['const x = 1;\nreturn await bash("exit 4");', 2, 8],
+    ['await Promise.resolve(); await bash("exit 4");', 1, 26],
+    ['await (async () => {\n  await bash("exit 4");\n})();', 2, 3],
+    ['async () => {\n  await bash("exit 4");\n}', 2, 3],
+  ];
+  for (const [code, line, column] of cases) {
+    await assert.rejects(f.execute(code), error => {
+      assert.match(error.message, /command failed \(exit 4\)/);
+      assert.ok(error.message.includes("(line " + line + ":" + column + ")"), error.message);
+      return true;
+    });
+  }
+  await assert.rejects(f.execute('await (async () => {\n  throw Error("direct-throw");\n})();'), /direct-throw \(line 2:\d+\)/);
 });

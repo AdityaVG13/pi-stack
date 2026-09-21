@@ -1,3 +1,5 @@
+import {textResult} from '../shared/result.js';
+import {pendingInScope,overlaySearchEntry} from './search-files.js';
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isString } from "../shared/decode.js";
@@ -5,28 +7,12 @@ import { WorkspaceIndex, globToRegExp } from "./repo-index.js";
 import { rankPaths, smartCase, fuzzyMatch } from "./fuzzy.js";
 import { runCommand, relativeSlash } from "../fs/workspace.js";
 
-// Search served from the in-process index: fuzzy path find (fff port), smart-case grep with
-// definition-first rows and fuzzy fallback, glob listing. rg is spawned only for trees too
-// large to scan in-process.
-
-function textResult(text, details) {
-  return { content: [{ type: "text", text: String(text ?? "") }], details: details || {} };
-}
-
 async function candidateFileList(index, root, includeHidden = false, signal) {
   const stat = await fs.stat(root).catch(() => null);
 
   if (stat?.isFile()) return [root];
 
   return index.files(root, includeHidden, signal);
-}
-
-function pendingInScope(root, pendingPaths) {
-  return pendingPaths.filter(file => {
-    const relative = path.relative(root, file);
-
-    return relative === "" || (relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative));
-  });
 }
 
 function parseMatchRecord(line, truncated, isLast) {
@@ -246,14 +232,6 @@ function grepRegex(pattern, params) {
   } catch {
     return null;
   }
-}
-
-function overlaySearchEntry(index, filePath, overlayText) {
-  const pending = overlayText(filePath);
-
-  return pending === undefined
-    ? index.entry(filePath)
-    : Buffer.byteLength(pending, "utf8") <= 512 * 1024 ? WorkspaceIndex.fromText(filePath, pending) : null;
 }
 
 function fuzzyLineRow(pattern, rawLine, defName, rel, line, maxTypos, caseSensitive) {

@@ -67,12 +67,23 @@ it("one batch deadline covers earlier guests and leaves their completed commits 
   await assert.rejects(fs.stat(path.join(f.root,"never.txt")),{code:"ENOENT"});
 });
 
-it("batch output and log budgets stop further programs and disclose clipping", async t => {
+it("batch text clipping preserves success and executes later programs", async t => {
   const f = await engineFixture(t);
-  const output = await run(f,[{code:'return "λ😀".repeat(7000);'},{code:'return "other".repeat(4500);'},{code:'await write("never.txt","bad");'}]);
-  assert.equal(output.details.ok,false); assert.equal(output.details.returnTruncated,true);
-  assert.equal(output.details.attempted,2); assert.ok(modelText(output).length<=32000);
-  assert.match(modelText(output),/output budget exceeded/);
+  for (const repeats of [7000,14000]) {
+    const output = await run(f,[{code:`return "λ😀".repeat(${repeats});`},{code:'return "other".repeat(4500);'},{code:'await write("continued.txt","kept"); return "later program completed";'}]);
+    assert.equal(output.details.ok,true); assert.equal(output.isError,false);
+    assert.equal(output.details.returnTruncated,true);
+    assert.equal(output.details.attempted,3); assert.ok(modelText(output).length<=32000);
+    assert.match(modelText(output),/^ok: programs 3\/3/);
+    assert.match(modelText(output),/batch output truncated/);
+    assert.match(modelText(output),/later program completed/);
+    assert.equal(output.details.programs[2].details.ok,true);
+    assert.equal(await fs.readFile(path.join(f.root,"continued.txt"),"utf8"),"kept");
+  }
+});
+
+it("batch log budgets still stop further programs and disclose clipping", async t => {
+  const f = await engineFixture(t);
   const logs = await run(f,[{code:'for(let i=0;i<100;i++)console.log("line",i); return 1;'},{code:'console.log("extra"); return 2;'},{code:'await write("never.txt","bad");'}]);
   assert.equal(logs.details.ok,false); assert.equal(logs.details.logTruncated,true);
   assert.equal(logs.details.logs.length,100); assert.equal(logs.details.attempted,2);
@@ -82,7 +93,7 @@ it("batch output and log budgets stop further programs and disclose clipping", a
 
 it("stop reports retain earlier images instead of throwing their content away", async t => {
   const f = await engineFixture(t);
-  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=";
   await fs.writeFile(path.join(f.root,"pixel.png"),Buffer.from(png,"base64"));
   const result = await run(f,[{code:'return await read("pixel.png");'},{code:'throw Error("stop after image");'}]);
   assert.equal(result.details.ok,false); assert.equal(result.isError,true);
@@ -148,14 +159,16 @@ it("a late non-cooperating completion cannot turn a batch deadline into success"
 });
 
 it("image-label separators count against the aggregate text budget", async()=>{
-  const part = {content:[{type:"text",text:"image"},{type:"image",mimeType:"image/png",data:"AA=="}],details:{ok:true,result:"image",mutations:{committed:0}}};
+  const part = {content:[{type:"text",text:"image"},{type:"image",mimeType:"image/png",data:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="}],details:{ok:true,result:"image",mutations:{committed:0}}};
   const limit = programBatchText([part],1).length + "program 1 image 1".length;
 
   const result = await runProgramBatch("image-budget",{programs:[{code:"return 1;"}]},undefined,undefined,{},
     {timeoutMs:1000,maxCodeChars:48000,maxReturnChars:limit},async()=>part);
 
   assert.ok(modelText(result).length<=limit);
-  assert.equal(result.details.ok,false);
+  assert.equal(result.details.ok,true);
+  assert.equal(result.details.returnTruncated,true);
+  assert.equal(result.content.filter(block=>block.type==="image").length,1);
 });
 
 
@@ -208,7 +221,7 @@ it("read/edit/write/bash pipelines disclose clipping introduced by logs and the 
 
 it("failed cutovers compose file reuse, JSON, checkpoints, argv, images and repair across workspaces", async t => {
   const f = await engineFixture(t);
-  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=";
   const failure = 'throw Error("post-verification failure");';
 
   const source = [
@@ -367,4 +380,20 @@ it("shared source counts once without raising admission or worker code limits", 
   assert.equal(result.details.ok,true);
   assert.deepEqual(result.details.result,[0,1,2,3,4,5,6,7]);
   await assert.rejects(run(f,[{}],{code:"/*"+"x".repeat(48000)+"*/ return 1;"}),/exceeds.*no programs ran/);
+});
+
+it("a real failure after clipped text still stops sequential work and retains prior commits", async t => {
+  const f = await engineFixture(t);
+  const result = await run(f,[
+    {code:'await write("kept.txt","committed"); return "x".repeat(40000);'},
+    {code:'throw Error("failure after clipping");'},
+    {code:'await write("never.txt","bad");'},
+  ]);
+  assert.equal(result.isError,true);
+  assert.equal(result.details.ok,false);
+  assert.equal(result.details.attempted,2);
+  assert.equal(result.details.mutations.committed,1);
+  assert.match(modelText(result),/failure after clipping/);
+  assert.equal(await fs.readFile(path.join(f.root,"kept.txt"),"utf8"),"committed");
+  await assert.rejects(fs.stat(path.join(f.root,"never.txt")),{code:"ENOENT"});
 });

@@ -4,7 +4,7 @@ import { engineFixture, modelText } from "../helpers/engine.mjs";
 
 it("returning an image read preserves an image attachment, not UTF-8 decoded binary or a text placeholder", async t => {
   const fixture = await engineFixture(t);
-  const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
+  const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=", "base64");
   await fixture.write("pixel.png", image);
   const result = await fixture.execute('return await read("pixel.png");');
   assert.equal(result.details.ok, true, result.details.error);
@@ -26,12 +26,14 @@ it("a repeated plain read remains self-contained when no retained-context acknow
   assert.ok(modelText(second).includes(body), "A cache hit is not proof the model still has the earlier source in context");
 });
 
-it("a budget-limited file read gives an actionable line continuation rather than silently losing the middle", async t => {
+it("a display-limited source view gives exact continuation without losing its path or range", async t => {
   const fixture = await engineFixture(t);
   await fixture.write("large.txt", Array.from({ length: 5000 }, (_, i) => `line ${i + 1}: ${"payload ".repeat(20)}`).join("\n"));
-  const result = await fixture.execute('return await read("large.txt");');
+  const result = await fixture.execute('return await read({path:"large.txt",resolve:true});');
   assert.equal(result.details.ok, true, result.details.error);
   const text = modelText(result);
   assert.ok(/truncat|omitt|continu/i.test(text), "The response must explicitly disclose incomplete content");
-  assert.ok(/offset\s*[:=]\s*\d+/i.test(text), "The agent needs an exact next line, not a vague 'read again' instruction");
+  assert.equal(result.details.result.path,"large.txt");
+  assert.equal(result.details.result.nextOffset,result.details.result.lines[1]+1);
+  assert.ok(result.details.result.nextOffset>1);
 });

@@ -1,3 +1,4 @@
+import { readLimitedBytes } from "../fs/file-io.js";
 import * as fs from "node:fs/promises";
 import { resolveWorkspacePath } from "../fs/workspace.js";
 
@@ -21,22 +22,13 @@ export async function readProgramFile(file, cwd, maxChars, signal) {
     const maxBytes = chars * 3;
     const tooLarge = () => new Error("code exceeds " + chars + " characters; split the program");
 
-    if (stat.size > maxBytes) throw tooLarge();
-    const chunks = [];
-    let bytes = 0;
-
-    for await (const chunk of handle.createReadStream({ end: maxBytes, autoClose: false, signal })) {
-      bytes += chunk.length;
-
-      if (bytes > maxBytes) throw tooLarge();
-      chunks.push(chunk);
-    }
+    const bytes = await readLimitedBytes(handle, stat, maxBytes, file, signal, tooLarge);
 
     signal?.throwIfAborted();
     // Do not silently replace invalid bytes in executable source. Preserve BOMs.
     let code;
 
-    try { code = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks)); }
+    try { code = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
     catch { throw new Error("program file " + file + " is not valid UTF-8 (encoded data could not be decoded); save it as UTF-8 text"); }
 
     if (code.length > chars) throw tooLarge();

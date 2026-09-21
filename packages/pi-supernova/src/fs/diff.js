@@ -18,13 +18,8 @@ export function buildEditDiff(filePath, originalText, oldText, newText) {
     lines.push({ type: "context", lineNum: startLine - 1, text: fileLines[startLine - 2] });
   }
 
-  for (let i = 0; i < oldLines.length; i++) {
-    lines.push({ type: "remove", lineNum: startLine + i, text: oldLines[i] });
-  }
-
-  for (let i = 0; i < newLines.length; i++) {
-    lines.push({ type: "add", lineNum: startLine + i, text: newLines[i] });
-  }
+  appendDiffLines(lines, "remove", oldLines, startLine);
+  appendDiffLines(lines, "add", newLines, startLine);
 
   const afterSourceLine = startLine + oldLines.length;
 
@@ -102,7 +97,7 @@ export function buildPatchDiff(filePath, patchText, relocations = []) {
       continue;
     }
 
-    if (!inHunk || patchLine.startsWith("\\")) continue;
+    if (!inHunk) continue;
     const kind = classifyPatchLine(patchLine);
 
     if (!kind) continue;
@@ -140,13 +135,8 @@ export function buildWriteDiff(filePath, previousText, newText) {
   const maxStoredLines = 64;
   const lines = [];
 
-  for (let i = 0; i < oldLines.length && lines.length < maxStoredLines; i++) {
-    lines.push({ type: "remove", lineNum: i + 1, text: oldLines[i] });
-  }
-
-  for (let i = 0; i < newLines.length && lines.length < maxStoredLines; i++) {
-    lines.push({ type: "add", lineNum: i + 1, text: newLines[i] });
-  }
+  appendDiffLines(lines, "remove", oldLines, 1, maxStoredLines);
+  appendDiffLines(lines, "add", newLines, 1, maxStoredLines);
 
   return {
     path: filePath,
@@ -156,4 +146,10 @@ export function buildWriteDiff(filePath, previousText, newText) {
     displayLineCount: oldLines.length + newLines.length,
     lines,
   };
+}
+
+function appendDiffLines(lines, type, text, start, limit = Infinity) {
+  for (let i = 0; i < text.length && lines.length < limit; i++) {
+    lines.push({type, lineNum: start + i, text: text[i]});
+  }
 }

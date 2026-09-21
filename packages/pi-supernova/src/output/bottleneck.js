@@ -1,8 +1,9 @@
+import {READ_VALUE} from "../shared/result.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { isString, isObject, mapChangedChildren, assertModelImageMime } from "../shared/decode.js";
-import { truncateChars, formatReturn, formatBoundedStringArray } from "./format.js";
+import { isString, isObject } from "../shared/decode.js";
+import { truncateChars } from "./format.js";
 
 function json(value) {
   try { return JSON.stringify(value) ?? "null"; } catch { return JSON.stringify(String(value)); }
@@ -221,8 +222,16 @@ function attachTruncation(result, truncated, batch, text, config, maxChars, capp
 }
 
 export function packageHostResult(raw, config) {
-  const maxChars = config.maxCallResultChars ?? 65536;
   const details = detailsOf(raw);
+  if (raw && Object.hasOwn(raw, READ_VALUE)) {
+    const batch = batchFromDetails(details);
+    const result = {ok: !hostResultFailed(raw), value: raw[READ_VALUE], typed: true, cloneItems: details?.jsonMany === true, truncated: details?.outputTruncated === true};
+    attachDetails(result, details, batch);
+    if (batch) { result.items = batch; result.itemErrors = details.itemErrors ?? []; }
+    if (details?.streamed) result.streamed = true;
+    return result;
+  }
+  const maxChars = config.maxCallResultChars ?? 65536;
   const batch = batchFromDetails(details);
   const text = batch ? "" : extractRawString(raw);
   const capped = truncateChars(text, maxChars, "host-result");
@@ -237,67 +246,4 @@ export function packageHostResult(raw, config) {
   return result;
 }
 
-function collectImage(input, acc) {
-  if (!(input?.type === "image" && isString(input.data) && isString(input.mimeType) && input.mimeType.startsWith("image/"))) return null;
-  assertModelImageMime(input.mimeType);
-  const size = Buffer.byteLength(input.data, "base64");
-
-  acc.imageCount += 1;
-  acc.imageBytes += size;
-  if (acc.imageCount > 16 || acc.imageBytes > 20 * 1024 * 1024) {
-    acc.imageOverflow = true;
-    return "[image over budget]";
-  }
-  acc.images.push({ type: "image", data: input.data, mimeType: input.mimeType });
-
-  return `[image ${acc.images.length}: ${input.mimeType}]`;
-}
-
-function collectImages(input, acc) {
-  const replaced = collectImage(input, acc);
-
-  if (replaced !== null) return replaced;
-
-  return mapChangedChildren(input, collectImages, acc);
-}
-
-function serializeReturn(value, formatted, maxReturn, imageOverflow) {
-  if (formatted.length <= maxReturn) return { text: formatted, truncated: imageOverflow };
-
-  if (Array.isArray(value) && value.length && value.every(isString)) return { text: formatBoundedStringArray(value, maxReturn), truncated: true };
-
-  return { ...truncateChars(formatted, maxReturn, "return"), truncated: true };
-}
-
-function clipLogLine(line, maxLogLineChars) {
-  const result = truncateChars(line, maxLogLineChars, "log");
-
-  return { text: result.text, truncated: result.truncated };
-}
-
-function clipLogs(logs, config) {
-  const maxLines = config.maxLogLines ?? 100;
-  let logTruncated = logs.length > maxLines;
-  const clipped = logs.slice(0, maxLines).map(line => {
-    const result = clipLogLine(line, config.maxLogLineChars ?? 4096);
-    logTruncated ||= result.truncated;
-
-    return result.text;
-  });
-
-  return { logs: clipped, logTruncated };
-}
-
-export function packageFinalReturn(value, logs, config) {
-  const acc = { images: [], imageCount: 0, imageBytes: 0, imageOverflow: false };
-  value = collectImages(value, acc);
-  if (acc.imageOverflow) {
-    throw new Error(`image attachment budget exceeded: ${acc.imageCount} images / ${acc.imageBytes} bytes; limit is 16 images / 20971520 bytes (20 MiB). No images returned; return fewer or smaller images per program`);
-  }
-  const maxReturn = config.maxReturnChars ?? 32000;
-  const serialized = serializeReturn(value, formatReturn(value), maxReturn, acc.imageOverflow);
-  const clipped = clipLogs(logs, config);
-
-  return { returnValue: serialized.truncated ? serialized.text : value, returnText: serialized.text,
-    returnTruncated: serialized.truncated, logs: clipped.logs, logTruncated: clipped.logTruncated, images: acc.images };
-}
+export {packageFinalReturn} from "./final.js";

@@ -1,15 +1,17 @@
+import {createToolRegistry} from './tool-registry.js';
+import {traceArgs,finishRecord} from './trace.js';
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { packageHostResult, hostResultFailed } from "../output/bottleneck.js";
-import { truncateChars } from "../output/format.js";
-import { isString, isFunction, isObject } from "../shared/decode.js";
+import { packageHostResult } from "../output/bottleneck.js";
+
+import { errorMessage, isString, isFunction } from "../shared/decode.js";
 import { isMutatingTool, runParallelWave, createNativeScheduler } from "../runtime/parallel.js";
 import { unknownToolMessage } from "./catalog.js";
-import { toolIsCallable, resolveInvokeTarget } from "./invoke.js";
+import { resolveInvokeTarget } from "./invoke.js";
 import { buildWriteDiff } from "../fs/diff.js";
 import { WorkspaceIndex } from "../context/repo-index.js";
 import { SeenLedger } from "../context/ledger.js";
-import { CausalVfs } from "../fs/vfs.js";
+import { CausalVfs, resolveCommitTarget } from "../fs/vfs.js";
 import { resolveWorkspacePath, runCommand, clearPathCache, relativeSlash } from "../fs/workspace.js";
 import { createNativeAdapters } from "../adapters/index.js";
 import { resultDiff, boundedWriteDiff, writeSnapshot } from "../fs/text-ops.js";
@@ -31,8 +33,6 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
   const natives = createNativeAdapters(getCwd, vfs, config, index, ledger, hooks);
   let callCount = 0;
   let activeCtx = null;
-  let hostSession = null;
-  let boundSessionId;
   let activeSignal = undefined;
   let trace = [];
   let callListener = null;
@@ -72,107 +72,14 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     return env;
   };
 
-  function captureHostTool(tool, excluded) {
-    return tool && isString(tool.name) && isFunction(tool.execute) && tool.name !== "supernova" && !excluded.has(tool.name);
-  }
-
-  function wrapHostRegister() {
-    if (registry || !pi || !isFunction(pi.registerTool)) return;
-    const original = pi.registerTool.bind(pi);
-    const excluded = new Set(config.excludeTools || []);
-    pi.registerTool = (tool) => {
-      if (captureHostTool(tool, excluded)) {
-        executors.set(tool.name, tool.execute.bind(tool));
-        definitions.set(tool.name, tool);
-      }
-
-      return original(tool);
-    };
-  }
-
-  wrapHostRegister();
+  const tools = createToolRegistry({pi,config,registry,natives,executors,definitions});
+  const {refreshTools,isCallable,externalNames,hostTool,evalToolNames} = tools;
 
   function bindCallContext(ctx, signal) {
     activeCtx = ctx || null;
-    const sessionId = ctx?.sessionManager?.getSessionId?.();
-    boundSessionId = sessionId;
-    const registry = pi?.pi?.AgentRegistry?.global?.();
-    let sessions = [];
-
-    try { sessions = registry?.list?.() ?? []; } catch {}
-    if (!Array.isArray(sessions)) sessions = [];
-    hostSession = sessionId
-      ? sessions.map(ref => ref.session).find(session => !session?.isDisposed && session?.sessionManager?.getSessionId?.() === sessionId) ?? null
-      : null;
+    tools.bindSession(ctx);
     activeSignal = signal;
     vfs.signal = signal;
-  }
-
-  function evalToolNames() {
-    try { return hostSession?.getEvalBridgeToolNames?.() ?? []; }
-    catch { return []; }
-  }
-
-  function hostTool(name) {
-    if (!hostSession) return undefined;
-    const metadata = definitions.get(name);
-
-    // Keep Supernova's transactional adapters for ordinary built-ins. Respect overrides.
-    if (Object.hasOwn(natives, name) && metadata?.sourceInfo?.source === "builtin") return undefined;
-
-    try { return hostSession.getToolForEvalBridge?.(name); }
-    catch { return undefined; }
-  }
-
-  function callableEnv() {
-    return {
-      excluded: new Set(config.excludeTools || []),
-      hostSession,
-      natives,
-      executors,
-      sessionInvalid: () => hostSession && (hostSession.isDisposed || hostSession.sessionManager?.getSessionId?.() !== boundSessionId),
-      nativeOwned: name => Object.hasOwn(natives, name) && !executors.has(name)
-        && (!hostSession || !definitions.has(name) || definitions.get(name).sourceInfo?.source === "builtin"),
-      evalAllows: name => {
-        if (!evalToolNames().includes(name) && definitions.has(name)) return false;
-
-        return !!hostTool(name) || (Object.hasOwn(natives, name) && (!definitions.has(name) || definitions.get(name).sourceInfo?.source === "builtin"));
-      },
-      listed: name => {
-        let activeTools;
-
-        try { activeTools = isFunction(pi?.getActiveTools) ? pi.getActiveTools() : undefined; } catch {}
-
-        if (definitions.has(name) && Array.isArray(activeTools) && !activeTools.includes(name)) return false;
-
-        return executors.has(name) || Object.hasOwn(natives, name);
-      },
-      hostTool,
-    };
-  }
-
-  function isCallable(name) {
-    return toolIsCallable(name, callableEnv());
-  }
-
-  function refreshTools() {
-    let listed = [];
-
-    try { listed = pi?.getAllTools?.() ?? []; } catch {}
-    const tools = Array.isArray(listed) ? listed : [];
-
-    for (const tool of tools) {
-      if (!isString(tool?.name)) continue;
-      definitions.set(tool.name, { ...definitions.get(tool.name), ...tool });
-
-      if (!hostSession && isFunction(tool.execute)) executors.set(tool.name, tool.execute.bind(tool));
-    }
-
-    return [...definitions.values()].filter(tool => isCallable(tool.name));
-  }
-
-  function externalNames() {
-    return [...definitions.keys()].filter(name => !!hostTool(name) || executors.has(name));
   }
 
   function resetCallBudget() {
@@ -183,26 +90,6 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     // Files may change between programs (editor, git); never serve a stale run.
     vfs.invalidateObserved();
     clearPathCache();
-  }
-
-  function getTrace() {
-    return [...trace];
-  }
-
-  function setCallListener(fn) {
-    callListener = isFunction(fn) ? fn : null;
-  }
-
-  function beginSpeculation() {
-    return vfs.begin();
-  }
-
-  async function commitSpeculation() {
-    return await vfs.commit();
-  }
-
-  function rollbackSpeculation() {
-    return vfs.rollback();
   }
 
   function notifyCall(record) {
@@ -261,25 +148,6 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     notifyCall(record);
   }
 
-  function traceArgs(args) {
-    if (!isObject(args)) return {};
-    const out = {};
-
-    for (const key of ["path", "target", "query", "pattern", "command", "cwd", "glob", "action", "op"]) {
-      const value = args[key];
-
-      if (isString(value)) out[key] = truncateChars(value, 240, "trace").text;
-      // eslint-disable-next-line anti-slop/no-runtime-typeof -- display-only label: the value is already handled, this names its kind for the trace.
-      else if (Array.isArray(value)) out[key] = value.slice(0, 128).map(item => isString(item) ? truncateChars(item, 240, "trace").text : typeof item);
-    }
-
-    if (isString(args.content)) out.content = args.content.length + " chars";
-    if (Array.isArray(args.edits)) out.edits = args.edits.length + " edits";
-    if (Array.isArray(args.args)) out.args = args.args.length + " argv";
-
-    return out;
-  }
-
   function assertOwnedOverride(name, args) {
     if (name === "read" && (args?.json !== undefined || /^(agent|artifact):\/\/.*\?/i.test(String(args?.path)))) throw new Error("JSON projection requires the Supernova-owned read adapter, not an external override");
     if (name === "write" && args?.append === true) throw new Error("append requires the Supernova-owned write adapter, not an external override");
@@ -296,7 +164,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
 
     try {
       const res = await target.exec(`supernova:${name}:${callId}`, args || {}, activeSignal, undefined, target.delegated
-        ? { ...activeCtx, settings: hostSession.settings, toolNames: evalToolNames(), autoApprove: false }
+        ? { ...activeCtx, settings: tools.session.settings, toolNames: evalToolNames(), autoApprove: false }
         : activeCtx);
 
       completeRecord(record, res, fallbackDiff);
@@ -307,8 +175,8 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     }
   }
 
-  async function invokeNative(target, args, record) {
-    const res = await target.native(target.argvOwned ? { ...args, args: args.args.map(String) } : args || {}, activeSignal);
+  async function invokeNative(target, args, record, onItem) {
+    const res = await target.native(target.argvOwned ? { ...args, args: args.args.map(String) } : args || {}, activeSignal, onItem);
     completeRecord(record, res);
 
     return res;
@@ -317,11 +185,11 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
   function failRecord(record, error) {
     record.ok = false;
     record.ms = Date.now() - record.time;
-    record.error = error instanceof Error ? error.message : String(error);
+    record.error = errorMessage(error);
     notifyCall(record);
   }
 
-  async function invokeRaw(name, args) {
+  async function invokeRaw(name, args, onItem) {
     assertRunOpen(name);
     const callId = ++sharedRegistry.callSeq;
     assertCallableTarget(name);
@@ -336,10 +204,10 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     notifyCall(record);
 
     try {
-      const target = resolveInvokeTarget(name, args, { hostTool, hostSession, executors, natives });
+      const target = resolveInvokeTarget(name, args, { hostTool, hostSession: tools.session, executors, natives });
 
       if (target.kind === "override") return await invokeOverride(target, name, args, record, callId);
-      if (target.kind === "native") return await invokeNative(target, args, record);
+      if (target.kind === "native") return await invokeNative(target, args, record, onItem);
 
       throw new Error(unknownToolMessage(name, [...executors.keys(), ...Object.keys(natives)]));
     } catch (error) {
@@ -348,25 +216,25 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     }
   }
 
-  function finishRecord(record, res) {
-    record.ms = Date.now() - record.time;
-    record.ok = !hostResultFailed(res);
-    const exitCode = isObject(res?.details) ? res.details.exitCode : undefined;
+  function fileMutationKey(name, args) {
+    if (!["edit", "write", "apply_patch"].includes(name) || !isString(args?.path)) return;
+    // Overrides can mutate more than their declared path: keep them global.
+    if (hostTool(name) || executors.has(name)) return;
 
-    if (Number.isInteger(exitCode) && exitCode !== 0) record.exitCode = exitCode;
-    const text = isObject(res) && Array.isArray(res.content)
-      ? res.content.filter(part => part?.type === "text" && isString(part.text)).map(part => part.text).join("\n")
-      : undefined;
-
-    if (text) record.resultText = truncateChars(text, 4096, "trace").text;
+    return async () => {
+      const target = await resolveWorkspacePath(getCwd(), args.path, name, false, true);
+      // Share the commit identity, including symlinks and not-yet-created files.
+      return (await resolveCommitTarget(target)).target;
+    };
   }
 
-  async function call(name, args) {
+  async function call(name, args, onItem) {
     if (!isString(name) || !name) throw new Error("nova.call requires a tool name");
-    const invoke = async () => packageHostResult(await invokeRaw(name, args), config);
+    const deliver = onItem ? (index, raw) => onItem(index, packageHostResult(raw, config)) : undefined;
+    const invoke = async () => packageHostResult(await invokeRaw(name, args, deliver), config);
     const kind = isMutatingTool(name, config, args, definitions.get(name)) ? "write" : "read";
 
-    return scheduler.schedule(kind, invoke, activeSignal);
+    return scheduler.schedule(kind, invoke, activeSignal, fileMutationKey(name, args));
   }
 
   async function callMany(calls) {
@@ -433,13 +301,13 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     close() { closed = true; vfs.closed = true; },
     bindCallContext,
     resetCallBudget,
-    getTrace,
+    getTrace: () => [...trace],
     getMutations: () => ({ ...vfs.mutations }),
-    setCallListener,
+    setCallListener: fn => { callListener = isFunction(fn) ? fn : null; },
     barrier: run => scheduler.schedule("write", run, activeSignal),
-    beginSpeculation,
-    commitSpeculation,
-    rollbackSpeculation,
+    beginSpeculation: () => vfs.begin(),
+    commitSpeculation: async () => await vfs.commit(),
+    rollbackSpeculation: () => vfs.rollback(),
     getOverlayDepth: () => vfs.getOverlayDepth(),
     call,
     callMany,

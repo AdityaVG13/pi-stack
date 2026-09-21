@@ -1,247 +1,13 @@
+import {textSignature,sameFileVersion,fileSignature,tooLargeRead,overlayOrThrow,assertReadableFile,readLimitedBytes,remapReadError} from './file-io.js';
+import {resolveCommitTarget,assertExpectedSignature,collectMissingAncestors,makeStageEntry,stageReplacement,installStaged,failCommit,cleanupStaged} from './commit.js';
+export {resolveCommitTarget} from './commit.js';
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isString } from "../shared/decode.js";
 import { decodeUtf8Strict } from "../shared/utf8.js";
-import { createHash, randomUUID } from "node:crypto";
 
 // Serialize validation + replacement across Supernova transactions in this host.
 let commitTail = Promise.resolve();
-
-function textSignature(text) {
-  return { size: Buffer.byteLength(text, "utf8"), sha256: createHash("sha256").update(text, "utf8").digest("hex") };
-}
-
-function sameFileVersion(a, b) {
-  return ["dev", "ino", "size", "mtimeMs", "ctimeMs"].every(key => a[key] === b[key]);
-}
-
-async function fileSignature(target, signal, observed) {
-  const file = await fs.open(target, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
-
-  try {
-    const actual = await file.stat();
-
-    if (!actual.isFile()) throw new Error("read requires a regular file: " + target);
-    if (observed && !sameFileVersion(observed, actual)) throw new Error("file changed while reading: " + target);
-    const hash = createHash("sha256");
-
-    for await (const chunk of file.createReadStream({ autoClose: false, signal })) hash.update(chunk);
-    const after = await file.stat();
-
-    if (!after.isFile() || !sameFileVersion(actual, after)) throw new Error("file changed while signing: " + target);
-
-    return { size: actual.size, sha256: hash.digest("hex") };
-  } finally {
-    await file.close();
-  }
-}
-
-// realpath() cannot resolve a missing leaf. Canonicalize its nearest existing
-// ancestor so two symlink spellings still share one commit destination.
-async function canonicalNewPath(target) {
-  let ancestor = path.dirname(target);
-
-  for (;;) {
-    try { return path.join(await fs.realpath(ancestor), path.relative(ancestor, target)); }
-    catch (error) {
-      if (error.code !== "ENOENT") throw error;
-      const parent = path.dirname(ancestor);
-
-      if (parent === ancestor) throw error;
-      ancestor = parent;
-    }
-  }
-}
-
-function sameSignature(a, b) {
-  return a === b || (a !== null && b !== null && a.size === b.size && a.sha256 === b.sha256);
-}
-
-function tooLargeRead(label, maxBytes) {
-  return new Error(label + " exceeds " + maxBytes + " bytes; use a streaming parser through bash");
-}
-
-function overlayOrThrow(overlay, maxBytes, label) {
-  if (maxBytes !== undefined && Buffer.byteLength(overlay, "utf8") > maxBytes) throw tooLargeRead(label, maxBytes);
-
-  return overlay;
-}
-
-function assertReadableFile(stat, target) {
-  // Callers are reads, writes, edits and patch application: name the path, not the caller.
-  if (stat.isDirectory()) throw new Error("path is a directory, not a file: " + target);
-
-  if (!stat.isFile()) throw new Error("path is not a regular file: " + target);
-}
-
-async function readLimitedBytes(file, stat, maxBytes, label, signal) {
-  if (stat.size > maxBytes) throw tooLargeRead(label, maxBytes);
-  const chunks = [];
-  let size = 0;
-
-  for await (const chunk of file.createReadStream({ end: maxBytes, autoClose: false, signal })) {
-    size += chunk.length;
-
-    if (size > maxBytes) throw tooLargeRead(label, maxBytes);
-    chunks.push(chunk);
-  }
-
-  return Buffer.concat(chunks);
-}
-
-function remapReadError(err, target) {
-  if (err.code === "EISDIR") throw new Error("path is a directory, not a file: " + target);
-
-  if (err.code === "ENOTDIR") throw new Error("cannot use path: a parent component of " + target + " is a file, not a directory");
-  if (err.code === "EACCES" || err.code === "EPERM") throw new Error("permission denied reading " + target + ": check the file mode (for example bash chmod)");
-
-  if (err.code === "ENOENT") {
-    const missing = new Error("no such file: " + target + ' (locate it with read using a directory path or source question; use Promise.allSettled for optional reads to retain successful siblings)');
-    missing.code = "ENOENT";
-    throw missing;
-  }
-
-  throw err;
-}
-
-async function resolveExistingFile(logicalPath) {
-  const target = await fs.realpath(logicalPath);
-  const stat = await fs.stat(target);
-
-  if (!stat.isFile()) throw new Error("cannot write to a non-file: " + logicalPath);
-
-  return { target, stat };
-}
-
-async function resolveCommitTarget(logicalPath) {
-  try {
-    return await resolveExistingFile(logicalPath);
-  } catch (err) {
-    if (err.code !== "ENOENT") throw err;
-
-    return { target: await canonicalNewPath(logicalPath), stat: undefined };
-  }
-}
-
-async function collectMissingAncestors(parent) {
-  const missing = [];
-  let probe = parent;
-
-  for (;;) {
-    try { await fs.stat(probe); break; } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-      missing.push(probe);
-      probe = path.dirname(probe);
-    }
-  }
-
-  return missing;
-}
-
-async function writeTemporary(entry, content, stat) {
-  try {
-    await fs.writeFile(entry.temporary, content, { encoding: "utf8", flag: "wx", mode: stat ? stat.mode & 0o7777 : 0o666 });
-  } catch (error) {
-    // Never leak the temporary name: name the destination and the real cause.
-    if (error?.code === "EACCES" || error?.code === "EPERM") throw new Error("permission denied writing " + entry.target + ": the directory or file is not writable");
-    if (error?.code === "EROFS") throw new Error("cannot write " + entry.target + ": the file system is read-only");
-    if (error?.code === "ENOSPC") throw new Error("cannot write " + entry.target + ": no space left on device");
-
-    throw error;
-  }
-
-  if (stat) await fs.chmod(entry.temporary, stat.mode & 0o7777);
-}
-
-async function stageReplacement(entry, content, stat, target) {
-  const replacement = writeTemporary(entry, content, stat);
-  // These touch separate staging files. Settle both before cleanup, even
-  // on failure: Promise.all could leave a late backup after rollback.
-  const staging = [replacement];
-
-  if (stat) staging.push(fs.copyFile(target, entry.backup, fs.constants.COPYFILE_EXCL));
-  const outcomes = await Promise.allSettled(staging);
-  const failure = outcomes.find(outcome => outcome.status === "rejected");
-
-  if (failure) throw failure.reason;
-}
-
-function makeStageEntry(logicalPath, target, content, parent, stat) {
-  const token = ".supernova-" + randomUUID();
-
-  return { logicalPath, target, content, temporary: path.join(parent, token + ".new"), backup: path.join(parent, token + ".bak"), existed: !!stat, replaced: false };
-}
-
-async function recoverReplaced(staged) {
-  const recoveryErrors = [];
-
-  for (const entry of staged.toReversed()) {
-    if (!entry.replaced) continue;
-
-    try {
-      if (entry.existed) await fs.rename(entry.backup, entry.target);
-      else await fs.unlink(entry.target);
-    } catch (err) {
-      // Keep the backup if recovery fails; never delete the remaining original.
-      entry.keepBackup = true;
-      recoveryErrors.push(entry.target + ": " + err.message + " (backup: " + entry.backup + ")");
-    }
-  }
-
-  return recoveryErrors;
-}
-
-async function cleanupStaged(staged, failed, createdDirs) {
-  for (const entry of staged) {
-    // A successful rename consumed the temporary path. These are known
-    // files, so unlink avoids rm's extra type probe; missing files stay benign.
-    if (!entry.replaced) await fs.unlink(entry.temporary).catch(() => {});
-
-    if (entry.existed && !entry.keepBackup) await fs.unlink(entry.backup).catch(() => {});
-  }
-
-  if (failed) for (const dir of createdDirs.toReversed()) await fs.rmdir(dir).catch(() => {});
-}
-
-async function assertExpectedSignature(vfs, logicalPath, target, stat) {
-  if (!vfs.expected.has(logicalPath)) return;
-  const current = stat ? await fileSignature(target, vfs.signal) : null;
-
-  if (!sameSignature(current, vfs.expected.get(logicalPath))) {
-    throw new Error("write conflict: file changed since it was read: " + logicalPath + "; read it again before retrying");
-  }
-}
-
-async function installStaged(vfs, staged) {
-  for (const entry of staged) {
-    vfs.signal?.throwIfAborted();
-    await fs.rename(entry.temporary, entry.target);
-    entry.replaced = true;
-  }
-
-  for (const entry of staged) {
-    vfs.expected.set(entry.logicalPath, textSignature(entry.content));
-  }
-
-  // Canonical commit destinations must not rewrite established event paths
-  // for newly created files, whose callers supplied a logical cwd spelling.
-  if (staged.length) vfs.onNewFile?.(staged.map(entry => entry.existed ? entry.target : entry.logicalPath));
-}
-
-async function failCommit(vfs, staged, error) {
-  const recoveryErrors = await recoverReplaced(staged);
-  // Keep CAS baselines: a failed commit must not forgive conflicts on files it
-  // never touched. If recovery left disk diverging from a baseline, the next
-  // write to that path fails loudly and forces a re-read instead of silently
-  // re-capturing unknown bytes as the new truth.
-
-  if (recoveryErrors.length) vfs.mutations.recoveryFailed = true;
-
-  if (recoveryErrors.length) vfs.onNewFile?.(null);
-
-  if (recoveryErrors.length) throw new AggregateError([error, ...recoveryErrors.map(message => new Error(message))], "commit failed: " + error.message + "; recovery failed: " + recoveryErrors.join("; "));
-  throw error;
-}
 
 export class CausalVfs {
   constructor(onNewFile, validateWrite) {
@@ -275,7 +41,7 @@ export class CausalVfs {
   async read(target, { preserveRead = false, maxBytes, label = "read input", strict = true } = {}) {
     const overlay = this.getOverlay(target);
 
-    if (overlay !== undefined) return overlayOrThrow(overlay, maxBytes, label);
+    if (overlay !== undefined) return overlayOrThrow(overlay, maxBytes, label, target);
 
     // External editors and captured tools can change a file between any two reads.
     // Open once with O_NONBLOCK so a FIFO or device cannot park a host I/O worker.
@@ -288,7 +54,7 @@ export class CausalVfs {
         assertReadableFile(stat, target);
         bytes = maxBytes === undefined
           ? await file.readFile({ signal: this.signal })
-          : await readLimitedBytes(file, stat, maxBytes, label, this.signal);
+          : await readLimitedBytes(file, stat, maxBytes, label, this.signal, () => tooLargeRead(label,maxBytes,target));
         if (!sameFileVersion(stat, await file.stat())) throw new Error("file changed while reading: " + target);
       } finally { await file.close(); }
 

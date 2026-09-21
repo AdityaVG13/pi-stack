@@ -1,156 +1,21 @@
-import { createRequire } from "node:module";
+import {programParameters} from './src/contract/program.js';
+import {progressEmitter} from './src/ui/progress.js';
+export {progressEmitter} from './src/ui/progress.js';
+import {result,errorText,successText,fitOutput,attachReceipts,throwIfFailed} from './src/output/outcome.js';
+
 import { runProgramBatch } from "./src/runtime/program-batch.js";
 import { REFERENCE } from "./src/runtime/reference.js";
-import { isString, isFunction } from "./src/shared/decode.js";
+import { errorMessage, isString } from "./src/shared/decode.js";
 import { loadConfig } from "./src/config/config.js";
 import { createHostBridge } from "./src/bridge/host-bridge.js";
-import { truncateChars, formatBoundedStringArray } from "./src/output/format.js";
+
 import { runGuestProgram, warmGuestWorker, stopWarmGuestWorker } from "./src/runtime/runtime.js";
 import { renderSupernovaCall, renderSupernovaResult } from "./src/ui/render.js";
 
 export { renderSupernovaCall, renderSupernovaResult };
 
-// Sync only, never top-level await. Dynamic import of host/deps hung OMP plugin load.
-const require = createRequire(import.meta.url);
-
-let Type;
-
-try {
-  Type = require("typebox").Type;
-} catch {
-  Type = {
-    Object: (props, opts) => ({ type: "object", properties: props || {}, additionalProperties: false, ...opts }),
-    String: (opts) => ({ type: "string", ...opts }),
-    Unknown: (opts) => ({ ...opts }),
-    Array: (items, opts) => ({ type: "array", items, ...opts }),
-    Integer: (opts) => ({ type: "integer", ...opts }),
-    Optional: (s) => ({ ...s }),
-    Boolean: (opts) => ({ type: "boolean", ...opts }),
-  };
-}
-
-function result(text, details) {
-  return { content: [{ type: "text", text }], details };
-}
-
-const PROGRESS_FRAME_MS = 80;
-
-/**
- * Live trace updates for the card. The first update is immediate (seeds the result slot);
- * later ones are coalesced to one host re-render per frame so a tight loop of nova.calls
- * is not throttled by the TUI. A throwing host callback must never break the run.
- */
-export function progressEmitter(onUpdate) {
-  if (!isFunction(onUpdate)) return Object.assign(() => {}, { flush() {} });
-  let pending = null;
-  let timer = null;
-  let lastSent = -Infinity;
-
-  const send = () => {
-    timer = null;
-
-    if (pending === null) return;
-    // Snapshot only at emission, not on every tool event. Completed records must
-    // not mutate a previously emitted frame while Pi is still consuming it.
-    const trace = pending.map(record => ({ ...record }));
-    pending = null;
-    lastSent = performance.now();
-
-    try {
-      onUpdate({ content: [{ type: "text", text: "" }], details: { trace, running: true } });
-    } catch {}
-  };
-
-  const emit = (trace) => {
-    pending = trace;
-
-    if (timer !== null) return;
-    const wait = PROGRESS_FRAME_MS - (performance.now() - lastSent);
-
-    if (wait <= 0) send();
-    else {
-      timer = setTimeout(send, wait);
-      timer.unref?.();
-    }
-  };
-
-  emit.flush = () => {
-    if (timer !== null) clearTimeout(timer);
-    pending = null;
-    timer = null;
-  };
-
-  return emit;
-}
-
 function sessionStats({ programs, returnedChars }) {
   return `this session: ${programs} programs · ${returnedChars} output characters (not token counts)`;
-}
-
-function logsBlock(outcome, tail = "") {
-  if (!outcome.logs?.length && !outcome.logTruncated) return "";
-
-  return `\n--- logs${outcome.logTruncated ? " [logs truncated]" : ""}\n${outcome.logs?.join("\n") ?? ""}${tail}`;
-}
-
-function mutationText(outcome) {
-  const m = outcome.mutations;
-
-  if (!m) return "";
-  const external = m.external ? "; external calls attempted=" + m.external + ", their side effects cannot be rolled back" : "";
-  const uncertain = m.pendingCommits || m.recoveryFailed ? "; filesystem outcome uncertain: inspect disk and any recovery backups before retrying" : "";
-
-  return "\nmutations: committed=" + m.committed + " rolledBack=" + m.rolledBack + " (file versions)" + external + uncertain;
-}
-
-function mutationReceipts(trace) {
-  if (!Array.isArray(trace)) return "";
-
-  return trace
-    .filter(row => row?.ok && (row.name === "write" || row.name === "edit") && isString(row.resultText) && row.resultText)
-    .map(row => row.resultText)
-    .join("\n");
-}
-
-// Corrective hint, emitted only when a turn actually split. Independent work
-// belongs in one program: a split cannot use the single prewarmed worker and pays
-// one extra spawn per sibling. Costs nothing until it fires, so it needs no room in
-// the tool definition.
-function splitTurnHint(outcome) {
-  return outcome.overlappedTurn ? ` (${outcome.overlappedTurn} supernova calls ran at once; independent work belongs in one program)` : "";
-}
-
-function errorText(outcome, call) {
-  return `error #${call} ${outcome.wallMs}ms${outcome.returnTruncated ? " [output truncated]" : ""}${mutationText(outcome)}${splitTurnHint(outcome)}
-error: ${outcome.error}${logsBlock(outcome)}`;
-}
-
-function successText(outcome, call) {
-  const truncated = outcome.returnTruncated ? " [return truncated]" : "";
-  const hint = outcome.undefinedReturn ? " (no return statement; add `return` to get a value)" : "";
-  const m = outcome.mutations;
-  const showMutations = m && (m.committed || m.rolledBack || m.external || m.pendingCommits || m.recoveryFailed) ? mutationText(outcome) : "";
-
-  return `ok #${call} ${outcome.wallMs}ms${truncated}${showMutations}${splitTurnHint(outcome)}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
-}
-
-function fitOutput(outcome, call, limit, format) {
-  let text = format(outcome, call);
-
-  if (text.length <= limit) return text;
-  outcome.returnTruncated = true;
-  const wrapper = format({ ...outcome, resultText: "", logs: [] }, call);
-  const room = Math.max(256, limit - wrapper.length);
-
-  if (Array.isArray(outcome.result) && outcome.result.length && outcome.result.every(isString)) {
-    outcome.resultText = formatBoundedStringArray(outcome.result, room);
-  } else if (isString(outcome.resultText) && outcome.resultText.length > room) {
-    outcome.resultText = truncateChars(outcome.resultText, room, "output").text;
-  }
-
-  text = format(outcome, call);
-
-  return text.length <= limit ? text : truncateChars(text, limit, "output").text;
 }
 
 const TOOL_DESCRIPTION = REFERENCE;
@@ -197,7 +62,7 @@ export function registerCodeMode(pi) {
 
   function makeNovaApi(runBridge, cancel) {
     return {
-      call: (name, args) => runBridge.call(name, args),
+      call: (name, args, onItem) => runBridge.call(name, args, onItem),
       callMany: (calls) => runBridge.callMany(calls),
       speculateBegin: () => runBridge.barrier(() => runBridge.beginSpeculation()),
       speculateCommit: () => runBridge.barrier(() => runBridge.commitSpeculation()),
@@ -280,24 +145,6 @@ export function registerCodeMode(pi) {
     scheduleWarm(runController);
   }
 
-  function attachReceipts(outcome, trace) {
-    if (outcome.ok && outcome.result === undefined) {
-      const receipts = mutationReceipts(trace);
-
-      if (receipts) {
-        outcome.resultText = receipts;
-        outcome.undefinedReturn = false;
-      }
-    }
-  }
-
-  function throwIfFailed(outcome, visible, response) {
-    if (outcome.ok) return response;
-    const error = new Error(visible);
-    Object.defineProperty(error,"supernovaResult",{value:response});
-    throw error;
-  }
-
   function packExecuteResult(outcome, call, runBridge, budget, runOpts, peakSeen) {
     if (budget) budget.logLines += outcome.logs?.length ?? 0;
     outcome.overlappedTurn = !runOpts?.parallel && peakSeen > 1 ? peakSeen : 0;
@@ -322,19 +169,7 @@ export function registerCodeMode(pi) {
     label: "Supernova",
     description: TOOL_DESCRIPTION,
     promptSnippet: "read, write, edit, bash",
-    parameters: Type.Object({
-      code: Type.Optional(Type.String({ maxLength: config.maxCodeChars ?? 48000 })),
-      file: Type.Optional(Type.String({ minLength: 1 })),
-      data: Type.Optional(Type.Unknown()),
-      timeoutMs: Type.Optional(Type.Integer({ minimum: 1000 })),
-      programs: Type.Optional(Type.Array(Type.Object({
-        code: Type.Optional(Type.String({ maxLength: config.maxCodeChars ?? 48000 })),
-        file: Type.Optional(Type.String({ minLength: 1 })),
-        data: Type.Optional(Type.Unknown()),
-      }, {additionalProperties:false}), {minItems:1,maxItems:32})),
-      parallel: Type.Optional(Type.Boolean()),
-      mergeData: Type.Optional(Type.Boolean()),
-    }),
+    parameters: programParameters(config),
     // One self-owned result frame is shared by Pi and OMP; renderCall stays empty
     // so separate call/result slots cannot duplicate the lifecycle card.
     renderShell: "self",
@@ -366,7 +201,7 @@ export function registerCodeMode(pi) {
         runBridge.close();
 
         while (runBridge.getOverlayDepth()) runBridge.rollbackSpeculation();
-        outcome = { ok: false, error: error instanceof Error ? error.message : String(error), logs: outcome?.logs ?? [], wallMs: Math.round(performance.now() - started) };
+        outcome = { ok: false, error: errorMessage(error), logs: outcome?.logs ?? [], wallMs: Math.round(performance.now() - started) };
       } finally {
         peakSeen = Math.max(peakSeen, overlapPeak);
         inFlight -= 1;

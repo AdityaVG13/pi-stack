@@ -1,5 +1,5 @@
 import * as fs from "node:fs/promises";
-import { isString } from "../shared/decode.js";
+
 import { normalizeBash } from "../contract/bash.js";
 import { sourceForReferences } from "../fs/source-window.js";
 import { resolveWorkspacePath, runCommand, clearPathCache } from "../fs/workspace.js";
@@ -10,38 +10,13 @@ export function createBash(ctx) {
     return stdout && stderr ? stdout + (stdout.endsWith("\n") ? "" : "\n") + stderr : stdout || stderr;
   }
 
-  function isLiteralArgv(params) {
-    return Array.isArray(params?.args) && process.platform !== "win32" && params.args.length === Object.keys(params.args).length && params.args.every(isString);
-  }
-
-  function bashCommand(params, literal) {
-    if (params?.command !== undefined && !isString(params.command)) throw new Error("bash command must be a string");
-    if (literal && (!isString(params.command) || params.args.some(arg => !isString(arg)))) throw new Error("bash argv requires a command string and an array of string args");
-    const command = String(params?.command ?? "");
-
-    if (!command.trim()) throw new Error("bash requires command");
-
-    return command;
-  }
-
-  function parseBash(params) {
-    const literal = isLiteralArgv(params);
-    const command = bashCommand(params, literal);
-
-    return { literal, command, argv: literal ? [command, ...params.args] : ["bash", "-c", command] };
-  }
-
   async function bash(params, signal) {
       params = normalizeBash(params);
       const cwd = getCwd();
-      const { literal, command, argv } = parseBash(params);
-      const targetCwd = params?.cwd ? await resolveWorkspacePath(cwd, params.cwd, "bash cwd", true) : cwd;
-
-      if (params?.cwd !== undefined) {
-        const st = await fs.stat(targetCwd).catch(() => null);
-
-        if (!st?.isDirectory()) throw new Error("bash cwd is not a directory: " + params.cwd);
-      }
+      const command = String(params.command);
+      const literal = Array.isArray(params.args);
+      const argv = literal ? [command, ...params.args] : ["bash", "-c", command];
+      const targetCwd = await commandCwd(params, cwd);
 
       const transactionBarrier = await vfs.prepareExternalMutation("bash");
       let res;
@@ -83,4 +58,13 @@ export function createBash(ctx) {
   }
 
   return { bash };
+}
+
+async function commandCwd(params, cwd) {
+  const target = params.cwd ? await resolveWorkspacePath(cwd, params.cwd, "bash cwd", true) : cwd;
+  if (params.cwd !== undefined) {
+    const stat = await fs.stat(target).catch(() => null);
+    if (!stat?.isDirectory()) throw new Error("bash cwd is not a directory: " + params.cwd);
+  }
+  return target;
 }

@@ -26,10 +26,9 @@ export function mapChangedChildren(value, visit, context) {
   if (!array && !isObject(value)) return value;
   let out = value;
 
-  for (const key of array ? value.keys() : Object.keys(value)) {
-    if (array && !(key in value)) continue;
+  for (const key of childKeys(value)) {
     const before = value[key];
-    const after = visit(before, context);
+    const after = visit(before, context, key);
 
     if (Object.is(before, after)) continue;
     if (out === value) out = array ? value.slice() : { ...value };
@@ -47,6 +46,15 @@ export function assertModelImageMime(mimeType) {
   if (!MODEL_IMAGE_MIMES.has(mimeType)) {
     throw new Error("unsupported image attachment type " + mimeType + "; model images require PNG, JPEG, GIF, or WebP. Convert the image to PNG before reading/returning it; no image attached");
   }
+}
+
+/** Node's base64 decoder is permissive; model attachments must not be. */
+export function decodeImageData(data) {
+  const bytes = Buffer.from(data,"base64");
+  if (!data || bytes.toString("base64") !== String(data)) {
+    throw new Error("invalid image base64; use canonical padded base64 without a data-URL prefix or extra characters; no image attached");
+  }
+  return bytes;
 }
 
 const MAX_DEPTH = 64;
@@ -85,7 +93,7 @@ function plainFromCollection(value, seen, depth) {
   if (value instanceof Map) return plainFromMap(value, seen, depth);
   const out = Object.create(null);
 
-  for (const k of Object.keys(value)) out[k] = toPlain(value[k], seen, depth + 1);
+  for (const k of childKeys(value)) out[k] = toPlain(value[k], seen, depth + 1);
 
   return out;
 }
@@ -102,9 +110,7 @@ function functionLabel(value) {
 }
 
 function plainByTag(value, tag) {
-  if (tag === "[object String]") return { hit: true, out: value.valueOf() };
-
-  if (tag === "[object Number]" || tag === "[object Boolean]") return { hit: true, out: value.valueOf() };
+  if (["[object String]", "[object Number]", "[object Boolean]"].includes(tag)) return { hit: true, out: value.valueOf() };
 
   if (tag === "[object BigInt]") return { hit: true, out: value.toString() + "n" };
 
@@ -168,4 +174,12 @@ export function toPlain(value, seen = new Set(), depth = 0) {
   return withSeen(value, seen, () => plainFromCollection(value, seen, depth));
 }
 
-// ---- RPC to the host thread ----
+export function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+// Arrays visit present indexes (including inherited ones), not extra properties.
+function* childKeys(value) {
+  if (!Array.isArray(value)) { yield* Object.keys(value); return; }
+  for (const key of value.keys()) if (key in value) yield key;
+}
