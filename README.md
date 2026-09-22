@@ -1,22 +1,24 @@
 # pi-stack
 
-Pi / OMP packages for [pi.dev](https://pi.dev) and [omp.sh](https://omp.sh). Each folder under `packages/` is its own npm package — install what you need, skip the rest.
+Pi / OMP packages for [pi.dev](https://pi.dev) and [omp.sh](https://omp.sh). Each folder under `packages/` is its own npm package. Install what you need and skip the rest.
 
 | Package | Does | Install |
 |---------|------|---------|
 | [pi-papercuts](./packages/pi-papercuts) | Agent files friction notes into `.papercuts.jsonl` and keeps going | `pi install npm:pi-papercuts` · `omp install npm:pi-papercuts` |
 | [pi-deferred-context-engine](./packages/pi-deferred-context-engine) | Hides inactive tool/skill noise; promotes matches for one run via `search_tools` | `pi install npm:pi-deferred-context-engine` · `omp install npm:pi-deferred-context-engine` |
 | [pi-supernova](./packages/pi-supernova) | One CodeMode invocation with `read`, `edit`, `write`, and `bash` inside; automatic read batching and ordered mutations | `pi install npm:pi-supernova` · `omp install npm:pi-supernova` |
+| [pi-lakers-theme](./packages/pi-lakers-theme) | Forum purple and gold on black (Pi only) | `pi install npm:pi-lakers-theme` |
+| [pi-rotator](./packages/pi-rotator) | Multi-account rotation for every provider family: balanced, failover, or round-robin | `pi install npm:pi-rotator` |
 
 If you use deferred-context-engine, install it **last** so it sees tools other extensions registered. **pi-supernova** exposes one `supernova` tool on Pi and OMP: inline `code`, a saved `file`, or a `programs` batch (sequential or `parallel:true`), with optional literal `data`. The four commands live inside CodeMode, not as native-tool replacements. See its README for context, security, and host-verification boundaries.
-
-the UI in the TUI for pi-supernova does NOT look good, i'll try and fix it with Astra
 
 ```bash
 # Pi
 pi install npm:pi-supernova
 pi install npm:pi-papercuts
 pi install npm:pi-deferred-context-engine
+pi install npm:pi-lakers-theme
+pi install npm:pi-rotator
 
 # OMP
 omp install npm:pi-supernova
@@ -26,10 +28,10 @@ omp install npm:pi-deferred-context-engine
 
 Needs Pi or OMP and Node 22+. Supernova source lookups also require `rg` on PATH. Package details live in each folder's README.
 
-**Supernova 0.9.0** keeps complete text/JSON data inside programs, overlaps
+**Supernova 0.9.1** keeps complete text/JSON data inside programs, overlaps
 mutations to distinct files, and clips display text without stopping batches.
 Image attachments are fully decoded in an isolated, bounded process before
-model delivery. The package README records the 315-test Node/Bun results,
+model delivery. The package README records the 316-test Node/Bun results,
 actual Pi/OMP and clean-install checks, and remaining coverage limits.
 
 See the [API and examples](./packages/pi-supernova/README.md),
@@ -47,6 +49,8 @@ git clone https://github.com/AdityaVG13/pi-stack.git
 pi install ./pi-stack/packages/pi-supernova
 pi install ./pi-stack/packages/pi-papercuts
 pi install ./pi-stack/packages/pi-deferred-context-engine
+pi install ./pi-stack/packages/pi-lakers-theme
+pi install ./pi-stack/packages/pi-rotator
 
 # OMP
 omp install ./pi-stack/packages/pi-supernova
@@ -67,7 +71,7 @@ omp install git:github.com/AdityaVG13/pi-stack
 
 | Project | What it does | Links |
 |---------|--------------|--------|
-| **ast-sgrep** | Hybrid lexical + AST graph search -- structure-aware code search, not only text grep | [repo](https://github.com/AdityaVG13/ast-sgrep) · [`ast-sgrep`](https://www.npmjs.com/package/ast-sgrep) · Pi: [`pi-ast-sgrep`](https://www.npmjs.com/package/pi-ast-sgrep) (`pi install npm:pi-ast-sgrep`) |
+| **ast-sgrep** | Hybrid lexical plus AST graph search: structure-aware code search, not only text grep | [repo](https://github.com/AdityaVG13/ast-sgrep) · [`ast-sgrep`](https://www.npmjs.com/package/ast-sgrep) · Pi: [`pi-ast-sgrep`](https://www.npmjs.com/package/pi-ast-sgrep) (`pi install npm:pi-ast-sgrep`) |
 
 npm profile: [adityavg13](https://www.npmjs.com/~adityavg13). Gallery search: [keywords:pi-package](https://www.npmjs.com/search?q=keywords:pi-package).
 
@@ -77,6 +81,8 @@ npm profile: [adityavg13](https://www.npmjs.com/~adityavg13). Gallery search: [k
 cd packages/pi-papercuts && npm test
 cd packages/pi-deferred-context-engine && npm install && npm test
 cd packages/pi-supernova && npm test
+cd packages/pi-lakers-theme && npm test
+cd packages/pi-rotator && npm test
 # all from repo root:
 npm test
 ```
@@ -99,13 +105,16 @@ Publish (each package on its own):
 cd packages/pi-papercuts && npm test && npm publish --access public
 cd packages/pi-deferred-context-engine && npm test && npm publish --access public
 cd packages/pi-supernova && npm test && npm publish --access public
+cd packages/pi-lakers-theme && npm test && npm publish --access public
+cd packages/pi-rotator && npm test && npm publish --access public
 ```
 
 `node scripts/release-check.mjs` runs a preflight for published packages.
 
 ## Gotchas
 
-- Deferred-context-engine defaults pin stock Pi tools (`read`, `bash`, …) and `papercuts` when that package is installed. Empty `replaceAlwaysActive` leaves only `search_tools` active -- read its README before rewriting config.
+- Deferred-context-engine defaults pin stock Pi tools (`read`, `bash`, …) and `papercuts` when that package is installed. Empty `replaceAlwaysActive` leaves only `search_tools` active, so read its README before rewriting config.
+- pi-rotator enters standby instead of routing when another router is installed, and it routes Cursor only through pi-multi-account transport. See its README and LAYERING.md.
 - Papercuts only logs when the agent calls it; it does not auto-detect failures. Outside a git repo the log goes to `~/.papercuts/log.jsonl` unless you set `PAPERCUTS_FILE`.
 - Papercuts/DCE release limits: [docs/RESIDUAL-RISKS.md](./docs/RESIDUAL-RISKS.md). Supernova has its own [security and host boundary](./packages/pi-supernova/README.md#security-and-host-boundary).
 

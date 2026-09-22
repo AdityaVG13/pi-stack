@@ -1,36 +1,42 @@
 # pi-lakers-theme
 
-Forum purple and gold on black, for [Pi](https://pi.dev).
-Ships one theme: `lakers`.
+[![npm](https://img.shields.io/npm/v/pi-lakers-theme.svg)](https://www.npmjs.com/package/pi-lakers-theme)
+[![license](https://img.shields.io/npm/l/pi-lakers-theme.svg)](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-lakers-theme/LICENSE)
+[![pi-theme](https://img.shields.io/badge/pi--package-theme-552583)](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md)
 
-Design: official Lakers purple `#552583` owns structure (prompt-box border,
-selections, raised surfaces) and Lakers gold `#FDB927` owns everything meant
-to be read (tool titles, links, headings, cursor). The purple is too dark for
-text on black, so keywords and operators use derived bright/mid violets.
-Diffs and diagnostics keep functional green/red/yellow — team colors never
-override usability signals.
-
-## Install
+Forum purple and gold on black, for [Pi](https://pi.dev). Ships one theme: `lakers`.
 
 ```bash
 pi install npm:pi-lakers-theme
 ```
 
-Then activate it (Pi reads `theme` from settings at startup):
+---
+
+## Activate
+
+Pi reads `theme` from settings at startup. Add this to `~/.pi/agent/settings.json`, then restart Pi:
 
 ```json
 { "theme": "lakers" }
 ```
 
-in `~/.pi/agent/settings.json`, and restart Pi.
+From a checkout:
 
 ```bash
-# from a checkout
 pi install ./pi-stack/packages/pi-lakers-theme
 ```
 
-Pi only for now — OMP theme support is unverified, so there is no `omp`
-manifest yet. Unofficial tribute; not affiliated with the NBA or the Lakers.
+## Design
+
+Official Lakers purple `#552583` owns structure: prompt-box border, selections, and raised surfaces. Lakers gold `#FDB927` owns everything meant to be read: tool titles, links, headings, and the cursor. The purple is too dark for text on black, so keywords and operators use derived bright and mid violets.
+
+Team colors never override usability signals. Diffs and diagnostics keep functional green, red, and yellow, and the theme covers the full surface: syntax highlighting, Markdown rendering, diffs, tool states, and every thinking level indicator.
+
+## Compatibility
+
+Pi only for now. OMP theme support is unverified, so there is no `omp` manifest yet.
+
+Unofficial tribute. Not affiliated with the NBA or the Lakers.
 
 ## Develop
 
@@ -38,8 +44,7 @@ manifest yet. Unofficial tribute; not affiliated with the NBA or the Lakers.
 npm test
 ```
 
-The test validates every theme file: required `name`/`colors`, known sections
-only, and every color value either empty, `#rrggbb`, or a defined `vars` ref.
+The test validates every theme file: required `name`/`colors`, known sections only, and every color value either empty, `#rrggbb`, or a defined `vars` reference.
 
 ## License
 
