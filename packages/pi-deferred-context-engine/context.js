@@ -19,13 +19,12 @@ function visibleSkills(skills = []) {
   return skills.filter((skill) => !isPromptHiddenSkill(skill));
 }
 
+const XML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" };
+
+// Single pass: each source char maps once, inserted entities are never
+// rescanned — byte-identical to the chained five-replace version.
 function escapeXml(value) {
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
+  return String(value).replace(/[&<>"']/g, (char) => XML_ESCAPES[char]);
 }
 
 export function formatSkillIndex(skills = []) {
@@ -125,15 +124,27 @@ function optimizeSystemPromptImpl(systemPrompt, options = {}, config = {}) {
     const pinnedNames = new Set(config.activeSkills || []);
     const pinned = promptSkills.filter((skill) => pinnedNames.has(skill.name));
     deferredSkillCount = promptSkills.length - pinned.length;
-    const pinnedIndex = pinned.length > 0 ? formatSkillIndex(pinned) : "";
-    // Verbose first (Pi stock), then compressed form if present.
-    for (const candidate of [formatSkillIndex(promptSkills), formatCompressedSkillIndex(promptSkills)]) {
-      if (!candidate) continue;
-      const index = prompt.indexOf(candidate);
-      if (index < 0) continue;
+    // Verbose first (Pi stock), then compressed form if present. Indexes
+    // build lazily: the common hit never pays for the form that missed,
+    // and the pinned re-insert only builds when a splice happens.
+    let candidate = "";
+    let at = -1;
+    const verbose = formatSkillIndex(promptSkills);
+    if (verbose) {
+      at = prompt.indexOf(verbose);
+      if (at >= 0) candidate = verbose;
+    }
+    if (!candidate) {
+      const compressed = formatCompressedSkillIndex(promptSkills);
+      if (compressed) {
+        at = prompt.indexOf(compressed);
+        if (at >= 0) candidate = compressed;
+      }
+    }
+    if (candidate) {
+      const pinnedIndex = pinned.length > 0 ? formatSkillIndex(pinned) : "";
       deferredSkillChars = candidate.length - pinnedIndex.length;
-      prompt = prompt.slice(0, index) + pinnedIndex + prompt.slice(index + candidate.length);
-      break;
+      prompt = prompt.slice(0, at) + pinnedIndex + prompt.slice(at + candidate.length);
     }
   }
 

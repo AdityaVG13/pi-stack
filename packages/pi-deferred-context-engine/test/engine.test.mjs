@@ -417,3 +417,57 @@ test("blockedPrefixes deny without listing every name", () => {
   assert.ok(controller.configuredBlockedNames().includes("mcp_bad_delete"));
   assert.deepEqual(controller.promote(["mcp_bad_delete"]).blocked, ["mcp_bad_delete"]);
 });
+
+test("hasDeferred matches catalog deferred rows across the lifecycle", () => {
+  const pi = mockPi([{ name: "weather_lookup", description: "Look up city weather" }]);
+  const controller = createDeferredController(pi, config);
+  const parity = () =>
+    assert.equal(controller.hasDeferred(), controller.catalog({ state: "deferred" }).length > 0);
+
+  controller.synchronize({ resetPromotions: true });
+  assert.equal(controller.hasDeferred(), true);
+  parity();
+  // Promote every deferred tool: nothing deferred, parity holds at false.
+  const deferred = controller.catalog({ state: "deferred" }).map((row) => row.name);
+
+  assert.ok(deferred.length > 0);
+  controller.promote(deferred);
+  assert.equal(controller.hasDeferred(), false);
+  parity();
+  // Demote one back: deferred again.
+  controller.demote([deferred[0]]);
+  assert.equal(controller.hasDeferred(), true);
+  parity();
+});
+
+test("hasDeferred honors catalog precedence, not the raw deferred set", () => {
+  // Blocked names never surface as deferred rows: with every long-tail tool
+  // blocked, both the catalog and hasDeferred report none.
+  const pi = mockPi();
+  const controller = createDeferredController(pi, {
+    ...config,
+    blockedTools: ["list_capabilities", "promote_tools", "demote_tools"],
+    blockedPrefixes: [],
+  });
+
+  controller.synchronize({ resetPromotions: true });
+  assert.deepEqual(controller.catalog({ state: "deferred" }), []);
+  assert.equal(controller.hasDeferred(), false);
+});
+
+test("hasDeferred ignores deferred names the host kept active", () => {
+  // Host setActiveTools silently no-ops: demote records the name but the
+  // tool stays active, so catalog state (and hasDeferred) must stay
+  // non-deferred even though the raw set is non-empty — a naive size
+  // check lies here too.
+  const pi = mockPi();
+
+  pi.setActiveTools = () => {};
+  const controller = createDeferredController(pi, config);
+
+  controller.demote(["list_capabilities"]);
+  assert.ok(pi.getActiveTools().includes("list_capabilities"));
+  assert.equal(controller.status().deferred, 1);
+  assert.deepEqual(controller.catalog({ state: "deferred" }), []);
+  assert.equal(controller.hasDeferred(), false);
+});

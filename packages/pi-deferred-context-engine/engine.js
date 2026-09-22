@@ -165,24 +165,28 @@ export function createDeferredController(pi, initialConfig) {
       } catch (error) {
         lastSetError = error instanceof Error ? error.message : String(error);
       }
+    } else {
+      // Identical content, no host round-trip: current already equals
+      // normalized, so re-querying the host only re-reads the same set.
+      return current;
     }
     return activeNames();
   }
 
   /** Pins (alwaysActive) that no registered tool satisfies — loud, not silent. */
   function missingPinNames(registered) {
-    const names = registered ?? allNames();
-    return [...pinNames()].filter((name) => !names.includes(name)).sort();
+    const known = new Set(registered ?? allNames());
+    return [...pinNames()].filter((name) => !known.has(name)).sort();
   }
 
-  function finishSynchronize(active, names) {
+  function finishSynchronize(active, names, blocked) {
     applyCompaction();
     const missingPins = missingPinNames(names);
-    const blocked = [...blockedNameSet(names)].sort();
+    const blockedList = [...blocked].sort();
     const out = {
       active,
       deferred: [...deferred].sort(),
-      blocked,
+      blocked: blockedList,
       promoted: [...promoted].sort(),
     };
     if (sessionUnblocked.size > 0) out.sessionUnblocked = [...sessionUnblocked].sort();
@@ -243,15 +247,16 @@ export function createDeferredController(pi, initialConfig) {
 
     // Keep currently active non-deferred, non-blocked tools; force pins into the set.
     const next = activeNames().filter((name) => !deferred.has(name) && !blocked.has(name));
+    const known = new Set(names);
     for (const name of pins) {
-      if (names.includes(name) && !blocked.has(name)) next.push(name);
+      if (known.has(name) && !blocked.has(name)) next.push(name);
     }
     // neverDefer alone does not force inactive tools active — that is alwaysActive's job.
 
     const active = setActiveIfChanged(next);
     return active != null && isFunction(active.then)
-      ? active.then((resolved) => finishSynchronize(resolved, names))
-      : finishSynchronize(active, names);
+      ? active.then((resolved) => finishSynchronize(resolved, names, blocked))
+      : finishSynchronize(active, names, blocked);
   }
 
   function setConfig(nextConfig, { resetPromotions = true, clearSessionUnblocks = true } = {}) {
@@ -343,6 +348,23 @@ export function createDeferredController(pi, initialConfig) {
       }
     }
     return finish();
+  }
+
+  /**
+   * True when any registered tool resolves to deferred catalog state — the
+   * per-turn blurb gate, without building rows. Same precedence as
+   * formatCatalog (active > blocked > deferred): stale deferred names and
+   * host-failure overlaps never count. Short-circuits on the first hit.
+   */
+  function hasDeferred() {
+    const active = new Set(activeNames());
+    const blocked = blockedNameSet();
+    for (const tool of allTools()) {
+      const name = tool.name ?? "";
+      if (active.has(name) || blocked.has(name) || !deferred.has(name)) continue;
+      return true;
+    }
+    return false;
   }
 
   function catalog({ filter, state } = {}) {
@@ -449,6 +471,7 @@ export function createDeferredController(pi, initialConfig) {
     compactionStats,
     configuredBlockedNames,
     demote,
+    hasDeferred,
     isNameBlocked: nameIsBlocked,
     promote,
     promotedNames,

@@ -551,8 +551,9 @@ export default function piDeferredContextEngine(pi) {
     let systemPrompt = optimized.systemPrompt;
     // Fixed guidance only — do not dump the full deferred catalog (that undoes schema savings).
     // Admin tools (promote_tools, list_capabilities) may themselves be deferred; search_tools is the spine.
-    const deferredCount = controller.catalog({ state: "deferred" }).length;
-    const blurb = deferredCount > 0 ? deferredToolsBlurb(deferredCount) : "";
+    // Presence only (the blurb carries no count): hasDeferred answers from
+    // sets, without building and sorting catalog rows.
+    const blurb = controller.hasDeferred() ? deferredToolsBlurb() : "";
     if (blurb) systemPrompt += "\n\n" + blurb;
     if (systemPrompt === promptText) return {};
 
