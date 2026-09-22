@@ -15,17 +15,15 @@ function inScope(filePath, dir, includeHidden) {
   return !parts.includes(".git") && (includeHidden || !parts.some(part => part.startsWith(".") && part.length > 1));
 }
 
-function makeCandidate(filePath, dir, query, tokens, flags) {
+function makeCandidate(filePath, dir, query, tokens, flags, needles = tokens.map(token => stem(token).slice(0, MAX_NEEDLE_CHARS))) {
   const relative = path.relative(dir, filePath);
   const lower = relative.toLowerCase();
   const base = path.basename(lower);
 
   const extension = path.extname(base);
   const stemBase = extension ? base.slice(0, -extension.length) : base;
-  const exactPath = lower === query.toLowerCase() || base === query.toLowerCase()
-    || stemBase === query.toLowerCase();
-
-  const needles = tokens.map(token => stem(token).slice(0, MAX_NEEDLE_CHARS));
+  const queryLower = query.toLowerCase();
+  const exactPath = lower === queryLower || base === queryLower || stemBase === queryLower;
 
   return { path: filePath, pathScore: scorePathTopology(relative, tokens, flags), exactPath,
     pathCoverage: tokens.filter((token, index) => lower.includes(needles[index] ?? token)).length,
@@ -120,7 +118,7 @@ function parseRgRecord(line, truncated, isLast) {
   }
 }
 
-function absorbRgHit(candidates, record, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles) {
+function absorbRgHit(candidates, record, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles) {
   if (record.type !== "match" && record.type !== "context") return;
   const data = record.data;
 
@@ -131,21 +129,21 @@ function absorbRgHit(candidates, record, dir, includeHidden, overlayText, candid
   let candidate = candidates.get(filePath);
 
   if (!candidate) {
-    candidate = makeCandidate(filePath, candidateRoot, query, tokens, flags);
+    candidate = makeCandidate(filePath, candidateRoot, query, tokens, flags, candidateNeedles);
     candidates.set(filePath, candidate);
   }
 
   inspectLine(candidate, data.line_number, data.lines.text, query, tokens, needles, record.type === "match");
 }
 
-function overlayCandidates(candidates, pendingPaths, overlayText, candidateRoot, query, tokens, flags, needles, signal) {
+function overlayCandidates(candidates, pendingPaths, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles, signal) {
   let overlayTruncated = false;
 
   for (const filePath of pendingPaths) {
     const pending = overlayText(filePath);
 
     if (pending === undefined) continue;
-    const candidate = makeCandidate(filePath, candidateRoot, query, tokens, flags);
+    const candidate = makeCandidate(filePath, candidateRoot, query, tokens, flags, candidateNeedles);
     overlayTruncated = inspectOverlay(candidate, pending, needles, query, tokens, signal) || overlayTruncated;
 
     if (candidate.matched.size) candidates.set(filePath, candidate);
@@ -176,7 +174,7 @@ async function runContentSearch({ dir, includeHidden, searchNeedles, run, overla
   return response;
 }
 
-function absorbRgRecords(candidates, response, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles, signal) {
+function absorbRgRecords(candidates, response, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles, signal) {
   const records = response.stdout.split("\n");
 
   for (let i = 0; i < records.length; i++) {
@@ -185,17 +183,20 @@ function absorbRgRecords(candidates, response, dir, includeHidden, overlayText, 
 
     if (record === undefined) break;
     if (!record) continue;
-    absorbRgHit(candidates, record, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles);
+    absorbRgHit(candidates, record, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles);
   }
 }
 
 async function contentCandidates({ dir, includeHidden, query, tokens, flags, pendingPaths, run, overlayText, signal, exact, diskFiles, focusFile }) {
   const needles = exact ? [query.toLowerCase().slice(0, MAX_NEEDLE_CHARS)] : tokens.map(token => stem(token).slice(0, MAX_NEEDLE_CHARS));
+  // Coverage needles are always token-derived (even in exact mode, where the
+  // search needles collapse to the query): computed once, not once per file.
+  const candidateNeedles = exact ? tokens.map(token => stem(token).slice(0, MAX_NEEDLE_CHARS)) : needles;
   const candidateRoot = focusFile ? path.dirname(focusFile) : dir;
   const candidates = new Map();
   const response = await runContentSearch({ dir, includeHidden, searchNeedles: [...new Set(needles)], run, overlayText, signal, diskFiles, focusFile });
-  absorbRgRecords(candidates, response, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles, signal);
-  const overlayTruncated = overlayCandidates(candidates, pendingPaths, overlayText, candidateRoot, query, tokens, flags, needles, signal);
+  absorbRgRecords(candidates, response, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles, signal);
+  const overlayTruncated = overlayCandidates(candidates, pendingPaths, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles, signal);
 
   return { candidates, truncated: response.outputTruncated === true || overlayTruncated };
 }

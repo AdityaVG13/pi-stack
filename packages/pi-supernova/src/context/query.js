@@ -12,6 +12,14 @@ const SOURCE_EXT = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rs",
 
 const TYPED_EXT = new Set([".ts", ".tsx", ".rs", ".go"]);
 
+const BUILD_DIRS = new Set(["node_modules", "dist", "target"]);
+
+const TEST_WORDS = new Set(["test", "tests", "testing", "spec", "specs"]);
+
+const TYPE_WORDS = new Set(["type", "types", "interface", "interfaces", "schema", "schemas"]);
+
+const DOC_WORDS = new Set(["doc", "docs", "documentation", "readme"]);
+
 const MAX_NEEDLE_CHARS = 128;
 
 /** Light suffix stripping so "terminated" ⊇ "terminat" matches "terminate"; deterministic, no dictionary. */
@@ -27,9 +35,9 @@ export function tokenizeQuery(query) {
 
   return {
     tokens: [...new Set(words.filter(word => word.length > 1 && !STOP_WORDS.has(word)))],
-    wantsTest: words.some(word => ["test", "tests", "testing", "spec", "specs"].includes(word)),
-    wantsType: words.some(word => ["type", "types", "interface", "interfaces", "schema", "schemas"].includes(word)),
-    wantsDoc: words.some(word => ["doc", "docs", "documentation", "readme"].includes(word)),
+    wantsTest: words.some(word => TEST_WORDS.has(word)),
+    wantsType: words.some(word => TYPE_WORDS.has(word)),
+    wantsDoc: words.some(word => DOC_WORDS.has(word)),
   };
 }
 
@@ -37,7 +45,8 @@ function tokenPathScore(base, words, normalized, tokens) {
   let score = 0;
 
   for (const token of tokens) {
-    if (base === token || base.startsWith(token + ".")) score += 60;
+    // base === token + "." without the concat alloc: same verdict, no garbage.
+    if (base === token || (base.length > token.length && base[token.length] === "." && base.startsWith(token))) score += 60;
     else if (base.includes(token)) score += 30;
     else if (words.includes(token)) score += 15;
     else if (normalized.includes(token)) score += 5;
@@ -49,7 +58,7 @@ function tokenPathScore(base, words, normalized, tokens) {
 function topologyPenalty(normalized, flags) {
   const parts = normalized.split("/");
 
-  if (parts.some(part => ["node_modules", "dist", "target"].includes(part))) return -100;
+  if (parts.some(part => BUILD_DIRS.has(part))) return -100;
   const test = isTestPath(normalized);
 
   if (test && !flags.wantsTest) return -50;

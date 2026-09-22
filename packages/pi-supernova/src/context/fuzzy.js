@@ -40,10 +40,13 @@ export class Frecency {
   score(filePath, mtimeSec, now = Date.now() / 1000) {
     let total = 0;
     const cutoff = now - AI_MAX_HISTORY_DAYS * 86400;
+    const stamps = this.access.get(filePath);
 
-    for (const t of this.access.get(filePath) || []) {
-      if (t < cutoff) continue;
-      total += Math.exp(-AI_DECAY * ((now - t) / 86400));
+    if (stamps) {
+      for (const t of stamps) {
+        if (t < cutoff) continue;
+        total += Math.exp(-AI_DECAY * ((now - t) / 86400));
+      }
     }
 
     if (mtimeSec) {
@@ -74,33 +77,42 @@ function isBoundary(hay, i) {
 }
 
 /**
- * Greedy forward match with backward tightening (fzf v1). Returns null or
- * { score, start, end }. Score: +16 boundary, +8 consecutive, +4 case match, −1 per gap char.
+ * Greedy forward scan. Returns the match end or the needle index that failed
+ * (failAt), which the typo retry uses to prune deletions provably unable to
+ * match (see matchWithTypos).
  */
-function matchOnce(needle, hay, caseSensitive) {
-  const hayCmp = caseSensitive ? hay : hay.toLowerCase();
-  const nCmp = caseSensitive ? needle : needle.toLowerCase();
+function scanForward(nCmp, hayCmp) {
   let hi = 0;
-  let firstAt = -1;
 
   for (let ni = 0; ni < nCmp.length; ni++) {
     hi = hayCmp.indexOf(nCmp[ni], hi);
 
-    if (hi < 0) return null;
-
-    if (firstAt < 0) firstAt = hi;
+    if (hi < 0) return { failAt: ni };
     hi++;
   }
 
-  const end = hi;
+  return { end: hi, failAt: -1 };
+}
+
+/**
+ * Greedy forward match with backward tightening (fzf v1). Returns null or
+ * { score, start, end }. Score: +16 boundary, +8 consecutive, +4 case match, −1 per gap char.
+ * Lowered strings arrive precomputed: the needle once per query, the haystack
+ * once per path — never re-lowered per part or per typo variant.
+ */
+function matchOnce(part, pCmp, hay, hayCmp) {
+  const scan = scanForward(pCmp, hayCmp);
+
+  if (scan.failAt >= 0) return null;
+  const end = scan.end;
   // Tighten: walk backwards from end to find the latest possible start.
   let start = end;
 
-  for (let ni = nCmp.length - 1; ni >= 0; ni--) {
-    start = hayCmp.lastIndexOf(nCmp[ni], start - 1);
+  for (let ni = pCmp.length - 1; ni >= 0; ni--) {
+    start = hayCmp.lastIndexOf(pCmp[ni], start - 1);
   }
 
-  return { score: scoreAlignment(needle, nCmp, hay, hayCmp, start), start, end };
+  return { score: scoreAlignment(part, pCmp, hay, hayCmp, start), start, end };
 }
 
 /** +16 boundary, +8 consecutive, +4 exact-case, −1 per skipped haystack char. */
@@ -122,9 +134,14 @@ function scoreAlignment(needle, nCmp, hay, hayCmp, start) {
   return score;
 }
 
-function considerShorter(part, typosLeft, visit, best) {
-  for (let i = 0; i < part.length; i++) {
-    const m = visit(part.slice(0, i) + part.slice(i + 1), typosLeft - 1);
+function considerShorter(sub, subCmp, subLower, typosLeft, visit, best, maxDel) {
+  for (let i = 0; i <= maxDel; i++) {
+    const m = visit(
+      sub.slice(0, i) + sub.slice(i + 1),
+      subCmp.slice(0, i) + subCmp.slice(i + 1),
+      subLower.slice(0, i) + subLower.slice(i + 1),
+      typosLeft - 1,
+    );
 
     if (!m) continue;
     const scored = { ...m, score: m.score - 12, typos: m.typos + 1, exact: false };
@@ -135,46 +152,95 @@ function considerShorter(part, typosLeft, visit, best) {
   return best;
 }
 
-function matchWithTypos(needle, hay, maxTypos, caseSensitive) {
+// Failure pruning (exact, not heuristic): a deletion strictly after the
+// fail index preserves the failing prefix, so that child fails too — and
+// every deeper success deletes an early char first, which the unpruned
+// order reaches with the same typo count via memo. On success all
+// deletions are still explored (a shorter variant can outscore the -12).
+// This turns full-miss retries from O(len^typos) attempts into O(len×typos).
+function matchWithTypos(part, pCmp, partLower, hay, hayCmp, hayLowerOrNull, maxTypos) {
   const memo = new Map();
+  let hayLower = hayLowerOrNull;
 
-  const visit = (part, typosLeft) => {
-    const key = part + "\0" + typosLeft;
+  const visit = (sub, subCmp, subLower, typosLeft) => {
+    const key = sub + "\0" + typosLeft;
 
     if (memo.has(key)) return memo.get(key);
-    let best = matchOnce(part, hay, caseSensitive);
+    const scan = scanForward(subCmp, hayCmp);
+    let best = null;
+    let maxDel = sub.length - 1;
 
-    if (best) best = { ...best, typos: 0, exact: hay.toLowerCase() === part.toLowerCase() };
+    if (scan.failAt < 0) {
+      let start = scan.end;
 
-    if (typosLeft > 0) best = considerShorter(part, typosLeft, visit, best);
+      for (let ni = subCmp.length - 1; ni >= 0; ni--) {
+        start = hayCmp.lastIndexOf(subCmp[ni], start - 1);
+      }
+
+      if (hayLower === null) hayLower = hay.toLowerCase();
+      best = {
+        score: scoreAlignment(sub, subCmp, hay, hayCmp, start),
+        start,
+        end: scan.end,
+        typos: 0,
+        exact: hayLower === subLower,
+      };
+    } else {
+      maxDel = scan.failAt;
+    }
+
+    if (typosLeft > 0) best = considerShorter(sub, subCmp, subLower, typosLeft, visit, best, maxDel);
     memo.set(key, best);
 
     return best;
   };
 
-  return visit(needle, maxTypos);
+  return visit(part, pCmp, partLower, maxTypos);
+}
+
+function matchPart(part, pCmp, partLower, hay, hayCmp, hayLowerOrNull, maxTypos) {
+  const direct = matchOnce(part, pCmp, hay, hayCmp);
+
+  if (direct) {
+    const hayLower = hayLowerOrNull === null ? hay.toLowerCase() : hayLowerOrNull;
+
+    return { ...direct, typos: 0, exact: hayLower === partLower };
+  }
+
+  if (maxTypos <= 0 || part.length < 3 || part.length > 128) return null;
+
+  return matchWithTypos(part, pCmp, partLower, hay, hayCmp, hayLowerOrNull, maxTypos);
 }
 
 /** Best match allowing up to maxTypos skipped needle characters. */
 export function fuzzyMatch(needle, hay, { maxTypos = 0, caseSensitive = false } = {}) {
-  const direct = matchOnce(needle, hay, caseSensitive);
+  if (caseSensitive) return matchPart(needle, needle, needle.toLowerCase(), hay, hay, null, maxTypos);
 
-  if (direct) return { ...direct, typos: 0, exact: hay.toLowerCase() === needle.toLowerCase() };
+  const needleLower = needle.toLowerCase();
+  const hayLower = hay.toLowerCase();
 
-  if (maxTypos <= 0 || needle.length < 3 || needle.length > 128) return null;
-
-  return matchWithTypos(needle, hay, maxTypos, caseSensitive);
+  return matchPart(needle, needleLower, needleLower, hay, hayLower, hayLower, maxTypos);
 }
 
 export function smartCase(query) {
   return /[A-Z]/.test(query);
 }
 
+function splitDirSegs(dir) {
+  return dir.split("/").filter(Boolean);
+}
+
 /** fff distance penalty: directory hops from the current file's directory, floor −20. */
-function distancePenalty(currentDir, candidateDir) {
-  if (!currentDir) return 0;
-  const a = currentDir.split("/").filter(Boolean);
-  const b = candidateDir.split("/").filter(Boolean);
+function distancePenalty(currentSegs, candidateDir, dirCache) {
+  if (!currentSegs) return 0;
+  let b = dirCache.get(candidateDir);
+
+  if (!b) {
+    b = splitDirSegs(candidateDir);
+    dirCache.set(candidateDir, b);
+  }
+
+  const a = currentSegs;
   let common = 0;
 
   while (common < a.length && common < b.length && a[common] === b[common]) common++;
@@ -191,13 +257,14 @@ function partTypos(parts, ctx) {
   return ctx.maxTypos ?? (parts[0].length >= 6 ? 2 : parts[0].length >= 4 ? 1 : 0);
 }
 
-function scoredPath(rel, parts, maxTypos, caseSensitive, ctx, currentDir) {
-  const matched = matchParts(parts, rel, maxTypos, caseSensitive);
+function scoredPath(rel, parts, partLower, maxTypos, caseSensitive, ctx, currentSegs, dirCache) {
+  const hayCmp = caseSensitive ? rel : rel.toLowerCase();
+  const matched = matchParts(parts, partLower, rel, hayCmp, caseSensitive ? null : hayCmp, maxTypos, caseSensitive);
 
   if (!matched) return null;
   const { base, first, exact } = matched;
   const filenameStart = rel.lastIndexOf("/") + 1;
-  const boosts = filenameBonus(base, rel, filenameStart, first, parts[0]) + contextBoost(base, rel, ctx) + distancePenalty(currentDir, rel.slice(0, filenameStart));
+  const boosts = filenameBonus(base, rel, filenameStart, first, partLower[0]) + contextBoost(base, rel, ctx) + distancePenalty(currentSegs, rel.slice(0, filenameStart), dirCache);
 
   return { path: rel, score: base + boosts, exact, typos: first.typos };
 }
@@ -208,11 +275,17 @@ export function rankPaths(query, paths, ctx = {}) {
   if (parts.length === 0 || parts.length > 16) return [];
   const caseSensitive = smartCase(query);
   const maxTypos = partTypos(parts, ctx);
+  // Per-query hoists: lowered parts once (not once per path per part), the
+  // current directory split once (not once per candidate), plus a
+  // per-call cache for candidate directory segments (paths share dirs).
+  const partLower = parts.map((p) => p.toLowerCase());
   const currentDir = ctx.currentFile ? ctx.currentFile.slice(0, ctx.currentFile.lastIndexOf("/") + 1) : "";
+  const currentSegs = currentDir ? splitDirSegs(currentDir) : null;
+  const dirCache = new Map();
   const out = [];
 
   for (const rel of paths) {
-    const scored = scoredPath(rel, parts, maxTypos, caseSensitive, ctx, currentDir);
+    const scored = scoredPath(rel, parts, partLower, maxTypos, caseSensitive, ctx, currentSegs, dirCache);
 
     if (scored) out.push(scored);
   }
@@ -223,13 +296,13 @@ export function rankPaths(query, paths, ctx = {}) {
 }
 
 /** Every query part must match; later parts get at most one typo (fff narrows per part). Score is the average. */
-function matchParts(parts, rel, maxTypos, caseSensitive) {
+function matchParts(parts, partLower, rel, hayCmp, hayLowerOrNull, maxTypos, caseSensitive) {
   let sum = 0;
   let first = null;
   let exact = true;
 
   for (let pi = 0; pi < parts.length; pi++) {
-    const m = fuzzyMatch(parts[pi], rel, { maxTypos: pi === 0 ? maxTypos : Math.min(maxTypos, 1), caseSensitive });
+    const m = matchPart(parts[pi], caseSensitive ? parts[pi] : partLower[pi], partLower[pi], rel, hayCmp, hayLowerOrNull, pi === 0 ? maxTypos : Math.min(maxTypos, 1));
 
     if (!m) return null;
     first ??= m;
@@ -241,10 +314,10 @@ function matchParts(parts, rel, maxTypos, caseSensitive) {
 }
 
 /** fff: exact filename +40% of base, any filename match +20%. */
-function filenameBonus(base, rel, filenameStart, first, needle) {
+function filenameBonus(base, rel, filenameStart, first, needleLower) {
   if (first.start < filenameStart) return 0;
 
-  return rel.slice(filenameStart).toLowerCase() === needle.toLowerCase() ? Math.floor((base * 2) / 5) : Math.floor(base / 5);
+  return rel.slice(filenameStart).toLowerCase() === needleLower ? Math.floor((base * 2) / 5) : Math.floor(base / 5);
 }
 
 /** fff: frecency boost base·f/100 and +15% for git-modified files. */

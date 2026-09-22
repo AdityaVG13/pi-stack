@@ -113,6 +113,19 @@ function grepEntryRows(e, filePath, root, regex, nameRegex, out) {
   }
 }
 
+// One alternation scan per file instead of one full scan per needle — same
+// verdict as needles.some(includes). Needles are escaped: they arrive as
+// literals that may carry regex syntax.
+function anyOfProbe(needles) {
+  return new RegExp(needles.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
+}
+
+function fileMatchesNeedles(entry, needles, anyOf, probe) {
+  if (probe) return probe.test(entry.lower);
+
+  return anyOf ? needles.some((n) => entry.lower.includes(n)) : needles.every((n) => entry.lower.includes(n));
+}
+
 export class WorkspaceIndex {
   constructor(runCommand) {
     this.runCommand = runCommand;
@@ -358,14 +371,12 @@ export class WorkspaceIndex {
   /** Files whose lowercase text contains any (or every) needle; needles are lowercase. */
   filesContaining(files, needles, anyOf) {
     const hits = [];
+    const probe = anyOf && needles.length > 1 ? anyOfProbe(needles) : null;
 
     for (const filePath of files) {
       const e = this.entry(filePath);
 
-      if (!e) continue;
-      const found = anyOf ? needles.some((n) => e.lower.includes(n)) : needles.every((n) => e.lower.includes(n));
-
-      if (found) hits.push(filePath);
+      if (e && fileMatchesNeedles(e, needles, anyOf, probe)) hits.push(filePath);
     }
 
     return hits;
