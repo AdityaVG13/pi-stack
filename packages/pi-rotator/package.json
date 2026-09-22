@@ -1,0 +1,53 @@
+{
+  "author": "AdityaVG13",
+  "bugs": {
+    "url": "https://github.com/AdityaVG13/pi-stack/issues"
+  },
+  "description": "Multi-account rotation for Pi: every provider family, failover or round-robin or balanced, tiny UX.",
+  "exports": "./index.js",
+  "files": [
+    "index.js",
+    "lib/",
+    "README.md",
+    "LAYERING.md",
+    "BENCHMARK.md",
+    "LICENSE"
+  ],
+  "homepage": "https://github.com/AdityaVG13/pi-stack/tree/main/packages/pi-rotator#readme",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "extension",
+    "failover",
+    "rotation",
+    "load-balancer",
+    "multi-account"
+  ],
+  "license": "MIT",
+  "main": "./index.js",
+  "name": "pi-rotator",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "directory": "packages/pi-rotator",
+    "type": "git",
+    "url": "git+https://github.com/AdityaVG13/pi-stack.git"
+  },
+  "scripts": {
+    "prepublishOnly": "npm test && node ../../scripts/preflight.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "type": "module",
+  "version": "0.1.0"
+}
