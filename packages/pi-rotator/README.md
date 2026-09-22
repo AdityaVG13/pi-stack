@@ -93,6 +93,8 @@ Prefix identity is load-bearing, so pi-rotator does zero per-account prompt shap
 
 Exhaustion is status `429`/`402`/`403` seen on `after_provider_response` (other errors hold position: neither drain nor switch). Only a real 1xx-3xx status counts as a served turn; a missing status records nothing. Cooling slots sit out for `cooldownMs`. Every response lands in the credential-free debug log at `~/.pi/agent/pi-rotator-debug.log` with its routing decision, so a turn's missing drain is always explainable.
 
+Before every automatic switch, the target is verified against Pi's own registry (registered provider, resolvable credential). Dead targets are skipped with journal evidence instead of failing your next turn, and a turn that dies before its first request cools its slot the same way exhaustion does. Manual `/rotator next` stays an explicit force: it switches without verification.
+
 Switches preserve your thinking level without touching the thinking API at all: the target is captured from each request's context, and the next request repairs an untouched loss. If you changed the level yourself in between, that change is adopted, never stomped. No thinking call happens around a switch, because any contact there corrupts the next turn's setup (bisected live); settled reads and writes inside the repair step are safe.
 
 ## Evidence
@@ -104,6 +106,8 @@ Every request and routing decision is journaled to `~/.pi/agent/pi-rotator-journ
 | `request` | Wire-prefix fingerprint per slot. The same turn served on two slots must hash equal, which is how analysis proves prefix identity |
 | `route` | From/to slot, reason (`rotate`, `exhausted`, `manual`), warmth |
 | `switch_rejected` / `switch_error` | The switch never landed (a `route` entry is the intent, these are the outcome) |
+| `slot_skipped` | A picked slot Pi cannot serve right now (`unregistered` or `unauthorized`); it sits out while the next candidate is tried |
+| `turn_failed` | The turn died before any provider request (auth resolution, unknown model), with the failed slot and the error excerpt |
 | `drift` | Mid-transcript history rewrite detected (journal-only) |
 | `invalidate` | Compaction signal |
 | `warmed` | Pi core's cache warmer refreshed the slot (warmth evidence, never counted as drain) |

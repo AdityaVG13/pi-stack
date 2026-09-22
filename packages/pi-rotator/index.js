@@ -417,34 +417,94 @@ function applySwitch(pi, dir, state, family, from, provider, id, ctx, announce) 
     });
 }
 
-function switchModel(pi, dir, state, family, from, picked, reason, ctx) {
-  if (!picked || picked.provider === from) return false;
-  debugLine(state, dir, reason, { from, to: `${picked.provider}/${picked.id}`, warm: picked.warm });
-  appendJournal(dir, "route", {
-    family: family.base,
-    from,
-    to: picked.provider,
-    model: picked.id,
-    reason,
-    warm: picked.warm,
-    drained: Object.fromEntries(family.drained),
-  });
-  // Automatic rotations only: manual `/rotator next` already confirms via
-  // its panel, so it calls applySwitch without the flag and never double-
-  // notifies.
-  applySwitch(
-    pi,
-    dir,
-    state,
-    family,
-    from,
-    picked.provider,
-    picked.id,
-    ctx,
-    state.config.announceSwitches === true,
-  );
+// Registry verification: never route into a slot Pi cannot serve, or the
+// next turn dies with "Provider is not configured" (a pre-hook auth
+// failure no extension hook can observe). getProvider answers
+// "registered?" and hasConfiguredAuth answers "credential resolves?" —
+// both sync, both side-effect-free. Anything missing or throwing means
+// an older host: pass through (current behavior) rather than inventing
+// failures. Only an exact false fails, matching the config polarity.
+function verifySlot(ctx, slotId) {
+  try {
+    const registry = ctx ? ctx.modelRegistry : null;
 
-  return true;
+    if (!registry) return { ok: true };
+
+    if (
+      registry.getProvider != null &&
+      registry.getProvider(slotId) === undefined
+    ) {
+      return { ok: false, reason: "unregistered" };
+    }
+
+    if (registry.hasConfiguredAuth != null) {
+      let authed = true;
+
+      try {
+        authed = registry.hasConfiguredAuth({ provider: slotId }) !== false;
+      } catch {
+        authed = true;
+      }
+
+      if (!authed) return { ok: false, reason: "unauthorized" };
+    }
+
+    return { ok: true };
+  } catch {
+    return { ok: true };
+  }
+}
+
+function switchModel(pi, dir, state, family, from, model, session, reason, ctx) {
+  // Verify-then-switch with retry: a picked slot Pi cannot serve is cooled
+  // (existing exclusion machinery, self-heals on expiry) and the next
+  // candidate is tried. Bounded by slot count; all-dead stays put.
+  for (let attempt = 0; attempt <= family.slots.length; attempt++) {
+    const picked = pickNext(family, session, model, false);
+
+    if (!picked || picked.provider === from) return false;
+    const check = verifySlot(ctx, picked.provider);
+
+    if (!check.ok) {
+      markCooling(family.cooldowns, picked.provider, Date.now() + state.config.cooldownMs);
+      appendJournal(dir, "slot_skipped", {
+        family: family.base,
+        from,
+        to: picked.provider,
+        reason: check.reason,
+      });
+      continue;
+    }
+
+    debugLine(state, dir, reason, { from, to: `${picked.provider}/${picked.id}`, warm: picked.warm });
+    appendJournal(dir, "route", {
+      family: family.base,
+      from,
+      to: picked.provider,
+      model: picked.id,
+      reason,
+      warm: picked.warm,
+      drained: Object.fromEntries(family.drained),
+    });
+    // Automatic rotations only: manual `/rotator next` already confirms via
+    // its panel, so it calls applySwitch without the flag and never double-
+    // notifies. Manual is also an explicit force: it bypasses verification.
+    applySwitch(
+      pi,
+      dir,
+      state,
+      family,
+      from,
+      picked.provider,
+      picked.id,
+      ctx,
+      state.config.announceSwitches === true,
+    );
+
+    return true;
+  }
+
+  return false;
 }
 
 // One-shot repair for a switch that lost the thinking level: runs on the
@@ -648,16 +708,37 @@ function onResponse(pi, dir, state, config, event, ctx) {
   // this turn, so move immediately. The turn itself still ends in error
   // (no auto-resume); the user continues on the fresh slot.
   markCooling(family.cooldowns, model.provider, Date.now() + config.cooldownMs);
+  switchModel(pi, dir, state, family, model.provider, model, session, "exhausted", ctx);
+}
 
-  const picked = pickNext(family, session, model, false);
+// A turn Pi core failed before any provider request (auth resolution,
+// unknown model): the request/response hooks never fire, so the agent_end
+// messages are the only signal. failureMessage carries stopReason "error"
+// plus the failed provider; "aborted" is a user cancel and never counts.
+function failedTurn(event, model) {
+  const messages = event ? event.messages : null;
 
-  switchModel(pi, dir, state, family, model.provider, picked, "exhausted", ctx);
+  if (!Array.isArray(messages)) return null;
+  const failure = messages.find((m) => m && m.stopReason === "error");
+
+  if (!failure) return null;
+
+  const slot = failure.provider ?? (model ? model.provider : null);
+
+  return {
+    slot,
+    message: String(
+      failure.errorMessage === undefined || failure.errorMessage === null
+        ? "turn error"
+        : failure.errorMessage,
+    ).slice(0, 160),
+  };
 }
 
 // Per-turn rotation: every request of a turn stays on one slot (one cold
 // miss per onboarding instead of one per request), and the switch lands
 // before the next turn starts. Failover never rotates here by design.
-function onTurnEnd(pi, dir, state, ctx) {
+function onTurnEnd(pi, dir, state, event, ctx) {
   const model = ctx ? ctx.model : null;
   const family = model ? familyOf(state, model.provider) : null;
 
@@ -680,10 +761,25 @@ function onTurnEnd(pi, dir, state, ctx) {
     backfill: backfilled ? model.provider : null,
   });
 
-  if (!model || !family || family.strategy === "failover") return;
-  const picked = pickNext(family, session, model, false);
+  // Failed turns cool their slot (it cannot serve right now) across every
+  // strategy including failover; the normal rotation below then moves away
+  // from it. Foreign slots journal as evidence without cooling.
+  const failure = model && family ? failedTurn(event, model) : null;
 
-  switchModel(pi, dir, state, family, model.provider, picked, "rotate", ctx);
+  if (failure) {
+    const ours = failure.slot !== null && family.slots.includes(failure.slot);
+
+    if (ours) markCooling(family.cooldowns, failure.slot, Date.now() + state.config.cooldownMs);
+    appendJournal(dir, "turn_failed", {
+      family: family.base,
+      slot: failure.slot,
+      message: failure.message,
+      cooled: ours,
+    });
+  }
+
+  if (!model || !family || family.strategy === "failover") return;
+  switchModel(pi, dir, state, family, model.provider, model, session, "rotate", ctx);
 }
 
 function slotLine(family, session, id, now, ttlMs) {
@@ -890,7 +986,7 @@ export default function piRotator(pi) {
   safeOn(pi, "context_with_system", (event, ctx) => onContext(dir, state, event, ctx));
   safeOn(pi, "before_provider_request", (event, ctx) => onBeforeRequest(pi, dir, state, event, ctx));
   safeOn(pi, "after_provider_response", (event, ctx) => onResponse(pi, dir, state, config, event, ctx));
-  safeOn(pi, "agent_end", (_event, ctx) => onTurnEnd(pi, dir, state, ctx));
+  safeOn(pi, "agent_end", (event, ctx) => onTurnEnd(pi, dir, state, event, ctx));
   safeOn(pi, "session_compact", (_event, ctx) => onCompact(dir, state, ctx));
   safeOn(pi, "cache_warming_decision", (event, ctx) => onWarmDecision(dir, state, event, ctx));
   pi.registerCommand("rotator", {

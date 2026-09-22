@@ -9,6 +9,8 @@ const CODEX = "openai-codex";
 
 const CODEX2 = "openai-codex-account-2";
 
+const CODEX3 = "openai-codex-account-3";
+
 const MODEL = "gpt-5.6-sol";
 
 let savedAgentDir;
@@ -1021,5 +1023,254 @@ describe("activation", () => {
       debugLines(dir).some((line) => line.kind === "handler_error"),
       true,
     );
+  });
+
+  it("rotation skips slots missing from the provider registry", async () => {
+    const dir = agentDirWith(transportFiles());
+    const pi = fakePi();
+
+    piRotator(pi);
+    fire(pi, "session_start", undefined, ctx(CODEX));
+    fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
+    fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
+
+    // CODEX2 looks routable (auth.json lists it) but Pi never registered
+    // it: switching there would fail the next turn with "Provider is not
+    // configured", so the switch must not happen at all.
+    const registry = {
+      getProvider: (id) => (id === CODEX2 ? undefined : { id }),
+      hasConfiguredAuth: () => true,
+    };
+
+    fire(pi, "agent_end", undefined, ctx(CODEX, "s1", { modelRegistry: registry }));
+    await tick();
+
+    assert.deepEqual(pi.setModelCalls, []);
+    assert.equal(ofKind(dir, "route").length, 0);
+
+    const [skipped] = ofKind(dir, "slot_skipped");
+
+    assert.equal(skipped.to, CODEX2);
+    assert.equal(skipped.reason, "unregistered");
+  });
+
+  it("rotation advances past an unverified slot to the next healthy one", async () => {
+    const dir = agentDirWith(
+      transportFiles({ "auth.json": { [CODEX]: {}, [CODEX2]: {}, [CODEX3]: {} } }),
+    );
+
+    const pi = fakePi();
+
+    piRotator(pi);
+    fire(pi, "session_start", undefined, ctx(CODEX));
+    fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
+    fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
+
+    const registry = {
+      getProvider: (id) => (id === CODEX2 ? undefined : { id }),
+      hasConfiguredAuth: () => true,
+    };
+
+    fire(pi, "agent_end", undefined, ctx(CODEX, "s1", { modelRegistry: registry }));
+    await tick();
+
+    // CODEX2 skipped, account-3 takes the rotation instead of staying put.
+    assert.equal(pi.setModelCalls.length, 1);
+    assert.equal(ofKind(dir, "slot_skipped").length, 1);
+    assert.equal(ofKind(dir, "route")[0].to, CODEX3);
+  });
+
+  it("rotation skips slots without configured auth", async () => {
+    const dir = agentDirWith(transportFiles());
+    const pi = fakePi();
+
+    piRotator(pi);
+    fire(pi, "session_start", undefined, ctx(CODEX));
+    fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
+    fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
+
+    const registry = {
+      getProvider: (id) => ({ id }),
+      hasConfiguredAuth: (model) => model.provider !== CODEX2,
+    };
+
+    fire(pi, "agent_end", undefined, ctx(CODEX, "s1", { modelRegistry: registry }));
+    await tick();
+
+    assert.deepEqual(pi.setModelCalls, []);
+
+    const [skipped] = ofKind(dir, "slot_skipped");
+
+    assert.equal(skipped.to, CODEX2);
+    assert.equal(skipped.reason, "unauthorized");
+  });
+
+  it("rotation without a registry behaves as before", async () => {
+    const dir = agentDirWith(transportFiles());
+    const pi = fakePi();
+
+    piRotator(pi);
+    fire(pi, "session_start", undefined, ctx(CODEX));
+    fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
+    fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
+    fire(pi, "agent_end", undefined, ctx(CODEX));
+    await tick();
+
+    // Older hosts expose no modelRegistry: verify nothing, switch normally.
+    assert.equal(pi.setModelCalls.length, 1);
+    assert.equal(ofKind(dir, "route")[0].to, CODEX2);
+    assert.equal(ofKind(dir, "slot_skipped").length, 0);
+  });
+
+  it("a throwing registry never blocks the switch", async () => {
+    const dir = agentDirWith(transportFiles());
+    const pi = fakePi();
+
+    piRotator(pi);
+    fire(pi, "session_start", undefined, ctx(CODEX));
+    fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
+    fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
+
+    const registry = {
+      getProvider: () => {
+        throw new Error("host registry down");
+      },
+    };
+
+    fire(pi, "agent_end", undefined, ctx(CODEX, "s1", { modelRegistry: registry }));
+    await tick();
+
+    assert.equal(pi.setModelCalls.length, 1);
+    assert.equal(ofKind(dir, "route")[0].to, CODEX2);
+  });
+
+  it("exhaustion rescue also skips unverified slots", async () => {
+    const dir = agentDirWith(transportFiles());
+    const pi = fakePi();
+
+    piRotator(pi);
+    fire(pi, "session_start", undefined, ctx(CODEX));
+    fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
+
+    const registry = {
+      getProvider: (id) => (id === CODEX2 ? undefined : { id }),
+      hasConfiguredAuth: () => true,
+    };
+
+    fire(
+      pi,
+      "after_provider_response",
+      { status: 429 },
+      ctx(CODEX, "s1", { modelRegistry: registry }),
+    );
+    await tick();
+
+    // CODEX cools (exhausted) but the rescue must not land on the dead slot.
+    assert.deepEqual(pi.setModelCalls, []);
+    assert.equal(ofKind(dir, "slot_skipped")[0].reason, "unregistered");
+    assert.equal(ofKind(dir, "route").length, 0);
+  });
+
+  it("a failed turn cools its slot and journals the evidence", async () => {
+    const dir = agentDirWith(transportFiles());
+    const pi = fakePi();
+
+    piRotator(pi);
+    fire(pi, "session_start", undefined, ctx(CODEX));
+    fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
+    fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
+    fire(
+      pi,
+      "agent_end",
+      { messages: [{
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "Provider is not configured: openai-codex",
+        provider: CODEX,
+      }] },
+      ctx(CODEX, "s1"),
+    );
+    await tick();
+
+    const [failed] = ofKind(dir, "turn_failed");
+
+    assert.equal(failed.slot, CODEX);
+    assert.match(failed.message, /not configured/);
+    assert.equal(failed.cooled, true);
+
+    // The failed slot sits out: rotation moves away and status shows it.
+    assert.equal(ofKind(dir, "route")[0].to, CODEX2);
+    assert.match(pi.commands.get("rotator").handler("", ctx(CODEX)), /cooling/);
+  });
+
+  it("aborted turns never cool", async () => {
+    const dir = agentDirWith(transportFiles());
+    const pi = fakePi();
+
+    piRotator(pi);
+    fire(pi, "session_start", undefined, ctx(CODEX));
+    fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
+    fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
+    fire(
+      pi,
+      "agent_end",
+      { messages: [{ role: "assistant", stopReason: "aborted", provider: CODEX }] },
+      ctx(CODEX, "s1"),
+    );
+    await tick();
+
+    // A user-cancelled turn says nothing about the slot: no evidence, no
+    // cooldown, rotation proceeds normally.
+    assert.equal(ofKind(dir, "turn_failed").length, 0);
+    assert.doesNotMatch(pi.commands.get("rotator").handler("", ctx(CODEX)), /cooling/);
+    assert.equal(ofKind(dir, "route")[0].to, CODEX2);
+  });
+
+  it("failure on a foreign slot journals without cooling", async () => {
+    const dir = agentDirWith(transportFiles());
+    const pi = fakePi();
+
+    piRotator(pi);
+    fire(pi, "session_start", undefined, ctx(CODEX));
+    fire(
+      pi,
+      "agent_end",
+      { messages: [{
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "boom",
+        provider: "anthropic",
+      }] },
+      ctx(CODEX, "s1"),
+    );
+    await tick();
+
+    const [failed] = ofKind(dir, "turn_failed");
+
+    assert.equal(failed.slot, "anthropic");
+    assert.equal(failed.cooled, false);
+    assert.doesNotMatch(pi.commands.get("rotator").handler("", ctx(CODEX)), /cooling/);
+  });
+
+  it("failure messages are excerpted", async () => {
+    const dir = agentDirWith(transportFiles());
+    const pi = fakePi();
+
+    piRotator(pi);
+    fire(pi, "session_start", undefined, ctx(CODEX));
+    fire(
+      pi,
+      "agent_end",
+      { messages: [{
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: `x${"y".repeat(300)}`,
+        provider: CODEX,
+      }] },
+      ctx(CODEX, "s1"),
+    );
+    await tick();
+
+    assert.ok(ofKind(dir, "turn_failed")[0].message.length <= 160);
   });
 });
