@@ -76,6 +76,7 @@ export function traceGate(predicate, timeoutMs = 10000) {
   const promise = new Promise((resolve, reject) => { release = resolve; fail = reject; });
   const timer = setTimeout(() => fail(new Error("test handshake timeout waiting for gated trace record")), timeoutMs);
   timer.unref?.();
+
   const onUpdate = update => {
     const trace = update?.details?.trace;
 
@@ -92,17 +93,13 @@ export function gatedExecute(f, code, predicate) {
   return { pending, gate: gate.promise };
 }
 
-// Guest-side wait for the host's go.txt. Only ENOENT retries; any other read
-// failure is a real bug and propagates. Polling reads touch only go.txt's own
-// CAS baseline, never the file under test.
+// The host creates go.txt only after publishing the state under test. Observe
+// its directory entry, not its contents: opening during writeFile's create/write
+// gap can correctly trigger the product's file-changed guard and derail the test.
 export const GUEST_GATE_POLL = `{
   const gateStart = Date.now();
-  while (true) {
-    try { await read("go.txt"); break; }
-    catch (error) {
-      if (!/no such file/.test(error.message)) throw error;
-      if (Date.now() - gateStart > 8000) throw new Error("test handshake timeout waiting for go.txt");
-    }
+  while (!(await read(".")).some(entry => entry.startsWith("go.txt (file,"))) {
+    if (Date.now() - gateStart > 8000) throw new Error("test handshake timeout waiting for go.txt");
     await new Promise(resolve => setTimeout(resolve, 20));
   }
 }`;

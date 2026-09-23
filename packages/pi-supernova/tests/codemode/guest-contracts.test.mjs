@@ -19,7 +19,7 @@ function listed(dir) {
   return fs.readdir(dir).then(names => names.filter(name => name !== ".DS_Store").sort());
 }
 
-it("literal argv is owned spawn: host bash is never called and shell metacharacters stay literal", { skip: process.platform === "win32" }, async t => {
+it("literal argv is owned spawn: host bash is never called and shell metacharacters stay literal", async t => {
   const f = await engineFixture(t);
   let hostCalls = 0;
   f.pi.registerTool({ name: "bash", async execute() {
@@ -28,16 +28,16 @@ it("literal argv is owned spawn: host bash is never called and shell metacharact
     return { content: [{ type: "text", text: "HOST-BASH" }] };
   } });
   const literal = "$(echo pwned); $HOME; `id`; a b";
-  const result = await f.execute("return await bash({command:\"printf\",args:[\"%s\"," + JSON.stringify(literal) + "]});");
+  const result = await f.execute("return await bash({command:process.execPath,args:[\"-e\",\"process.stdout.write(process.argv[1])\"," + JSON.stringify(literal) + "]});");
   assert.equal(hostCalls, 0, "argv must not delegate to a host bash that ignores args");
   assert.equal(result.details.result, literal);
   assert.equal(result.details.ok, true);
-  const joined = await f.execute("return await bash({command:\"printf\",args:[\"%s-%s\",\"left\",\"right\"]});");
+  const joined = await f.execute("return await bash({command:process.execPath,args:[\"-e\",\"process.stdout.write(process.argv.slice(1).join('-'))\",\"left\",\"right\"]});");
   assert.equal(joined.details.result, "left-right");
   assert.equal(hostCalls, 0);
 });
 
-it("argv rejects malformed args before any process starts", { skip: process.platform === "win32" }, async t => {
+it("argv rejects malformed args before any process starts", async t => {
   const f = await engineFixture(t);
   const text = await rejection(f.execute("return await bash({command:\"printf\",args:\"%s\"});"));
   assert.match(text, /bash argv requires a command string and an array of string args/);
@@ -110,6 +110,7 @@ it("a missing JSON field isolates siblings, lists exact keys, and does not inven
   await f.write("plots.json", JSON.stringify({ pitch: 1, amplitude: 2 }));
   await f.write("ok.json", JSON.stringify({ method: "acf", pitch: 3 }));
   await f.write("empty.json", "{}");
+
   const settled = await f.execute(`
     return (await Promise.allSettled([
       read({path:"plots.json",json:".method"}),
@@ -119,6 +120,7 @@ it("a missing JSON field isolates siblings, lists exact keys, and does not inven
       ? {status:entry.status,value:entry.value}
       : {status:entry.status,error:String(entry.reason?.message ?? entry.reason)});
   `);
+
   assert.deepEqual(settled.details.result, [
     { status: "rejected", error: "JSON selection failed for plots.json (.method): JSON field not found: \"method\"; available keys: \"pitch\", \"amplitude\"" },
     { status: "fulfilled", value: "acf" },
@@ -136,11 +138,13 @@ it("a JSON miss after edits rolls the edits back; a settled miss does not", asyn
   const thrown = await rejection(f.execute('await edit("doc.md","keep","gone"); return await read({path:"meta.json",json:".schema"});'));
   assert.ok(thrown.includes('JSON selection failed for meta.json (.schema): JSON field not found: "schema"; available keys: "title"'));
   assert.equal(await fs.readFile(path.join(f.root, "doc.md"), "utf8"), "keep\n");
+
   const settled = await f.execute(`
     await edit("doc.md","keep","gone");
     const miss = await Promise.allSettled([read({path:"meta.json",json:".schema"})]);
     return {status:miss[0].status,error:String(miss[0].reason?.message ?? miss[0].reason)};
   `);
+
   assert.equal(settled.details.ok, true);
   assert.equal(settled.details.result.status, "rejected");
   assert.equal(settled.details.result.error, "JSON selection failed for meta.json (.schema): JSON field not found: \"schema\"; available keys: \"title\"");
@@ -169,10 +173,12 @@ it("sixteen returned images stay attached; overflow fails and rolls back pending
   const f = await engineFixture(t);
   const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=", "base64");
   await f.write("pixel.png", pixel);
+
   const atCap = await f.execute(`
     await write("ledger.md", "kept-16");
     return await Promise.all(Array.from({length:16}, () => read("pixel.png")));
   `);
+
   assert.equal(atCap.details.ok, true);
   assert.equal(atCap.content.filter(block => block.type === "image").length, 16);
   assert.doesNotMatch(modelText(atCap), /image omitted/);
@@ -187,6 +193,7 @@ it("sixteen returned images stay attached; overflow fails and rolls back pending
     assert.equal(overflow.details.mutations.rolledBack, 1);
     assert.equal(overflow.content.filter(block => block.type === "image").length, 0);
     assert.match(error.message, /17 images.*20 MiB/);
+
     return true;
   });
   assert.equal(await fs.readFile(path.join(f.root, "ledger.md"), "utf8"), "kept-16");

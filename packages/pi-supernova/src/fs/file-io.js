@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import path from 'node:path';
 import {createHash} from 'node:crypto';
 
 function textSignature(text) {
@@ -19,6 +20,7 @@ async function* fileChunks(file, signal, maxBytes = Infinity) {
     signal?.throwIfAborted();
     const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, remaining), null);
     signal?.throwIfAborted();
+
     if (!bytesRead) break;
     remaining -= bytesRead;
     // Consumers retaining a chunk must copy it before the next read.
@@ -33,6 +35,7 @@ async function fileSignature(target, signal, observed) {
     const actual = await file.stat();
 
     if (!actual.isFile()) throw new Error("read requires a regular file: " + target);
+
     if (observed && !sameFileVersion(observed, actual)) throw new Error("file changed while reading: " + target);
     const hash = createHash("sha256");
 
@@ -83,10 +86,21 @@ async function readLimitedBytes(file, stat, maxBytes, label, signal, overflow = 
   return Buffer.concat(chunks);
 }
 
-function remapReadError(err, target) {
+async function hasFileParent(target) {
+  for (let parent = path.dirname(target); ; parent = path.dirname(parent)) {
+    try { return !(await fs.stat(parent)).isDirectory(); }
+    catch (error) { if (error.code !== "ENOENT" && error.code !== "ENOTDIR") return false; }
+
+    if (parent === path.dirname(parent)) return false;
+  }
+}
+
+async function remapReadError(err, target) {
   if (err.code === "EISDIR") throw new Error("path is a directory, not a file: " + target);
 
-  if (err.code === "ENOTDIR") throw new Error("cannot use path: a parent component of " + target + " is a file, not a directory");
+  // Windows returns ENOENT, not ENOTDIR, for a file used as a parent.
+  if (err.code === "ENOTDIR" || err.code === "ENOENT" && await hasFileParent(target)) throw new Error("cannot use path: a parent component of " + target + " is a file, not a directory");
+
   if (err.code === "EACCES" || err.code === "EPERM") throw new Error("permission denied reading " + target + ": check the file mode (for example bash chmod)");
 
   if (err.code === "ENOENT") {
@@ -97,4 +111,5 @@ function remapReadError(err, target) {
 
   throw err;
 }
+
 export { textSignature, sameFileVersion, fileChunks, fileSignature, sameSignature, tooLargeRead, overlayOrThrow, assertReadableFile, readLimitedBytes, remapReadError };

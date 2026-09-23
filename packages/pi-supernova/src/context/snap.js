@@ -1,6 +1,8 @@
 import {inScope,makeCandidate,contentCandidates,MAX_SEARCH_CHARS} from './snap-search.js';
 import { tokenizeQuery, stem } from "./query.js";
+
 export {tokenizeQuery,scorePathTopology,stem} from './query.js';
+
 import * as path from "node:path";
 
 import * as fs from "node:fs/promises";
@@ -22,13 +24,13 @@ function rankScore(candidate, tokenCount) {
 function location(candidate, root) {
   const context = candidate.context;
 
-  return { path: path.relative(root, candidate.path), line: candidate.line, signature: candidate.signature,
+  return { path: relativeSlash(root, candidate.path), line: candidate.line, signature: candidate.signature,
     context: [...context].sort((a, b) => a[0] - b[0]).map(([line, text]) => (line === candidate.line ? "►" : " ") + line + " " + text) };
 }
 
 async function spanCandidates(filePath, lines, root, overlayText, signal) {
   const staged = overlayText(filePath);
-  const rel = path.relative(root, filePath);
+  const rel = relativeSlash(root, filePath);
   let text = staged;
 
   if (text === undefined) {
@@ -38,10 +40,12 @@ async function spanCandidates(filePath, lines, root, overlayText, signal) {
       const stat = await file.stat();
 
       if (!stat.isFile()) throw new Error("source candidate is not a regular file: " + filePath);
+
       if (stat.size > 512 * 1024) return lines.map(line => ({ path: rel, line, signature: "", context: [] }));
       text = await file.readFile({ encoding: "utf8", signal });
     } finally { await file.close(); }
   }
+
   const spans = WorkspaceIndex.spansOf(WorkspaceIndex.fromText(filePath, text));
 
   return lines.map(line => {
@@ -68,6 +72,7 @@ async function rankedSpanCandidates(ranked, root, overlayText, signal) {
       try { out.push(...await spanCandidates(candidate.path, lines, root, overlayText, signal)); }
       catch { signal?.throwIfAborted(); out.push(location(candidate, root)); }
     }
+
     if (out.length >= MAX_ALTERNATIVES) break;
   }
 
@@ -104,7 +109,9 @@ function listedSnapPaths(listing, dir, includeHidden, focusFile, pendingPaths) {
 
 function filenameEligible(search, filePath, relative, tokens, exact, queryLower) {
   if (search.candidates.has(filePath)) return false;
+
   if (!tokens.some(token => relative.includes(token))) return false;
+
   if (exact && tokens.length > 1 && !relative.includes(queryLower)) return false;
 
   return true;
@@ -174,6 +181,7 @@ async function decideSnapResult(ranked, tokens, empty, candidates, relativeRoot,
 function fuzzySnapMiss(exact, query, paths, pathContext, relativeRoot, empty) {
   const eligible = exact && query.length >= 4 && query.length <= 64;
   const limited = eligible && paths.length > 1024;
+
   const fuzzy = eligible ? rankPaths(query, paths.slice(0, 1024).map(file => relativeSlash(relativeRoot, file)),
     { ...pathContext, maxTypos: 1 }).filter(hit => hit.score > 0).slice(0, MAX_ALTERNATIVES) : [];
 
@@ -209,6 +217,7 @@ export async function executeSnap({ query, searchDir, root, includeHidden = fals
   signal?.throwIfAborted();
 
   const empty = emptySnap();
+
   const dirStat = await fs.stat(dir).catch(error => {
     if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
 

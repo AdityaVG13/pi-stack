@@ -1,6 +1,6 @@
 {
   "name": "pi-supernova",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "CodeMode for Pi and OMP: read, edit, write and bash, with transactional files, source views and shared-input program batches.",
   "type": "module",
   "author": "AdityaVG13",

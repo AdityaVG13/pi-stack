@@ -1,6 +1,8 @@
 import {textSignature,sameFileVersion,fileSignature,tooLargeRead,overlayOrThrow,assertReadableFile,readLimitedBytes,remapReadError} from './file-io.js';
 import {resolveCommitTarget,assertExpectedSignature,collectMissingAncestors,makeStageEntry,stageReplacement,installStaged,failCommit,cleanupStaged} from './commit.js';
+
 export {resolveCommitTarget} from './commit.js';
+
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isString } from "../shared/decode.js";
@@ -10,8 +12,9 @@ import { decodeUtf8Strict } from "../shared/utf8.js";
 let commitTail = Promise.resolve();
 
 export class CausalVfs {
-  constructor(onNewFile, validateWrite) {
+  constructor(onNewFile, validateWrite, assertCurrent) {
     this.validateWrite = validateWrite;
+    this.assertCurrent = assertCurrent;
     // No body cache: every read hits disk (or its overlay) so observed bytes
     // are never stale. CAS baselines in `expected` are the only retained
     // per-file state, cleared only at external-mutation boundaries.
@@ -24,6 +27,8 @@ export class CausalVfs {
   }
 
   assertWritable() {
+    this.assertCurrent?.();
+
     if (this.closed) throw new Error("program is already complete");
     this.signal?.throwIfAborted();
   }
@@ -55,6 +60,7 @@ export class CausalVfs {
         bytes = maxBytes === undefined
           ? await file.readFile({ signal: this.signal })
           : await readLimitedBytes(file, stat, maxBytes, label, this.signal, () => tooLargeRead(label,maxBytes,target));
+
         if (!sameFileVersion(stat, await file.stat())) throw new Error("file changed while reading: " + target);
       } finally { await file.close(); }
 
@@ -63,7 +69,7 @@ export class CausalVfs {
 
       return strict ? decodeUtf8Strict(bytes, target) : bytes.toString("utf8");
     } catch (err) {
-      remapReadError(err, target);
+      await remapReadError(err, target);
     }
   }
 
@@ -139,6 +145,9 @@ export class CausalVfs {
     let failed = false;
 
     try {
+      // Admission may have preceded another transaction's asynchronous commit.
+      this.assertCurrent?.();
+
       for (const [logicalPath, content] of writes) {
         this.signal?.throwIfAborted();
         const { target, stat } = await resolveCommitTarget(logicalPath);
@@ -193,10 +202,14 @@ export class CausalVfs {
     return { rolledBack: top?.size ?? 0, depth: this.overlays.length };
   }
 
-  async prepareExternalMutation(name) {
+  assertExternalAllowed(name) {
     this.assertWritable();
 
-    if (this.overlays.length > 1) throw new Error(name + " cannot run inside an edit checkpoint because external mutations cannot be rolled back");
+    if (this.overlays.length > 1) throw new Error(name + " cannot run inside an edit checkpoint because external mutations cannot be rolled back; run bash after the checkpoint, or use explicit restoration outside checkpoints for mutation tests");
+  }
+
+  async prepareExternalMutation(name) {
+    this.assertExternalAllowed(name);
 
     if (!this.overlays.length) { this.mutations.external++;
 

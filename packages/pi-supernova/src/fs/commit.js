@@ -60,7 +60,9 @@ async function writeTemporary(entry, content, stat) {
   } catch (error) {
     // Never leak the temporary name: name the destination and the real cause.
     if (error?.code === "EACCES" || error?.code === "EPERM") throw new Error("permission denied writing " + entry.target + ": the directory or file is not writable");
+
     if (error?.code === "EROFS") throw new Error("cannot write " + entry.target + ": the file system is read-only");
+
     if (error?.code === "ENOSPC") throw new Error("cannot write " + entry.target + ": no space left on device");
 
     throw error;
@@ -130,6 +132,9 @@ async function assertExpectedSignature(vfs, logicalPath, target, stat) {
 
 async function installStaged(vfs, staged) {
   for (const entry of staged) {
+    // Staging and earlier renames await I/O. Recheck before each disk effect;
+    // failCommit restores earlier replacements if ownership changed mid-commit.
+    vfs.assertCurrent?.();
     vfs.signal?.throwIfAborted();
     await fs.rename(entry.temporary, entry.target);
     entry.replaced = true;
@@ -158,4 +163,5 @@ async function failCommit(vfs, staged, error) {
   if (recoveryErrors.length) throw new AggregateError([error, ...recoveryErrors.map(message => new Error(message))], "commit failed: " + error.message + "; recovery failed: " + recoveryErrors.join("; "));
   throw error;
 }
+
 export {assertExpectedSignature,collectMissingAncestors,makeStageEntry,stageReplacement,installStaged,failCommit,cleanupStaged};

@@ -1,4 +1,5 @@
 import {remapReadError} from "./file-io.js";
+import { retireProcessTree } from "./process-tree.js";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
@@ -45,7 +46,7 @@ async function realpathNearest(target) {
     try {
       return await fs.realpath(probe);
     } catch (err) {
-      if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") remapReadError(err, target);
+      if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") await remapReadError(err, target);
       const parent = path.dirname(probe);
 
       if (parent === probe) throw err;
@@ -137,21 +138,22 @@ function commandTimeoutMs(options) {
   return Math.max(1, Math.min(2_147_483_647, Math.floor(requestedTimeout)));
 }
 
-function spawnCommand(argv, options, cwd) {
-  return spawn(argv[0], argv.slice(1), {
-    cwd, env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32",
-  });
+export function commandSpawnError(error, command) {
+  if (error?.code === "EACCES" || error?.code === "EPERM") return new Error("cannot execute " + command + ": permission denied (is it executable?)");
+
+  if (error?.code === "ENOENT") return new Error("command not found: " + command);
+
+  if (error?.code === "ENOTDIR") return new Error("cannot run " + command + ": the working directory is not a directory");
+
+  return error;
 }
 
-function signalProcessTree(child, signal) {
-  if (!child.pid) return;
-
-  if (process.platform === "win32") {
-    const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
-    killer.on("error", () => child.kill(signal));
-  } else {
-    try { process.kill(-child.pid, signal); } catch (err) { if (err.code !== "ESRCH") child.kill(signal); }
-  }
+export function spawnCommand(argv, options, cwd = options.cwd) {
+  try {
+    return spawn(argv[0], argv.slice(1), {
+      cwd, env: options.env ?? process.env, stdio: options.stdio ?? ["ignore", "pipe", "pipe"], detached: process.platform !== "win32", windowsHide:true,
+    });
+  } catch (error) { throw commandSpawnError(error,argv[0]); }
 }
 
 function failCommand(state, error) {
@@ -171,11 +173,29 @@ function failCommand(state, error) {
 }
 
 function terminateCommand(state, error) {
-  if (state.settled || state.terminationError) return;
-  state.terminationError = error;
-  signalProcessTree(state.child, "SIGTERM");
-  // Keep ownership after the direct child exits: descendants may ignore SIGTERM.
-  state.escalation = setTimeout(() => { signalProcessTree(state.child, "SIGKILL"); failCommand(state, error); }, 150);
+  if (state.settled) return;
+  state.terminationError ??= error;
+
+  if (state.stopping) return;
+  clearTimeout(state.timer);
+  state.stopping = retireProcessTree(state).then(()=>{
+    if (state.terminationError) {
+      failCommand(state,state.terminationError);
+
+      return;
+    }
+
+    state.settled = true;
+    state.cleanup();
+    state.resolve({ stdout:state.stdout, stderr:state.stderr,
+      exitCode:state.exitCode ?? (128 + (constants.signals[state.signal] ?? 1)),
+      signal:state.signal, outputTruncated:state.outputTruncated });
+  }).catch(cause=>{
+    state.child.stdout.destroy();
+    state.child.stderr.destroy();
+    const prefix = state.terminationError ? state.terminationError.message + "; " : "";
+    failCommand(state,new Error(prefix + "command cleanup failed: " + cause.message));
+  });
 }
 
 function appendCommandOutput(state, current, chunk) {
@@ -186,33 +206,14 @@ function appendCommandOutput(state, current, chunk) {
   return remaining ? current + chunk.slice(0, remaining) : current;
 }
 
-function onCommandClose(state, code, signal) {
-  if (state.settled) return;
-
-  if (state.terminationError) {
-    // A closed pipe alone says nothing about descendants. Only ESRCH proves
-    // the owned POSIX group is gone; otherwise retain the escalation timer.
-    if (process.platform !== "win32" && state.child.pid) {
-      try { process.kill(-state.child.pid, 0); }
-      catch (error) { if (error.code === "ESRCH") failCommand(state, state.terminationError); }
-    }
-
-    return;
-  }
-
-  state.settled = true;
-  state.cleanup();
-  state.resolve({ stdout: state.stdout, stderr: state.stderr, exitCode: code ?? (128 + (constants.signals[signal] ?? 1)), signal, outputTruncated: state.outputTruncated });
-}
-
 function attachCommandIO(state, options, argv, timeoutMs) {
   const { child } = state;
   const onAbort = () => terminateCommand(state, new Error("aborted"));
   state.cleanup = () => {
     clearTimeout(state.timer);
-    clearTimeout(state.escalation);
     options.signal?.removeEventListener("abort", onAbort);
   };
+
   state.timer = setTimeout(() => terminateCommand(state, new Error(
     "command timed out after " + timeoutMs + "ms: " + truncateChars(options.commandLabel ?? argv.join(" "), 240, "command").text
     + "\nhint: Increase this bash timeoutMs and the outer supernova timeoutMs, or split the work. Sleeps and every command in a shell chain share the same limit."
@@ -221,13 +222,16 @@ function attachCommandIO(state, options, argv, timeoutMs) {
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", chunk => { state.stdout = appendCommandOutput(state, state.stdout, chunk); });
   child.stderr.on("data", chunk => { state.stderr = appendCommandOutput(state, state.stderr, chunk); });
-  child.on("error", error => {
-    if (error?.code === "EACCES" || error?.code === "EPERM") failCommand(state, new Error("cannot execute " + argv[0] + ": permission denied (is it executable?)"));
-    else if (error?.code === "ENOENT") failCommand(state, new Error("command not found: " + argv[0]));
-    else if (error?.code === "ENOTDIR") failCommand(state, new Error("cannot run " + argv[0] + ": the working directory is not a directory"));
-    else failCommand(state, error);
+  child.on("error", error => failCommand(state,commandSpawnError(error,argv[0])));
+  child.once("exit", (code, signal) => {
+    state.processExited = true;
+    state.exitCode = code;
+    state.signal = signal;
+    // An orphan can retain the pipes forever. Begin retirement at leader exit,
+    // then wait for close and group disappearance before reporting completion.
+    terminateCommand(state);
   });
-  child.on("close", (code, signal) => onCommandClose(state, code, signal));
+  child.once("close", () => { state.processClosed = true; });
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
   if (options.signal?.aborted) onAbort();
@@ -243,7 +247,8 @@ export async function runCommand(argv, options = {}) {
     const child = spawnCommand(argv, options, cwd);
     attachCommandIO({
       child, resolve, reject, stdout: "", stderr: "", settled: false,
-      outputTruncated: false, terminationError: undefined, escalation: undefined,
+      outputTruncated: false, terminationError: undefined, stopping: undefined,
+      groups:new Set(child.pid ? [child.pid] : []), killedGroups:new Set(),
       maxOutputChars, timer: undefined, cleanup() {},
     }, options, argv, timeoutMs);
   });

@@ -12,6 +12,7 @@ function assertReadOptions(args) {
   const unknown = Object.keys(args).filter(key => !READ_OPTION_KEYS.includes(key));
 
   if (unknown.length === 0) return;
+
   const windowHint = unknown.some(key => key === "start" || key === "end")
     ? " For a line window use read(path, {offset:1, limit:80}): offset is the first line and limit is the line count."
     : "";
@@ -33,11 +34,14 @@ export function gatherReadArgs(p, a, b) {
     return args;
   }
 
-  return isObject(a) && !Array.isArray(a) ? { path: p, ...a } : { path: p, offset: a, limit: b };
+  // Only the string shorthand guesses between a path and a symbol. Explicit
+  // path/target objects and path arrays must not turn missing files into search.
+  return autoResolve(isObject(a) && !Array.isArray(a) ? { path: p, ...a } : { path: p, offset: a, limit: b });
 }
 
 export function assertReadPaths(targetParam) {
   if (!Array.isArray(targetParam)) return;
+
   if (targetParam.length > 64) throw new Error("read accepts at most 64 paths per batch");
 
   for (const item of targetParam) if (!isString(item) || !item.trim()) throw new Error("read paths must be non-empty strings");
@@ -49,6 +53,7 @@ function assertReadFlags(args) {
   }
 
   if (args.about !== undefined && !isString(args.about)) throw new Error("read about must be a string");
+
   if (args.query !== undefined && !isString(args.query)) throw new Error("read query must be a string");
 }
 
@@ -56,20 +61,24 @@ function assertExclusiveRead(args) {
   const focusModes = [args.about !== undefined, args.query !== undefined, args.outline === true].filter(Boolean).length;
 
   if (focusModes > 1 || (args.outline === true && args.evidence === true)) throw new Error("read accepts only one of about, query, outline, or evidence");
+
   if (args.resolve === true && args.complete === true) throw new Error("read accepts either resolve or complete, not both");
+
   if ((focusModes === 1 || args.evidence === true) && args.complete === true) throw new Error("complete:true requires a raw file read, not a source view");
 }
 
 function autoResolve(args) {
   if (!isString(args.path) || args.resolve !== undefined || args.complete === true || args.json !== undefined) return args;
-  if (args.about !== undefined || args.query !== undefined || looksLikePath(args.path) || isSessionUri(args.path)) return args;
+
+  if (args.about !== undefined || args.query !== undefined || args.offset !== undefined || args.limit !== undefined || looksLikePath(args.path) || isSessionUri(args.path)) return args;
 
   return { ...args, resolve: true };
 }
 
-/** Exclusive-mode + JSON + auto-resolve. Same rules for guest and host. */
+/** Preserve explicit intent across guest, host, and coalesced batch normalization. */
 export function normalizeRead(params) {
   if (!isObject(params)) throw new Error("read requires an options object");
+
   if (params.path !== undefined && params.target !== undefined && params.path !== params.target) {
     throw new Error("read accepts either path or target, not both");
   }
@@ -81,7 +90,7 @@ export function normalizeRead(params) {
   assertExclusiveRead(args);
   assertReadPaths(args.path);
 
-  return autoResolve(args);
+  return args;
 }
 
 export function needsProbe(params) {
@@ -126,7 +135,7 @@ function classifyEvidence(params, target) {
 }
 
 function classifyBarePath(params, target) {
-  if (params.json === undefined && !looksLikePath(target)) {
+  if (params.resolve === true && params.json === undefined && !looksLikePath(target)) {
     return { kind: "snap", query: isString(params.about) ? params.about : target, scoped: isString(params.about) };
   }
 
@@ -139,9 +148,13 @@ export function classifyRead(params, existing) {
   const target = params.path;
 
   if (isSessionUri(target)) return classifySession(params);
+
   if (params.evidence === true) return classifyEvidence(params, target);
+
   if (isString(params.query)) return { kind: "snap", query: params.query, scoped: Boolean(target && target !== params.query) };
+
   if (params.outline === true) return { kind: "outline" };
+
   if (existing) return classifyExisting(params, existing);
 
   return classifyBarePath(params, target);
@@ -186,5 +199,6 @@ export function decodeReadValue(args, value) {
 
 function jsonReadError(args, error) {
   const target = String(args.path ?? args.target ?? "resource");
+
   return new Error("JSON read failed for " + target + jsonSelectorNote(args) + ": " + errorMessage(error));
 }

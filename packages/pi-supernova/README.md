@@ -12,6 +12,16 @@ Ordinary JavaScript control flow remains available; the guest command bindings
 are only `read`, `edit`, `write`, and `bash`. Supernova supplies retrieval,
 transactional file operations, batching, bounded results and the grouped nova UI.
 
+## What is new in 0.10.0
+
+- Background bash sessions support launch, polling, input and stop with bounded
+  transcripts, deadlines, ownership and process-tree cleanup. macOS/Linux offer
+  interactive PTYs; Windows uses pipes and explicitly rejects PTYs.
+- Literal argv stays native across platforms. Session changes, file commits,
+  read provenance and error diagnostics retain their safety boundaries during
+  asynchronous work. See [verification](#verification) for the cross-platform
+  Node/Bun matrix and its limits.
+
 ## What is new in 0.9.0
 
 - **Text clipping does not stop batches:** sequential and parallel programs keep
@@ -49,9 +59,9 @@ transactional file operations, batching, bounded results and the grouped nova UI
   tool ownership, source ranking and rendering have separate modules. All read
   modes, batching, checkpoints and rollback behavior remain supported.
 
-**Verified release candidate:** 315/315 package tests pass on both Node and Bun;
-actual Pi/OMP checks and clean tarball installation checks also pass. See
-[verification results and coverage limits](#verification) below.
+**0.9.0 release-candidate baseline:** 315/315 package tests passed on Node and
+Bun, plus actual Pi/OMP and clean tarball installation checks. See the newer
+[cross-platform verification results and coverage limits](#verification) below.
 
 ### Concurrent file operations
 
@@ -230,10 +240,14 @@ settings. The runtime does not silently rewrite your tool policy.
 | `bash` | `bash({command,args:[...]})`; literal executable argv, without shell expansion of argument strings |
 
 `bash` also accepts `timeout` in seconds for familiar object arguments. `timeoutMs`
-is milliseconds and takes precedence. The owned POSIX adapter launches executable
-argv directly; use the string form for shell builtins, functions or startup hooks.
-Windows and delegated/older executors retain quoted-shell compatibility. Argument
-payloads are not repeated in owned direct-execution errors;
+is milliseconds and takes precedence. The owned adapter launches executable argv
+directly on every supported OS, including Windows; use the string form for shell
+builtins, functions or startup hooks. Literal argv never enters a captured shell
+executor. Windows string commands require native Git Bash on `PATH`, not WSL's
+`System32/bash.exe`; source search requires a spawnable native `rg.exe`. Put their
+real executable directories before WSL or broken WinGet links in the host's `PATH`.
+Windows limits process command lines to 32K characters; use a workspace script file
+for larger payloads. Argument payloads are not repeated in owned direct-execution errors;
 stdout/stderr, exit status and source context remain. Session environment variables are taken
 from the current execution context, not inherited from a different parent session.
 
@@ -503,10 +517,11 @@ per-program rollback. Missing files are created. Multiple invocations are not
 one atomic transaction: for an all-or-nothing publication, assemble a new staging
 file and publish it only when complete. External write overrides reject append.
 
-Supernova is a bounded foreground executor, not a durable background-job manager.
-For long archive scans, use resumable chunks or a host background-job tool and write
-progress records under `.work`. Shell commands inherit the current program
-`timeoutMs` unless they specify their own; increasing the outer deadline no longer
+Supernova supports bounded foreground execution and session-owned background terminals
+(see below), not durable jobs across host restarts. For long archive scans, use a
+background terminal or resumable chunks and write progress records under `.work`.
+Foreground shell commands inherit the current program `timeoutMs` unless they
+specify their own; increasing the outer deadline no longer
 leaves a hidden 60-second shell cap. Set the inner `bash` timeout shorter than the
 outer program timeout (for example 10 seconds inside a 20-second program). The outer
 deadline covers **all** waits and commands, including `sleep`; a shell's own `timeout`
@@ -515,9 +530,105 @@ pending host calls get a bounded 250ms drain to retain owned-shell diagnostics a
 finalize process termination. Non-cooperating host executors may still outlive that
 drain. Cancellation is reported separately from timeout; neither triggers a retry.
 Progress files survive shell execution but staged VFS writes may roll back.
+On macOS/Linux, foreground and background commands share process-group cleanup:
+normal leader exit, cancellation and timeout retire ordinary descendants before
+reporting completion. A shell's `command &` does not create a durable job; launch
+the long-running command itself with `background:true` instead.
 
 Large returned objects are bounded previews, not retained artifacts. Select fields
 and array windows before returning, rather than parsing a truncated preview.
+
+## Background terminal sessions
+
+Start a command without waiting for it to finish:
+
+```js
+return await bash({command:"npm test", background:true});
+// {sessionId, pid, status:"running", pty:false, output, outputStart, cursor,
+//  truncated:false, exitCode:null, signal:null}
+```
+
+Use `pty:true` for interactive programs that require a terminal, such as a
+browser/passkey publisher. Literal argv remains supported:
+
+```js
+return await bash({command:"npm", args:["publish"], background:true, pty:true});
+```
+
+Starting a publish still requires the user's authorization. This API does not
+approve commands, bypass shell overrides or provide credentials. PTY mode uses
+`/usr/bin/script` on macOS/Linux and fails explicitly if unavailable; it adds no
+npm/native dependency. Pipes are the default. PTY output includes terminal echo,
+ANSI escapes and CRLF; it is a transcript, not a full-screen terminal renderer.
+PTY commands start at 80 columns by 24 rows; dynamic resizing is not supported.
+
+Control the returned ID in a later Supernova invocation:
+
+```js
+return await bash({sessionId:data.sessionId, action:"poll", cursor:0, waitMs:1000});
+// waitMs waits for new output/exit only when cursor is at the current end.
+```
+
+```js
+await bash({sessionId:data.sessionId, action:"write", input:"yes\n"});
+return await bash({sessionId:data.sessionId, action:"poll", cursor:data.cursor});
+```
+
+```js
+return await bash({action:"list"});
+// Or: return await bash({sessionId:data.sessionId, action:"stop"});
+```
+
+- Results are objects, not encoded JSON or foreground text. `poll` returns
+  `running`, `exited`, `stopped`, `timed_out`, or `failed`, with nullable `exitCode`
+  and `signal`. A nonzero child exit does not throw from `poll`; inspect it.
+  Invalid arguments/IDs, startup failures and failed controls do throw. In PTY
+  mode, `exitCode` is the system `script` utility's status; signal termination
+  may be encoded there instead of in `signal` and is platform-dependent.
+- `cursor` is an absolute UTF-16 output offset. Pass the previous cursor for
+  incremental output, or omit it to replay retained output. stdout/stderr share
+  a 65,536-character tail. `truncated:true` and `outputStart` disclose discarded
+  history; polling does not consume it. `waitMs` is 0--30,000 (default 0).
+- Input is literal, at most 16,384 characters per call. Include `\n` for Enter
+  and `\u0003` for Ctrl-C in a PTY. Input is not echoed into tool traces, but
+  the child/terminal may echo it into output. Do not send secrets casually.
+- Up to 8 running jobs and 32 retained sessions per extension instance. Oldest
+  completed sessions are evicted when needed. `list` returns metadata without
+  replaying output. IDs are scoped to the originating Pi session and workspace;
+  controls still waiting when that session closes reject rather than returning
+  results from the closed session.
+- A job defaults to a **30-minute deadline**, independently of the starting
+  Supernova call. Set its `timeoutMs` explicitly to change that deadline.
+  Outer program timeouts/cancellation still bound start and control calls;
+  cancelling a poll does not stop its job. Use `stop` to terminate it.
+- Launch, input and stop are external-mutation barriers; staged edits flush
+  first. List/poll do not flush staged edits. None runs inside an edit checkpoint.
+  Background effects are not transactional and may race edits; ordinary CAS
+  checks still detect changed file bytes, not all external side effects.
+- On macOS/Linux, normal exit, explicit stop, job deadline and session shutdown
+  clean up owned process groups, escalating to kill when necessary. Completion
+  is reported only after cleanup, so ordinary orphaned children are not left
+  running. Failed cleanup remains listed and consumes a job slot until a later
+  stop/shutdown succeeds; it is not silently discarded. Windows pipe cleanup is
+  best-effort (`taskkill` while the leader is alive), not POSIX group supervision.
+  Jobs do not survive reload, session
+  replacement, host restart or crash as managed sessions. Deliberately detached
+  daemons are not a supported supervision model. Cleanup errors are reported.
+  Launches and controls from an old session generation are rejected, including
+  after a reload that retains the same Pi session ID. A guest started before
+  replacement cannot list, poll, write to or stop the replacement's jobs.
+  Identity is captured once per tool invocation, including queued sequential and
+  parallel batch entries, rather than reread from a mutable host SessionManager.
+  Replacement invalidates the whole guest bridge: further commands, delegated
+  calls, session-resource lookups and pending commits are rejected. Queued commits
+  recheck identity after waiting, and staged replacements recheck before each
+  installation; a failed transaction restores any earlier replacements. Delegated
+  executors recheck immediately before dispatch. External effects that already
+  started or committed are not rolled back by a session change.
+- Background actions require Supernova's owned shell adapter. A registered shell
+  override is rejected rather than silently ignoring background options or
+  bypassing the override's permissions.
+
 
 ## JSON reports and targeted text audits
 
@@ -547,6 +658,15 @@ Plain .json reads are raw text, including malformed JSON; parsing is requested
 only by `json`. Explicit line windows are not necessarily JSON documents.
 Do not combine json with complete, line windows, or source views. External read
 overrides reject JSON projection rather than silently ignoring the option.
+Explicit `read({path:"TOKEN"})` / `read({target:"TOKEN"})` and path arrays mean
+filesystem reads even for extensionless names. Missing files throw, including
+with `resolve:false`, `complete:true` or line windows. Only a bare string without
+those options guesses between a filename and a symbol; use `{query:"symbol"}`
+or `resolve:true` when source search is intended.
+Source reads protect the resolved file from accidental `write` replacement even
+when the result is text or arrives in a streamed batch. JSON document fields such
+as `path` and `status` are data, never evidence that another file was read.
+
 Uncaught read errors abort the program, including `return {a:await read(...),
 b:await read(...)}`; earlier successful values are not an implicit partial return.
 For optional sources, explicitly return `await Promise.allSettled(paths.map(path =>
@@ -609,8 +729,15 @@ are outside the VFS counters; this is not a filesystem audit.
 `{ok:true,committed:true,value}` on success. On failure it rolls back and rethrows
 the cause, so an ignored failed checkpoint cannot report program success. Use
 `try { await edit(async () => {...}); } catch (error) {...}` for deliberate recovery.
-Shell commands, overlapping/nested checkpoints, and concurrent commands outside
-the active callback are rejected. Await the checkpoint before proceeding.
+Shell commands (including background terminal controls), overlapping/nested
+checkpoints, and concurrent commands outside the active callback are rejected.
+Await the checkpoint before running shell checks. A checkpoint cannot roll back
+external shell effects. For a temporary mutation test, save the original text,
+edit and run the check outside a checkpoint, then explicitly restore it. Catch
+the check failure, restore, and let that program succeed so the restoration
+commits before reporting the failure. A `finally` restoration followed by an
+uncaught error is only staged and rolls back too. Keep a backup: cancellation
+or a worker deadline can prevent cleanup from running.
 
 ## Context, caching and failure fidelity
 
@@ -718,6 +845,7 @@ delivery, and execution-context environment.
 | Read routing and typed readers | `adapters/read.js`, `adapters/read-{text,json,image,focus}.js` |
 | Image validation and isolated decoding | `shared/png.js`, `shared/image.js`, `shared/image-worker.js` |
 | Bounded I/O and atomic transactions | `fs/file-io.js`, `fs/read-window.js`, `fs/vfs.js`, `fs/commit.js` |
+| Foreground/background process ownership | `fs/workspace.js`, `fs/process-tree.js`, `fs/background.js` |
 | Source search and ranking | `context/query.js`, `context/snap-search.js`, `context/source-entry.js`, `context/evidence-{graph,rank}.js` |
 | Model output and host rendering | `output/final.js`, `output/outcome.js`, `ui/host-render.js`, `ui/trace.js`, `ui/render.js` |
 
@@ -726,7 +854,56 @@ acyclic import graph and prohibit context modules from importing runtime code.
 
 ### Verification
 
-The final 0.9.0 release candidate was verified on **macOS**:
+**Portability pass, 2026-09-22:** the current product sources, including the
+in-flight terminal-poll shutdown guard, passed the package suite on real hosts:
+
+| Host | Node | Bun 1.4.0 |
+|---|---|---|
+| macOS, Node 26.7.0 | 357 passed | 355 passed |
+| DGX Spark, Linux arm64, Node 24.16.0 | 357 passed | 355 passed |
+| Windows x64, Node 24.16.0 | 348 passed, 9 skipped | 346 passed, 9 skipped |
+
+A fresh Pi 0.87 loader followed the configured Supernova symlink into this
+checkout, registered its single `supernova` tool, and executed read/write.
+The restarted active extension also completed a pipe job and interactive PTY
+with stdin, output, and exit code 7. This does not inspect Pi's in-memory
+module cache or test remote provider sessions.
+
+Commands: `npm test --prefix packages/pi-supernova` locally; in the standalone
+remote package, `node --test tests/*/*.test.mjs`; for Bun, `bun --run test`
+on a clean tree. The remote archive contained macOS AppleDouble
+`._background.test.mjs` metadata, which Bun mistakenly discovered as a test;
+the successful Spark/Windows Bun reruns explicitly selected real files with
+`bun test tests/*/[!.]*.test.mjs` (PowerShell constructed the same filtered
+file list on Windows). New macOS verification archives should use
+`tar --no-mac-metadata --no-xattrs` to prevent AppleDouble entries. Final
+fixture-only changes were additionally checked on macOS/Spark with
+`node --test tests/codemode/{papercuts,guest-contracts}.test.mjs` (59 passed)
+and `bun test tests/codemode/{papercuts,guest-contracts}.test.mjs` (57 passed);
+Windows reran the full suite. Totals are reported by each runtime's test runner.
+
+Windows verification selected native Git Bash and the real ripgrep executable
+directory in the test process's `PATH`. Its SSH token's backup/restore privileges
+were disabled only for the test process so real deny-read/execute/write ACLs
+could exercise permission errors. No machine-wide configuration was changed.
+Bun 1.4.0 was installed into the temporary Windows verification directory;
+the machine's older Bun 1.3.14 test runner is not a passing result.
+
+The nine Windows skips remain explicit POSIX/platform-specific cases: shell
+startup/quoted-script behavior, FIFO admission, alias and descendant semantics,
+and the large JSON allocation case. Windows literal argv now runs the same
+ownership/malformed-argument tests as POSIX. PTY tests verify explicit Windows
+rejection rather than silently skipping or treating pipes as terminals.
+
+Mutation checks rejected lost native-argv ownership, missing-parent and source/
+evidence-path regressions, dropped cleanup errors, and unmapped launch failures.
+A surviving ambiguous-source-path mutant led to a stronger regression. Tests also
+exercise both synchronous Windows and asynchronous POSIX launch failures.
+These results do not claim native Windows PTYs, exhaustive interleavings, or
+new Pi/OMP/provider end-to-end coverage on the remote hosts. Root release gates
+were not run in this pass.
+
+The historical 0.9.0 release candidate was verified on **macOS**:
 
 | Check | Result |
 |---|---|

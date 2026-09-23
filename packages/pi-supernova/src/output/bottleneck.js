@@ -167,6 +167,7 @@ function packageBatchItems(batch, details, maxChars) {
   const itemErrors = (details.itemErrors ?? []).map(error => boundItemError(error, maxChars, batch.length));
   let remaining = maxChars;
   let truncated = false;
+
   const items = batch.map((item, index) => {
     const share = details.independent === true ? maxChars : Math.floor(remaining / (batch.length - index));
     const bounded = boundBatchItem(item, share);
@@ -223,14 +224,26 @@ function attachTruncation(result, truncated, batch, text, config, maxChars, capp
 
 export function packageHostResult(raw, config) {
   const details = detailsOf(raw);
+
   if (raw && Object.hasOwn(raw, READ_VALUE)) {
     const batch = batchFromDetails(details);
     const result = {ok: !hostResultFailed(raw), value: raw[READ_VALUE], typed: true, cloneItems: details?.jsonMany === true, truncated: details?.outputTruncated === true};
     attachDetails(result, details, batch);
-    if (batch) { result.items = batch; result.itemErrors = details.itemErrors ?? []; }
+
+    if (isString(details?.sourcePath)) result.sourcePath = details.sourcePath;
+
+    if (batch) {
+      result.items = batch;
+      result.itemErrors = details.itemErrors ?? [];
+
+      if (details.sourcePaths) result.sourcePaths = details.sourcePaths;
+    }
+
     if (details?.streamed) result.streamed = true;
+
     return result;
   }
+
   const maxChars = config.maxCallResultChars ?? 65536;
   const batch = batchFromDetails(details);
   const text = batch ? "" : extractRawString(raw);

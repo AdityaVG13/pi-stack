@@ -15,16 +15,20 @@ function unwrapValue(res) {
   return res;
 }
 
-function unwrapRead(res, args) {
+function unwrapRead(res, args, observe) {
   const value = unwrapValue(res);
 
   if ((args.complete === true || args.json !== undefined) && res?.truncated) throw new Error("incomplete read: complete:true or json refuses truncated host output");
 
-  return decodeReadItem(args, value, res);
+  const decoded = decodeReadItem(args, value, res);
+  observe?.(args,res);
+
+  return decoded;
 }
 
 function decodeReadItem(args, value, res) {
   if (!res?.typed) return decodeReadValue(args, value);
+
   // JSON selectors used to cross RPC as separately encoded JSON values. Keep
   // their mutable results independent, but put the copies in the guest heap.
   return res.cloneItems ? value.map(item => structuredClone(item)) : value;
@@ -59,18 +63,22 @@ function missingResolvedIndex(values, paths) {
 
 function settleReadItem(wave, index, res) {
   const job = wave[index];
+
   if (!job) throw new Error("invalid streamed read index: " + index);
   wave[index] = null; // Release resolver closures and their potentially large values.
-  try { job.resolve(unwrapRead(res,job.args)); }
+
+  try { job.resolve(unwrapRead(res,job.args,job.observe)); }
   catch (error) { job.reject(error); }
 }
 
 function settleInlineWave(wave,res,received) {
   unwrapValue(res);
+
   if (received || !Array.isArray(res.items) || res.items.length !== wave.length) throw new Error("invalid batch read response");
+
   for (let i=0;i<wave.length;i++) {
     const error = res.itemErrors?.[i];
-    settleReadItem(wave,i,{...res,ok:!error,value:error ?? res.items[i],items:undefined});
+    settleReadItem(wave,i,{...res,ok:!error,value:error ?? res.items[i],sourcePath:res.sourcePaths?.[i],items:undefined});
   }
 }
 
@@ -78,24 +86,32 @@ async function rpcReadWave(rpc, wave) {
   if (wave.length === 1) {
     const res = leanEnvelope(await rpc("call",["read",wave[0].args]));
     settleReadItem(wave,0,res);
+
     return;
   }
+
   const args = {...wave[0].args,path:wave.map(job=>job.args.path),_independent:true};
   let received = 0, last;
+
   const onItem = (index,res) => {
     if (!Number.isInteger(index) || !wave[index] || last?.index === index) throw new Error("invalid streamed read response");
     received++;
+
     // Keep the final read pending until the host RPC/barrier itself has settled.
     // An awaited batch must never look complete while its host call is running.
     if (received === wave.length) last = {index,res};
     else settleReadItem(wave,index,res);
   };
+
   const res = leanEnvelope(await rpc("call",["read",args],onItem));
+
   if (res?.streamed) {
     if (received !== wave.length || !last) throw new Error("incomplete streamed read response");
     settleReadItem(wave,last.index,last.res);
+
     return;
   }
+
   settleInlineWave(wave,res,received);
 }
 
@@ -118,7 +134,7 @@ function enqueueCompatibleRead(readState, flushReads, args) {
   if (readState.queued.length && readState.queued[0].key !== key) flushReads();
 
   const promise = new Promise((resolve, reject) => {
-    readState.queued.push({ args, key, resolve, reject });
+    readState.queued.push({ args, key, resolve, reject, observe:readState.observe });
 
     if (readState.queued.length === 1) queueMicrotask(flushReads);
   });
@@ -128,12 +144,16 @@ function enqueueCompatibleRead(readState, flushReads, args) {
 
 async function readManyPaths(readOne, args, paths) {
   assertReadPaths(paths);
+
   const values = await Promise.all(paths.map(async item => {
     try { return await readOne({...args,path:item}); }
     catch (error) { throwReadPathError(item,error.message); }
   }));
+
   const missing = args.resolve ? missingResolvedIndex(values,paths) : -1;
+
   if (missing >= 0) throwReadPathError(paths[missing],"not_found");
+
   return values;
 }
 
@@ -193,12 +213,13 @@ export function buildGuestApi(rpc, batchRead) {
     if (checkpoint) throw new Error("edit checkpoints cannot overlap or nest; await the current checkpoint");
     const token = {};
     checkpoint = token;
+
     try { return await runSpeculation(fn, token, checkpointScope, drainReads, rpc); }
     finally { checkpoint = null; }
   }
 
   // Coalesce already-started compatible reads without rewriting JS control flow.
-  const readState = { queued: [], waves: new Set() };
+  const readState = { queued: [], waves: new Set(), observe:noteReadPath };
 
   function flushReads() {
     const pending = readState.queued;
@@ -227,26 +248,21 @@ export function buildGuestApi(rpc, batchRead) {
     const args = normalizeRead(gatherReadArgs(p, a, b));
     p = args.path;
 
-    if (Array.isArray(p)) {
-      const values = await readManyPaths(read, args, p);
-      for (const item of p) if (isString(item)) noteReadPath({ path: item }, values);
+    if (Array.isArray(p)) return await readManyPaths(read, args, p);
 
-      return values;
-    }
-
-    const readValue = !batchRead
-      ? unwrapRead(await invoke("read", args), args)
+    return !batchRead
+      ? unwrapRead(await invoke("read", args), args, noteReadPath)
       : await enqueueCompatibleRead(readState, flushReads, args);
-    noteReadPath(args, readValue);
-
-    return readValue;
   };
 
   const readFiles = new Set();
 
-  function noteReadPath(args, value) {
-    if (isString(args.path) && looksLikePath(args.path)) readFiles.add(args.path);
-    if (isObject(value) && isString(value.path) && looksLikePath(value.path)) readFiles.add(value.path);
+  function noteReadPath(args, envelope) {
+    if (isString(args.path) && args.resolve !== true && args.query === undefined && args.evidence !== true) readFiles.add(args.path);
+
+    // A document may itself contain path/status fields. Only adapter provenance,
+    // carried separately through scalar, inline and streamed replies, names a read.
+    if (isString(envelope.sourcePath)) readFiles.add(envelope.sourcePath);
   }
 
   const write = async (p, content) => {

@@ -3,6 +3,7 @@ import {pendingInScope,overlaySearchEntry} from './search-files.js';
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { WorkspaceIndex } from "./repo-index.js";
+import { relativeSlash } from "../fs/workspace.js";
 import { tokenizeQuery, scorePathTopology, stem } from "./query.js";
 
 // Zero-token evidence selection over source code, after Zero-Mem (arXiv:2607.29377).
@@ -148,15 +149,18 @@ function render(spans, picks, fused, opts, root) {
     const lastLine = span.start + text.split("\n").length - 1;
     const truncated = lastLine < span.sourceEnd;
     budget -= text.length;
+
     const rendered = {
-      path: path.relative(root, span.path) || span.path,
+      path: relativeSlash(root, span.path),
       lines: [span.start, lastLine],
       name: span.name,
       kind: span.kind,
       why,
       text,
     };
+
     if (truncated) { rendered.truncated = true; rendered.nextOffset = lastLine+1; }
+
     out.push(rendered);
 
     if (budget <= 0) break;
@@ -206,15 +210,20 @@ function collectSpans(chosenFiles, overlayText, index, maxSpanLines) {
 // its declaration. Keep the matching line in the bounded window, even in long bodies.
 function usageSpans(spans, profile, maxSpanLines) {
   if (profile.answerType !== "usage" || !profile.subjects.length) return spans;
+
   return spans.flatMap(span => {
     for (let i = span.start - 1; i < span.sourceEnd; i++) {
       const words = span.lines.idents[i];
+
       const matched = profile.subjects.some(subject =>
         words.filter(word => word === subject).length > Number(span.lines.defNames[i] === subject.toLowerCase()));
+
       if (!matched) continue;
       const start = Math.max(span.start, i - 1);
+
       return [{ ...span, start, end: Math.min(span.sourceEnd, start + maxSpanLines - 1) }];
     }
+
     return [];
   });
 }

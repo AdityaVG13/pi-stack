@@ -1,6 +1,8 @@
 import {programParameters} from './src/contract/program.js';
 import {progressEmitter} from './src/ui/progress.js';
+
 export {progressEmitter} from './src/ui/progress.js';
+
 import {result,errorText,successText,fitOutput,attachReceipts,throwIfFailed} from './src/output/outcome.js';
 
 import { runProgramBatch } from "./src/runtime/program-batch.js";
@@ -77,6 +79,7 @@ export function registerCodeMode(pi) {
 
   function rejectLoneParallel(params) {
     if (params?.parallel !== undefined) throw new Error("parallel applies to the programs array; no commands ran");
+
     if (params?.mergeData !== undefined) throw new Error("mergeData applies to the programs array; no commands ran");
   }
 
@@ -90,8 +93,8 @@ export function registerCodeMode(pi) {
     return { runController, abortRun };
   }
 
-  function openRunBridge(ctx, runCwd, budget, runController, timeoutMs) {
-    const runBridge = bridge.fork({ getCwd: () => runCwd, budget, timeoutMs });
+  function openRunBridge(ctx, runCwd, budget, runController, timeoutMs, terminalIdentity) {
+    const runBridge = bridge.fork({ getCwd: () => runCwd, budget, timeoutMs, terminalIdentity });
     runBridge.bindCallContext(ctx, runController.signal);
     runBridge.resetCallBudget();
 
@@ -101,6 +104,7 @@ export function registerCodeMode(pi) {
   async function runAndCommit(params, runCwd, runBridge, abortRun, runController, budget) {
     refreshCatalog(runBridge);
     runBridge.beginSpeculation();
+
     const outcome = await runGuestProgram({
       code: params?.code,
       file: params?.file,
@@ -111,6 +115,7 @@ export function registerCodeMode(pi) {
       signal: runController.signal,
       onTimeout: abortRun,
     });
+
     runBridge.close();
 
     if (outcome.ok) {
@@ -153,6 +158,7 @@ export function registerCodeMode(pi) {
     attachReceipts(outcome, trace);
     const bounded = fitOutput(outcome, call, config.maxReturnChars, outcome.ok ? successText : errorText);
     const visible = runBridge.ledger.dedupe(bounded, call);
+
     const response = result(visible, {
       ok: outcome.ok, error: outcome.error, wallMs: outcome.wallMs,
       returnTruncated: outcome.returnTruncated, logTruncated: outcome.logTruncated,
@@ -177,12 +183,22 @@ export function registerCodeMode(pi) {
     renderCall: renderSupernovaCall,
     renderResult: renderSupernovaResult,
     execute: async function execute(_id, params, signal, onUpdate, ctx, budget, runOpts) {
-      if (params?.programs !== undefined) return runProgramBatch(_id,params,signal,onUpdate,ctx,config,execute);
+      const runCwd = isString(ctx?.cwd) && ctx.cwd ? ctx.cwd : cwd;
+      // The entire invocation owns one identity, including entries queued by a
+      // sequential/parallel batch. Dispatch after reload cannot renew its lease.
+      const terminalIdentity = runOpts?.terminalIdentity ?? bridge.captureTerminalIdentity(ctx, runCwd);
+
+      if (params?.programs !== undefined) {
+        const entry = (id, payload, abort, update, context, sharedBudget, options) =>
+          execute(id, payload, abort, update, context, sharedBudget, {...options,terminalIdentity});
+
+        return runProgramBatch(_id,params,signal,onUpdate,ctx,config,entry);
+      }
+
       rejectLoneParallel(params);
       cancelWarmTimer();
-      const runCwd = isString(ctx?.cwd) && ctx.cwd ? ctx.cwd : cwd;
       const { runController, abortRun } = bindRunSignal(signal);
-      const runBridge = openRunBridge(ctx, runCwd, budget, runController, params?.timeoutMs);
+      const runBridge = openRunBridge(ctx, runCwd, budget, runController, params?.timeoutMs, terminalIdentity);
       const call = ++programSeq;
       runBridge.ledger.beginProgram(call);
       const emitProgress = progressEmitter(onUpdate);
@@ -205,6 +221,7 @@ export function registerCodeMode(pi) {
       } finally {
         peakSeen = Math.max(peakSeen, overlapPeak);
         inFlight -= 1;
+
         if (inFlight === 0) overlapPeak = 0;
         finishRun(runBridge, emitProgress, signal, abortRun, runController);
       }
@@ -222,10 +239,14 @@ export function registerCodeMode(pi) {
     });
   }
 
-  pi.on("session_shutdown", () => { stopped = true; cancelWarmTimer();
-
- return stopWarmGuestWorker(); });
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_shutdown", async () => {
+    stopped = true;
+    cancelWarmTimer();
+    await Promise.all([stopWarmGuestWorker(), bridge.shutdownTerminals()]);
+  });
+  pi.on("session_start", async (_event, ctx) => {
+    await bridge.shutdownTerminals();
+    bridge.reopenTerminals();
     stopped = false;
 
     cwd = ctx && isString(ctx.cwd) && ctx.cwd ? ctx.cwd : process.cwd();

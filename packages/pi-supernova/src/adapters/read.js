@@ -24,6 +24,7 @@ export function createRead(ctx) {
   const readTextFile = createTextReader(ctx, readWindow);
   const maybeImage = createImageReader(vfs);
   const focusAbout = createFocusedReader(vfs, readBudget);
+
   async function sourceRead(query, searchDir, signal, params = {}) {
     params = { ...params, resolve: params.resolve !== false };
     const cwd = getCwd();
@@ -43,6 +44,7 @@ export function createRead(ctx) {
     const overlay = vfs.getOverlay(target);
 
     if (overlay !== undefined) return Buffer.byteLength(overlay, "utf8") > 512 * 1024;
+
     try { return (await fs.stat(target)).size > 512 * 1024; } catch { return false; }
   }
 
@@ -57,6 +59,7 @@ export function createRead(ctx) {
     const opened = await readFile(target, bounded
       ? { ...params, about: undefined, offset: Math.max(1, result.line - 4), limit: params.limit ?? 120 }
       : { ...params, about: undefined }, result.line, result.path, bounded ? undefined : query, signal);
+
     const block = opened.content?.[0];
 
     if (block?.type !== "text") throw new Error("source resolution requires a text file; read the image path directly");
@@ -75,14 +78,16 @@ export function createRead(ctx) {
   function foundSource(result, params, block, details, firstLine, lastLine, sourceChars, nextOffset, complete) {
     const source = { status: "found", path: result.path, line: result.line, lines: [firstLine, lastLine],
       text: block.text.slice(0, sourceChars), complete };
+
     if (nextOffset !== undefined) source.nextOffset = nextOffset;
 
     return readResult(params.resolve ? source : "// " + result.path + ":" + firstLine + "-" + lastLine + "\n" + block.text,
-      { ...details, isSnap: true });
+      { ...details, isSnap: true, sourcePath:result.path });
   }
 
   async function addBatchItem(state, index, raw, onItem) {
     const bytes = raw[READ_BYTES];
+
     if (!onItem) {
       if (state.bytes + bytes > MAX_READ_VALUE_BYTES) throw new Error("batched read exceeds " + MAX_READ_VALUE_BYTES + " bytes; use individual reads");
     } else if (!state.streamed && state.bytes + bytes > 65536) {
@@ -90,12 +95,14 @@ export function createRead(ctx) {
       const retained = state.items.splice(0);
       await Promise.all(retained.map(async (item,i) => { if (item) await onItem(i,item); }));
     }
+
     if (state.streamed) await onItem(index,raw);
     else { state.items[index] = raw; state.bytes += bytes; }
   }
 
   async function readBatchItem(params, target, index, signal, state, onItem) {
     let raw;
+
     try { raw = asReadResult(await readSingle({...params,path:target,target:undefined},getCwd(),target,signal)); }
     catch (error) {
       signal?.throwIfAborted();
@@ -103,30 +110,41 @@ export function createRead(ctx) {
       raw = readResult(error.message,{path:target});
       raw.isError = true;
     }
+
+    state.sourcePaths[index] = raw.details?.sourcePath;
     await addBatchItem(state,index,raw,onItem);
   }
 
   async function readBatch(params, signal, onItem) {
-    const state = {items:[],errors:Array(params.path.length).fill(null),bytes:0,streamed:false};
+    const state = {items:[],sourcePaths:[],errors:Array(params.path.length).fill(null),bytes:0,streamed:false};
+
     // Delivery/acknowledgement stays inside the same eight-operation scheduler
     // slot as I/O. A busy guest cannot cause unbounded host/message-queue buffering.
     const settled = await Promise.allSettled(params.path.map((target,index) =>
       reads.schedule("read",()=>readBatchItem(params,target,index,signal,state,onItem),signal)));
+
     const failed = settled.find(result=>result.status === "rejected");
+
     if (failed) throw failed.reason;
     signal?.throwIfAborted();
+
     const response = readResult("",{count:params.path.length,batch:true,independent:params._independent===true,
       jsonMany:Array.isArray(params.json),streamed:state.streamed,
-      items:state.streamed ? [] : state.items.map(raw=>raw[READ_VALUE]),itemErrors:state.errors,
+      items:state.streamed ? [] : state.items.map(raw=>raw[READ_VALUE]),
+      sourcePaths:!state.streamed && state.sourcePaths.some(isString) ? state.sourcePaths : undefined,itemErrors:state.errors,
       errors:state.errors.flatMap((message,i)=>message ? [{path:params.path[i],message}] : [])});
+
     response.isError = params._independent!==true && state.errors.some(Boolean);
+
     return response;
   }
 
   async function readAdapter(params, signal, onItem) {
     signal?.throwIfAborted();
     params = normalizeRead(normalizeReadWindow(params));
+
     if (Array.isArray(params.path)) return readBatch(params,signal,onItem);
+
     return reads.schedule("read",async()=>asReadResult(await readSingle(params,getCwd(),params.path,signal)),signal);
   }
 
@@ -136,6 +154,7 @@ export function createRead(ctx) {
     const cls = classifyRead(params, existing);
     const relOf = hit => relativeSlash(cwd, hit.path);
     const snapScope = (scoped, hit) => hit?.directory ? hit.path : scoped ? resolveReadPath(cwd, params.path) : cwd;
+
     const kinds = {
       session: async () => {
         const target = await resolveSessionResource(params.path, signal, hooks);
@@ -153,6 +172,7 @@ export function createRead(ctx) {
       dir: () => readDirectory(cls.existing.path, signal),
       missing: () => readResult({ status: "not_found", path: null, line: null, signature: "", confidence: 0, context: [] }, { isSnap: true }),
     };
+
     const run = kinds[cls.kind];
 
     if (!run) throw new Error("unhandled read kind: " + cls.kind);
@@ -224,6 +244,7 @@ export function createRead(ctx) {
       const cwd = getCwd();
 
       if (!isString(params?.query) || !params.query.trim()) throw new Error("evidence requires query");
+
       if (tokenizeQuery(params.query).tokens.length > 16) throw new Error("evidence query is too broad; use at most 16 keywords");
 
       if (signal?.aborted) throw new Error("aborted");

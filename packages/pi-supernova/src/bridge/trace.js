@@ -7,7 +7,7 @@ function traceArgs(args) {
   if (!isObject(args)) return {};
   const out = {};
 
-  for (const key of ["path", "target", "query", "pattern", "command", "cwd", "glob", "action", "op"]) {
+  for (const key of ["path", "target", "query", "pattern", "command", "cwd", "glob", "action", "sessionId", "op"]) {
     const value = args[key];
 
     if (isString(value)) out[key] = truncateChars(value, 240, "trace").text;
@@ -16,7 +16,9 @@ function traceArgs(args) {
   }
 
   if (isString(args.content)) out.content = args.content.length + " chars";
+
   if (Array.isArray(args.edits)) out.edits = args.edits.length + " edits";
+
   if (Array.isArray(args.args)) out.args = args.args.length + " argv";
 
   return out;
@@ -38,4 +40,5 @@ function finishRecord(record, res) {
 
   if (text) record.resultText = truncateChars(text, 4096, "trace").text;
 }
+
 export { traceArgs, finishRecord };

@@ -1,3 +1,4 @@
+import { createBackgroundTerminals } from "../fs/background.js";
 import {createToolRegistry} from './tool-registry.js';
 import {traceArgs,finishRecord} from './trace.js';
 import * as fs from "node:fs/promises";
@@ -16,20 +17,23 @@ import { resolveWorkspacePath, runCommand, clearPathCache, relativeSlash } from 
 import { createNativeAdapters } from "../adapters/index.js";
 import { resultDiff, boundedWriteDiff, writeSnapshot } from "../fs/text-ops.js";
 
-export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedger, budget }) {
+export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedger, budget, terminalIdentity }) {
   const index = registry?.index ?? new WorkspaceIndex((argv, opts) => runCommand(argv, opts));
   const ledger = runLedger ?? new SeenLedger({ window: config.seenWindow ?? 0 });
 
   const vfs = new CausalVfs(paths => {
     index.invalidate();
     notifyWorkspaceChanged(paths);
-  }, target => resolveWorkspacePath(getCwd(), target, "commit", false, true));
+  }, target => resolveWorkspacePath(getCwd(), target, "commit", false, true), assertSession);
 
   const executors = registry?.executors ?? new Map();
   const definitions = registry?.definitions ?? new Map();
   const sharedRegistry = registry ?? { executors, definitions, index, callSeq: 0 };
+  sharedRegistry.terminals ??= createBackgroundTerminals();
   let closed = false;
-  const hooks = {};
+  const hooks = { terminals: sharedRegistry.terminals, terminalGeneration: terminalIdentity?.generation ?? sharedRegistry.terminals.getGeneration() };
+  const ownerOf = ctx => JSON.stringify([ctx?.sessionManager?.getSessionId?.() ?? null, path.resolve(getCwd())]);
+  let terminalOwner = terminalIdentity?.owner ?? ownerOf(null);
   const natives = createNativeAdapters(getCwd, vfs, config, index, ledger, hooks);
   let callCount = 0;
   let activeCtx = null;
@@ -51,9 +55,16 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     try { pi.events.emit("workspace:changed", event)?.catch?.(() => {}); } catch {}
   }
 
+  hooks.terminalOwner = () => terminalOwner;
   hooks.workspaceChanged = notifyWorkspaceChanged;
-  hooks.artifactsDir = () => activeCtx?.sessionManager?.getArtifactsDir?.();
+  hooks.artifactsDir = () => {
+    assertSession();
+
+    return activeCtx?.sessionManager?.getArtifactsDir?.();
+  };
+
   hooks.commandEnv = () => {
+    assertSession();
     const env = { ...process.env };
 
     const current = {
@@ -77,6 +88,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
 
   function bindCallContext(ctx, signal) {
     activeCtx = ctx || null;
+    terminalOwner = terminalIdentity?.owner ?? ownerOf(ctx);
     tools.bindSession(ctx);
     activeSignal = signal;
     vfs.signal = signal;
@@ -100,8 +112,15 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     } catch {}
   }
 
+  function assertSession() {
+    if (hooks.terminalGeneration !== sharedRegistry.terminals.getGeneration() || terminalOwner !== ownerOf(activeCtx)) {
+      throw new Error("host session changed; start a new call");
+    }
+  }
+
   function assertRunOpen(name) {
     if (closed) throw new Error("program is already complete");
+    assertSession();
 
     if (activeSignal?.aborted) throw new Error("aborted");
 
@@ -149,7 +168,10 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
   }
 
   function assertOwnedOverride(name, args) {
+    if (name === "bash" && (args?.background === true || args?.action !== undefined)) throw new Error("background terminals require the Supernova-owned bash adapter, not an external override");
+
     if (name === "read" && (args?.json !== undefined || /^(agent|artifact):\/\/.*\?/i.test(String(args?.path)))) throw new Error("JSON projection requires the Supernova-owned read adapter, not an external override");
+
     if (name === "write" && args?.append === true) throw new Error("append requires the Supernova-owned write adapter, not an external override");
   }
 
@@ -159,8 +181,11 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     const mutating = isMutatingTool(name, config, args, definitions.get(name));
 
     if (mutating) await vfs.prepareExternalMutation(name);
+
     if (activeSignal?.aborted || closed) throw new Error("aborted");
+
     if (!isCallable(name)) throw new Error("tool is no longer enabled in this session: " + name);
+    assertSession();
 
     try {
       const res = await target.exec(`supernova:${name}:${callId}`, args || {}, activeSignal, undefined, target.delegated
@@ -176,6 +201,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
   }
 
   async function invokeNative(target, args, record, onItem) {
+    assertSession();
     const res = await target.native(target.argvOwned ? { ...args, args: args.args.map(String) } : args || {}, activeSignal, onItem);
     completeRecord(record, res);
 
@@ -207,6 +233,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
       const target = resolveInvokeTarget(name, args, { hostTool, hostSession: tools.session, executors, natives });
 
       if (target.kind === "override") return await invokeOverride(target, name, args, record, callId);
+
       if (target.kind === "native") return await invokeNative(target, args, record, onItem);
 
       throw new Error(unknownToolMessage(name, [...executors.keys(), ...Object.keys(natives)]));
@@ -218,11 +245,13 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
 
   function fileMutationKey(name, args) {
     if (!["edit", "write", "apply_patch"].includes(name) || !isString(args?.path)) return;
+
     // Overrides can mutate more than their declared path: keep them global.
     if (hostTool(name) || executors.has(name)) return;
 
     return async () => {
       const target = await resolveWorkspacePath(getCwd(), args.path, name, false, true);
+
       // Share the commit identity, including symlinks and not-yet-created files.
       return (await resolveCommitTarget(target)).target;
     };
@@ -296,8 +325,14 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     fork(options) {
       const runConfig = options.timeoutMs === undefined ? config : { ...config, timeoutMs: Number(options.timeoutMs) };
 
-      return createHostBridge({ pi, config: runConfig, getCwd: options.getCwd, registry: sharedRegistry, ledger: ledger.fork(), budget: options.budget });
+      return createHostBridge({ pi, config: runConfig, getCwd: options.getCwd, registry: sharedRegistry, ledger: ledger.fork(), budget: options.budget, terminalIdentity:options.terminalIdentity });
     },
+    captureTerminalIdentity: (ctx, runCwd) => ({
+      generation:sharedRegistry.terminals.getGeneration(),
+      owner:JSON.stringify([ctx?.sessionManager?.getSessionId?.() ?? null, path.resolve(runCwd)]),
+    }),
+    shutdownTerminals: () => sharedRegistry.terminals.shutdown(),
+    reopenTerminals: () => sharedRegistry.terminals.reopen(),
     close() { closed = true; vfs.closed = true; },
     bindCallContext,
     resetCallBudget,
@@ -305,8 +340,16 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     getMutations: () => ({ ...vfs.mutations }),
     setCallListener: fn => { callListener = isFunction(fn) ? fn : null; },
     barrier: run => scheduler.schedule("write", run, activeSignal),
-    beginSpeculation: () => vfs.begin(),
-    commitSpeculation: async () => await vfs.commit(),
+    beginSpeculation() {
+      assertSession();
+
+      return vfs.begin();
+    },
+    async commitSpeculation() {
+      assertSession();
+
+      return await vfs.commit();
+    },
     rollbackSpeculation: () => vfs.rollback(),
     getOverlayDepth: () => vfs.getOverlayDepth(),
     call,
