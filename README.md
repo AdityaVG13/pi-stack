@@ -9,6 +9,7 @@ Pi / OMP packages for [pi.dev](https://pi.dev) and [omp.sh](https://omp.sh). Eac
 | [pi-supernova](./packages/pi-supernova) | One CodeMode invocation with `read`, `edit`, `write`, and `bash` inside; automatic read batching and ordered mutations | `pi install npm:pi-supernova` · `omp install npm:pi-supernova` |
 | [pi-lakers-theme](./packages/pi-lakers-theme) | Forum purple and gold on black (Pi only) | `pi install npm:pi-lakers-theme` |
 | [pi-rotator](./packages/pi-rotator) | Multi-account rotation for every provider family: balanced, failover, or round-robin | `pi install npm:pi-rotator` |
+| [pi-cliffcompaction](./packages/pi-cliffcompaction) | Mechanical CliffCompaction: last 3 turns verbatim, drop bulk tool dumps, never rephrase | `pi install npm:pi-cliffcompaction` · `omp install npm:pi-cliffcompaction` |
 
 If you use deferred-context-engine, install it **last** so it sees tools other extensions registered. **pi-supernova** exposes one `supernova` tool on Pi and OMP: inline `code`, a saved `file`, or a `programs` batch (sequential or `parallel:true`), with optional literal `data`. The four commands live inside CodeMode, not as native-tool replacements. See its README for context, security, and host-verification boundaries.
 
@@ -19,11 +20,13 @@ pi install npm:pi-papercuts
 pi install npm:pi-deferred-context-engine
 pi install npm:pi-lakers-theme
 pi install npm:pi-rotator
+pi install npm:pi-cliffcompaction
 
 # OMP
 omp install npm:pi-supernova
 omp install npm:pi-papercuts
 omp install npm:pi-deferred-context-engine
+omp install npm:pi-cliffcompaction
 ```
 
 Needs Pi or OMP and Node 22+. Supernova source lookups also require `rg` on PATH. Package details live in each folder's README.
@@ -51,11 +54,13 @@ pi install ./pi-stack/packages/pi-papercuts
 pi install ./pi-stack/packages/pi-deferred-context-engine
 pi install ./pi-stack/packages/pi-lakers-theme
 pi install ./pi-stack/packages/pi-rotator
+pi install ./pi-stack/packages/pi-cliffcompaction
 
 # OMP
 omp install ./pi-stack/packages/pi-supernova
 omp install ./pi-stack/packages/pi-papercuts
 omp install ./pi-stack/packages/pi-deferred-context-engine
+omp install ./pi-stack/packages/pi-cliffcompaction
 ```
 
 Pi cannot target one monorepo subfolder over git alone ([#4530](https://github.com/earendil-works/pi/issues/4530)). Use npm or a path.
@@ -83,6 +88,7 @@ cd packages/pi-deferred-context-engine && npm install && npm test
 cd packages/pi-supernova && npm test
 cd packages/pi-lakers-theme && npm test
 cd packages/pi-rotator && npm test
+cd packages/pi-cliffcompaction && npm test
 # all from repo root:
 npm test
 ```
@@ -107,6 +113,7 @@ cd packages/pi-deferred-context-engine && npm test && npm publish --access publi
 cd packages/pi-supernova && npm test && npm publish --access public
 cd packages/pi-lakers-theme && npm test && npm publish --access public
 cd packages/pi-rotator && npm test && npm publish --access public
+cd packages/pi-cliffcompaction && npm test && npm publish --access public
 ```
 
 `node scripts/release-check.mjs` runs a preflight for published packages.
@@ -117,6 +124,7 @@ cd packages/pi-rotator && npm test && npm publish --access public
 - pi-rotator enters standby instead of routing when another router is installed, and it routes Cursor only through pi-multi-account transport. See its README and LAYERING.md.
 - Papercuts only logs when the agent calls it; it does not auto-detect failures. Outside a git repo the log goes to `~/.papercuts/log.jsonl` unless you set `PAPERCUTS_FILE`.
 - Papercuts/DCE release limits: [docs/RESIDUAL-RISKS.md](./docs/RESIDUAL-RISKS.md). Supernova has its own [security and host boundary](./packages/pi-supernova/README.md#security-and-host-boundary).
+- pi-cliffcompaction takes over `session_before_compact` (threshold, overflow, `/compact`). Do not load a second compaction extension. `/tree` branch summaries stay on Pi's default LLM. `/compact` instructions are ignored. Paper and cut rules: [packages/pi-cliffcompaction/README.md](./packages/pi-cliffcompaction/README.md).
 
 Pi package shape follows [packages.md](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md) (`pi-package` keyword, `pi.extensions` / `omp.extensions`, host peers as `"*"`).
 

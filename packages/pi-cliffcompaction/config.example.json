@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "keepRecent": 3,
+  "thoughtMaxChars": 0,
+  "thinkingMaxChars": 0,
+  "keepThinking": true,
+  "cmdMaxChars": 150,
+  "resultMaxChars": 500,
+  "humanMaxChars": 20000,
+  "shadow": false,
+  "strict": false
+}

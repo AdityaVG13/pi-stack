@@ -1,0 +1,76 @@
+{
+  "name": "pi-cliffcompaction",
+  "version": "0.1.0",
+  "description": "CliffCompaction for Pi/OMP: mechanical autocompaction. Truncate or drop, never rephrase, never compact a compaction. Port of arXiv:2609.26779.",
+  "type": "module",
+  "author": "AdityaVG13",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "omp",
+    "oh-my-pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "extension",
+    "compaction",
+    "context-compaction",
+    "context",
+    "cliffcompaction",
+    "coding-agent"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./lib": "./lib/index.ts"
+  },
+  "files": [
+    "index.ts",
+    "lib/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "config.example.json"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm test && node ../../scripts/preflight.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "omp": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AdityaVG13/pi-stack.git",
+    "directory": "packages/pi-cliffcompaction"
+  },
+  "bugs": {
+    "url": "https://github.com/AdityaVG13/pi-stack/issues"
+  },
+  "homepage": "https://github.com/AdityaVG13/pi-stack/tree/main/packages/pi-cliffcompaction#readme"
+}

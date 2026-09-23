@@ -1,0 +1,80 @@
+{
+  "canon_obj": "{\"a\":2,\"b\":1}",
+  "chain4": [
+    "ee5b96c3959548e828a7e5242f0b2d8813a1b526acf1526384e161697ee24fbf",
+    "a702fca869e3fb20aef697e7905a20411d8f68a27fa97236d324956e911d998f",
+    "b06213cb020ffabe702ae5fb337d6b0b7605bf28f99259fc799baa42e2fb596a",
+    "0c6f055a496bb4f279a3ae19ff17d374b07dfbee4d0fd6b97404856a26fe8515",
+    "606a25f1bc41958525a7431359ff7e8fb4bc987b00151ace3f84abdca1ca9f38",
+    "616725a88aa67fb373e9aa21355ce6c23ffd913590b5d3d78f0ae0b9259b6fc5",
+    "a0ca9e0b6af7ccd3d6edd1c393919c0cdf745bb48090082778cb659e343c7979",
+    "e3189b1e45d3cb9c9d20cc727c42b03ad85f139b1a3d59b8a2f9768b3441ba5b",
+    "74446810c0a48df59515681499c4d54272392a509f59ffae9f13084160ebd0ee"
+  ],
+  "digest0": "55abd3f3c1d4106ccf8a2a0b5a00e9b278b4885395f737a3b5632a117a9106d5",
+  "a10": {
+    "head_len": 1,
+    "cut": 17,
+    "n": 6,
+    "summary": "The following is a summary of your previous actions (long observations omitted):\n\nassistant: Step 0: I will inspect module 0 to find the bug.\n[bash] {\"command\":\"pytest tests/test_0.py -x\"}\n\n---\n\nassistant: Step 1: I will inspect module 1 to find the bug.\n[bash] {\"command\":\"pytest tests/test_1.py -x\"}\n\n---\n\nresult: test_1 passed (short output)\n\n---\n\nassistant: Step 2: I will inspect module 2 to find the bug.\n[bash] {\"command\":\"pytest tests/test_2.py -x\"}\n\n---\n\nassistant: Step 3: I will inspect module 3 to find the bug.\n[bash] {\"command\":\"pytest tests/test_3.py -x\"}\n\n---\n\nresult: test_3 passed (short output)\n\n---\n\nassistant: Step 4: I will inspect module 4 to find the bug.\n[bash] {\"command\":\"pytest tests/test_4.py -x\"}\n\n---\n\nassistant: Step 5: I will inspect module 5 to find the bug.\n[bash] {\"command\":\"pytest tests/test_5.py -x\"}\n\n---\n\nresult: test_5 passed (short output)\n\n---\n\nassistant: Step 6: I will inspect module 6 to find the bug.\n[bash] {\"command\":\"pytest tests/test_6.py -x\"}\n\n---\n\nassistant: Step 7: I will inspect module 7 to find the bug.\n[bash] {\"command\":\"pytest tests/test_7.py -x\"}\n\n---\n\nresult: test_7 passed (short output)",
+    "tail_roles": [
+      "assistant",
+      "user",
+      "assistant",
+      "user"
+    ]
+  },
+  "a6_cmd20_summary": "The following is a summary of your previous actions (long observations omitted):\n\nassistant: Step 0: I will inspect module 0 to find the bug.\n[bash] {\"command\":\"pytest t...\n\n---\n\nassistant: Step 1: I will inspect module 1 to find the bug.\n[bash] {\"command\":\"pytest t...\n\n---\n\nresult: test_1 passed (short output)\n\n---\n\nassistant: Step 2: I will inspect module 2 to find the bug.\n[bash] {\"command\":\"pytest t...\n\n---\n\nassistant: Step 3: I will inspect module 3 to find the bug.\n[bash] {\"command\":\"pytest t...\n\n---\n\nresult: test_3 passed (short output)\n\n---\n\nassistant: Step 4: I will inspect module 4 to find the bug.\n[bash] {\"command\":\"pytest t...",
+  "o10": {
+    "head_len": 2,
+    "cut": 18,
+    "n": 7,
+    "summary": "The following is a summary of your previous actions (long observations omitted):\n\nassistant: Step 0: inspecting module 0.\n[bash] {\"command\": \"pytest tests/test_0.py -x\"}\n\n---\n\nassistant: Step 1: inspecting module 1.\n[bash] {\"command\": \"pytest tests/test_1.py -x\"}\n\n---\n\nresult: test_1 passed\n\n---\n\nassistant: Step 2: inspecting module 2.\n[bash] {\"command\": \"pytest tests/test_2.py -x\"}\n\n---\n\nassistant: Step 3: inspecting module 3.\n[bash] {\"command\": \"pytest tests/test_3.py -x\"}\n\n---\n\nresult: test_3 passed\n\n---\n\nassistant: Step 4: inspecting module 4.\n[bash] {\"command\": \"pytest tests/test_4.py -x\"}\n\n---\n\nassistant: Step 5: inspecting module 5.\n[bash] {\"command\": \"pytest tests/test_5.py -x\"}\n\n---\n\nresult: test_5 passed\n\n---\n\nassistant: Step 6: inspecting module 6.\n[bash] {\"command\": \"pytest tests/test_6.py -x\"}\n\n---\n\nassistant: Step 7: inspecting module 7.\n[bash] {\"command\": \"pytest tests/test_7.py -x\"}\n\n---\n\nresult: test_7 passed"
+  },
+  "billable_body": 18413,
+  "est_tokens": 4603,
+  "dumps_len": 18413,
+  "engine": {
+    "compacted": true,
+    "modified": true,
+    "n_out": 8,
+    "est_in": 4603,
+    "est_out": 1167,
+    "base_cut": 15,
+    "base_head": 1,
+    "summary": "The following is a summary of your previous actions (long observations omitted):\n\nassistant: Step 4: I will inspect module 4 to find the bug.\n[bash] {\"command\":\"pytest tests/test_4.py -x\"}\n\n---\n\nassistant: Step 5: I will inspect module 5 to find the bug.\n[bash] {\"command\":\"pytest tests/test_5.py -x\"}\n\n---\n\nresult: test_5 passed (short output)\n\n---\n\nassistant: Step 6: I will inspect module 6 to find the bug.\n[bash] {\"command\":\"pytest tests/test_6.py -x\"}"
+  },
+  "image_tokens": [
+    [
+      200,
+      200,
+      64
+    ],
+    [
+      1000,
+      1000,
+      1296
+    ],
+    [
+      1092,
+      1092,
+      1521
+    ],
+    [
+      1920,
+      1080,
+      2691
+    ],
+    [
+      2000,
+      1500,
+      3888
+    ],
+    [
+      3840,
+      2160,
+      4784
+    ]
+  ],
+  "max_image_tokens": 4784
+}
