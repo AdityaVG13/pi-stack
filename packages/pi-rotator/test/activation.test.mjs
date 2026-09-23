@@ -105,7 +105,11 @@ function ctx(provider, sessionId = "s1", extra = {}) {
 }
 
 function fire(pi, event, payload, context) {
-  for (const handler of pi.handlers.get(event) || []) handler(payload, context);
+  let result;
+
+  for (const handler of pi.handlers.get(event) || []) result = handler(payload, context);
+
+  return result;
 }
 
 function tick() {
@@ -143,7 +147,9 @@ describe("activation", () => {
       [...pi.handlers.keys()].sort(),
       [
         "after_provider_response",
+        "agent_before_settle",
         "agent_end",
+        "before_agent_start",
         "before_provider_request",
         "cache_warming_decision",
         "context_with_system",
@@ -218,7 +224,7 @@ describe("activation", () => {
 
     piRotator(pi);
 
-    assert.equal(pi.handlers.size, 7);
+    assert.equal(pi.handlers.size, 9);
     fire(pi, "session_start", undefined, ctx(CODEX));
     await tick();
 
@@ -240,7 +246,7 @@ describe("activation", () => {
 
       piRotator(pi);
 
-      assert.equal(pi.handlers.size, 7);
+      assert.equal(pi.handlers.size, 9);
       fire(pi, "session_start", undefined, ctx(CODEX));
       await tick();
 
@@ -440,6 +446,191 @@ describe("activation", () => {
     assert.equal(route.reason, "exhausted");
     assert.equal(route.to, CODEX2);
     assert.deepEqual(pi.setModelCalls, [{ provider: CODEX2, id: MODEL }]);
+  });
+
+  describe("mid-turn continuation", () => {
+    async function setup(config = {}, slots = [CODEX, CODEX2, CODEX3]) {
+      const dir = agentDirWith(transportFiles({
+        "auth.json": Object.fromEntries(slots.map(id => [id, {}])),
+      }));
+
+      writeRotatorConfig(dir, config);
+      const pi = fakePi();
+      const live = ctx(CODEX);
+      const setModel = pi.setModel;
+
+      pi.setModel = async target => {
+        const ok = await setModel(target);
+
+        live.model = target;
+
+        return ok;
+      };
+
+      piRotator(pi);
+      await fire(pi, "session_start", undefined, live);
+      await fire(pi, "before_agent_start", {}, live);
+      await fire(pi, "before_provider_request", { payload: { input: ["original"] } }, live);
+
+      return { dir, pi, live };
+    }
+
+    function boundary(provider = CODEX, errorMessage = "You have hit your ChatGPT usage limit.") {
+      const message = {
+        role: "assistant", provider, model: MODEL, stopReason: "error", errorMessage,
+        content: [{ type: "text", text: "unfinished output" }],
+      };
+
+      return {
+        outcome: "error",
+        entries: [{ type: "custom", customType: "earlier-handler", data: {} }],
+        context: {
+          contextEntries: [{ sourceEntry: { type: "message", id: "failed-attempt", message }, messages: [message] }],
+        },
+      };
+    }
+
+    it("awaits a landed switch, then resumes once without another balanced rotation", async () => {
+      const { pi, live } = await setup();
+      const normalSwitch = pi.setModel;
+      let release;
+
+      pi.setModel = target => new Promise(resolve => { release = () => resolve(normalSwitch(target)); });
+      let finished = false;
+
+      const response = Promise.resolve(fire(pi, "after_provider_response", { status: 429 }, live))
+        .then(() => { finished = true; });
+
+      await tick();
+      const finishedBeforeSwitch = finished;
+
+      release();
+      await response;
+      assert.equal(finishedBeforeSwitch, false, "response dispatch must await the account switch");
+      const event = boundary();
+
+      await fire(pi, "agent_end", { messages: [event.context.contextEntries[0].messages[0]] }, live);
+      assert.equal(live.model.provider, CODEX2);
+      assert.equal(pi.setModelCalls.length, 1, "do not skip the recovery account at agent_end");
+      assert.deepEqual(await fire(pi, "agent_before_settle", event, live), {
+        entries: [...event.entries, { type: "context_edit", targetId: "failed-attempt", replacement: null }],
+        continue: true,
+      });
+      assert.equal(await fire(pi, "agent_before_settle", event, live), undefined, "one-shot continuation");
+    });
+
+    it("rescues streamed quota errors even after HTTP 200 in failover mode", async () => {
+      const { pi, live } = await setup({ strategy: "failover" });
+      const event = boundary(CODEX, 'stream failed: {"code":"insufficient_quota"}');
+
+      await fire(pi, "after_provider_response", { status: 200 }, live);
+      await fire(pi, "agent_end", { messages: [event.context.contextEntries[0].messages[0]] }, live);
+      assert.equal(live.model.provider, CODEX2);
+      assert.equal((await fire(pi, "agent_before_settle", event, live))?.continue, true);
+    });
+
+    it("does not recycle exhausted accounts when cooldowns expire during the same activity", async t => {
+      const now = Date.now;
+      let clock = now();
+
+      Date.now = () => clock;
+      t.after(() => { Date.now = now; });
+      const { pi, live } = await setup({ strategy: "failover", cooldownMs: 1 }, [CODEX, CODEX2]);
+
+      await fire(pi, "after_provider_response", { status: 429 }, live);
+      const first = boundary();
+
+      await fire(pi, "agent_end", { messages: [first.context.contextEntries[0].messages[0]] }, live);
+      assert.equal((await fire(pi, "agent_before_settle", first, live))?.continue, true);
+      clock += 1000;
+      await fire(pi, "before_provider_request", { payload: { input: ["original"] } }, live);
+      await fire(pi, "after_provider_response", { status: 429 }, live);
+      const last = boundary(CODEX2);
+
+      await fire(pi, "agent_end", { messages: [last.context.contextEntries[0].messages[0]] }, live);
+      assert.equal(await fire(pi, "agent_before_settle", last, live), undefined);
+      assert.deepEqual(pi.setModelCalls.map(model => model.provider), [CODEX2]);
+      clock += 1000;
+      await fire(pi, "before_agent_start", {}, live);
+      await fire(pi, "before_provider_request", { payload: { input: ["new user turn"] } }, live);
+      await fire(pi, "after_provider_response", { status: 429 }, live);
+      assert.equal(live.model.provider, CODEX, "a new user turn gets a fresh account budget");
+    });
+
+    it("skips rejected or throwing switch targets and stops if none can land", async () => {
+      for (const reject of [false, new Error("unavailable")]) {
+        const { pi, live } = await setup();
+        const normalSwitch = pi.setModel;
+        const attempts = [];
+
+        pi.setModel = async target => {
+          attempts.push(target.provider);
+
+          if (target.provider === CODEX2) {
+            if (reject instanceof Error) throw reject;
+
+            return reject;
+          }
+
+          return normalSwitch(target);
+        };
+
+        await fire(pi, "after_provider_response", { status: 429 }, live);
+        assert.deepEqual(attempts, [CODEX2, CODEX3]);
+        assert.equal((await fire(pi, "agent_before_settle", boundary(), live))?.continue, true);
+      }
+
+      const { pi, live } = await setup();
+
+      pi.setModel = async () => false;
+      await fire(pi, "after_provider_response", { status: 429 }, live);
+      assert.equal(live.model.provider, CODEX);
+      assert.equal(await fire(pi, "agent_before_settle", boundary(), live), undefined);
+    });
+
+    it("never resumes cancellation, another session/model, or non-quota failures", async () => {
+      for (const change of [
+        null,
+        (event) => { event.outcome = "aborted"; },
+        (_event, live) => { live.signal = AbortSignal.abort(); },
+        (_event, live) => { live.model = { ...live.model, id: "manually-selected-model" }; },
+        (_event, live) => { live.sessionManager = { getSessionId: () => "different-session" }; },
+      ]) {
+        const { pi, live } = await setup();
+
+        await fire(pi, "after_provider_response", { status: 429 }, live);
+        const event = boundary();
+
+        change?.(event, live);
+        const result = await fire(pi, "agent_before_settle", event, live);
+
+        if (change) assert.equal(result, undefined);
+        else assert.equal(result?.continue, true, "healthy continuation control");
+      }
+
+      const { pi, live } = await setup();
+      const event = boundary(CODEX, "HTTP 500 internal server error");
+
+      await fire(pi, "after_provider_response", { status: 500 }, live);
+      await fire(pi, "agent_end", { messages: [event.context.contextEntries[0].messages[0]] }, live);
+      assert.equal(await fire(pi, "agent_before_settle", event, live), undefined);
+    });
+
+    it("does not queue another continuation when Pi already retried on the fresh account", async () => {
+      const control = await setup();
+
+      await fire(control.pi, "after_provider_response", { status: 429 }, control.live);
+      assert.equal((await fire(control.pi, "agent_before_settle", boundary(), control.live))?.continue, true);
+      const { pi, live } = await setup();
+
+      await fire(pi, "after_provider_response", { status: 429 }, live);
+      await fire(pi, "before_provider_request", { payload: { input: ["original"] } }, live);
+      await fire(pi, "after_provider_response", { status: 500 }, live);
+      const event = boundary(CODEX2, "HTTP 500 internal server error");
+
+      await fire(pi, "agent_end", { messages: [event.context.contextEntries[0].messages[0]] }, live);
+      assert.equal(await fire(pi, "agent_before_settle", event, live), undefined);
+    });
   });
 
   it("a missed response backfills warmth but never drain", async () => {

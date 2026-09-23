@@ -7,8 +7,9 @@
 // builtins for families nobody else registered.
 //
 // Integration points (the same ones pi-multi-account proved out):
-//   - exhaustion detection via the after_provider_response hook (status only)
-//   - switching via pi.setModel({ provider, id }), keeping the model id
+//   - exhaustion detection via HTTP status or a finalized quota error
+//   - confirmed switches via pi.setModel, keeping the model id
+//   - context-only recovery via agent_before_settle (no synthetic user input)
 // One command: /rotator status | next | rediscover.
 //
 // Rotation is per-(provider, model): every slot serves the identical model id
@@ -69,9 +70,9 @@ function readJson(dir, file) {
 
 function safeOn(pi, event, handler) {
   try {
-    pi.on(event, (payload, ctx) => {
+    pi.on(event, async (payload, ctx) => {
       try {
-        handler(payload, ctx);
+        return await handler(payload, ctx);
       } catch (error) {
         appendDebug(agentDir(), "handler_error", {
           event,
@@ -146,11 +147,11 @@ function ttlFor(family, model) {
   return effectiveTtlMs(model, family.ttlMs, retentionOf());
 }
 
-function pickNext(family, session, model, excludeCurrent) {
+function pickNext(family, session, model, excludeCurrent, excluded) {
   // One clock per decision: the cooling checks and the router share this
   // instant instead of sampling Date.now() three times.
   const now = Date.now();
-  const base = (id) => isCooling(family.cooldowns, id, now);
+  const base = (id) => excluded?.has(id) || isCooling(family.cooldowns, id, now);
 
   const cooling = excludeCurrent
     ? (id) => id === model.provider || base(id)
@@ -372,49 +373,52 @@ function notifySwitch(ctx, from, to) {
   }
 }
 
-function applySwitch(pi, dir, state, family, from, provider, id, ctx, announce) {
+async function applySwitch(pi, dir, state, family, from, provider, id, ctx, announce) {
   const thinking = state.lastThinking;
   const { target, full } = resolveTarget(ctx, provider, id);
 
   debugLine(state, dir, "switch_target", { to: `${provider}/${id}`, full });
 
-  void pi
-    .setModel(target)
-    .then((ok) => {
-      if (ok === false) {
-        debugLine(state, dir, "switch_rejected", { from, to: `${provider}/${id}` });
-        appendJournal(dir, "switch_rejected", { family: family.base, from, to: provider });
+  try {
+    const ok = await pi.setModel(target);
 
-        return;
-      }
+    if (ok === false) {
+      debugLine(state, dir, "switch_rejected", { from, to: `${provider}/${id}` });
+      appendJournal(dir, "switch_rejected", { family: family.base, from, to: provider });
 
-      if (thinking !== undefined) {
-        state.pendingThinking = { target: thinking, baseline: ASSUMED_HOST_RESET };
-      }
+      return false;
+    }
 
-      appendJournal(dir, "thinking", {
-        family: family.base,
-        from,
-        to: provider,
-        before: thinking === undefined ? null : thinking,
-        applied: null,
-        outcome: thinking === undefined ? "skipped" : "deferred",
-      });
+    if (thinking !== undefined) {
+      state.pendingThinking = { target: thinking, baseline: ASSUMED_HOST_RESET };
+    }
 
-      // Landed switches only: rejections and throws return above, so an
-      // announcement always names a switch that happened.
-      if (announce === true) notifySwitch(ctx, from, provider);
-    })
-    .catch((error) => {
-      // A throwing setModel never switches: journal it, or the route entry
-      // above claims a switch that never happened.
-      appendJournal(dir, "switch_error", {
-        family: family.base,
-        from,
-        to: provider,
-        message: String((error && error.message) || error).slice(0, 160),
-      });
+    appendJournal(dir, "thinking", {
+      family: family.base,
+      from,
+      to: provider,
+      before: thinking === undefined ? null : thinking,
+      applied: null,
+      outcome: thinking === undefined ? "skipped" : "deferred",
     });
+
+    // Landed switches only: rejections and throws return above, so an
+    // announcement always names a switch that happened.
+    if (announce === true) notifySwitch(ctx, from, provider);
+
+    return true;
+  } catch (error) {
+    // A throwing setModel never switches: journal it, or the route entry
+    // above claims a switch that never happened.
+    appendJournal(dir, "switch_error", {
+      family: family.base,
+      from,
+      to: provider,
+      message: String((error && error.message) || error).slice(0, 160),
+    });
+
+    return false;
+  }
 }
 
 // Registry verification: never route into a slot Pi cannot serve, or the
@@ -455,17 +459,19 @@ function verifySlot(ctx, slotId) {
   }
 }
 
-function switchModel(pi, dir, state, family, from, model, session, reason, ctx) {
+async function switchModel(pi, dir, state, family, from, model, session, reason, ctx, excluded) {
   // Verify-then-switch with retry: a picked slot Pi cannot serve is cooled
   // (existing exclusion machinery, self-heals on expiry) and the next
   // candidate is tried. Bounded by slot count; all-dead stays put.
   for (let attempt = 0; attempt <= family.slots.length; attempt++) {
-    const picked = pickNext(family, session, model, false);
+    if (ctx?.signal?.aborted) return false;
+    const picked = pickNext(family, session, model, false, excluded);
 
     if (!picked || picked.provider === from) return false;
     const check = verifySlot(ctx, picked.provider);
 
     if (!check.ok) {
+      excluded?.add(picked.provider);
       markCooling(family.cooldowns, picked.provider, Date.now() + state.config.cooldownMs);
       appendJournal(dir, "slot_skipped", {
         family: family.base,
@@ -486,10 +492,11 @@ function switchModel(pi, dir, state, family, from, model, session, reason, ctx) 
       warm: picked.warm,
       drained: Object.fromEntries(family.drained),
     });
+
     // Automatic rotations only: manual `/rotator next` already confirms via
     // its panel, so it calls applySwitch without the flag and never double-
     // notifies. Manual is also an explicit force: it bypasses verification.
-    applySwitch(
+    const landed = await applySwitch(
       pi,
       dir,
       state,
@@ -501,7 +508,9 @@ function switchModel(pi, dir, state, family, from, model, session, reason, ctx) 
       state.config.announceSwitches === true,
     );
 
-    return true;
+    if (landed) return picked.provider;
+    excluded?.add(picked.provider);
+    markCooling(family.cooldowns, picked.provider, Date.now() + state.config.cooldownMs);
   }
 
   return false;
@@ -556,6 +565,10 @@ function onBeforeRequest(pi, dir, state, event, ctx) {
 
   if (!family) return;
   const { id: sessionId, session } = sessionState(family, ctx);
+
+  // A real request consumes the handoff, including retries already owned by
+  // Pi. Keep the attempted-account budget until the next user activity.
+  if (session.recovery) session.recovery.pending = null;
   const next = fingerprintPayload(event ? event.payload : null);
   const prev = session.fingerprints.get(model.provider) || null;
 
@@ -675,7 +688,65 @@ function onWarmDecision(dir, state, event, ctx) {
   });
 }
 
-function onResponse(pi, dir, state, config, event, ctx) {
+// Cooldowns are shared across turns; attempted slots additionally bound this
+// activity even if a cooldown expires while Pi is retrying or running tools.
+async function rescue(pi, dir, state, family, model, session, ctx) {
+  if (!session.recovery || session.recovery.modelId !== model.id) {
+    session.recovery = { modelId: model.id, attempted: new Set(), pending: null };
+  }
+
+  const recovery = session.recovery;
+  const pending = { from: model.provider, to: null, modelId: model.id };
+
+  recovery.attempted.add(model.provider);
+  recovery.pending = pending;
+  markCooling(family.cooldowns, model.provider, Date.now() + state.config.cooldownMs);
+  pending.to = await switchModel(
+    pi, dir, state, family, model.provider, model, session, "exhausted", ctx, recovery.attempted,
+  );
+}
+
+function resetRecovery(state, ctx) {
+  for (const family of state.families.values()) {
+    const session = peekSession(family, ctx);
+
+    if (session) session.recovery = null;
+  }
+}
+
+// Pi's own retries and queued work run before this boundary. Only if the
+// failed request is still the tail do we omit that attempt from model context
+// and request one context-only continuation. Raw history and completed tools
+// are retained; no new user message or prompt shaping is needed.
+function onBeforeSettle(dir, state, event, ctx) {
+  const model = ctx?.model;
+  const family = model && familyOf(state, model.provider);
+  const recovery = family && peekSession(family, ctx)?.recovery;
+  const pending = recovery?.pending;
+
+  if (!pending) return;
+  recovery.pending = null;
+
+  if (event?.outcome !== "error" || ctx?.signal?.aborted ||
+      !pending.to || model.provider !== pending.to || model.id !== pending.modelId) return;
+  const tail = event.context?.contextEntries?.findLast(entry => entry.messages.length > 0);
+  const message = tail?.messages.at(-1);
+  const source = tail?.sourceEntry;
+
+  if (source?.type !== "message" || !source.id || message?.role !== "assistant" || message.stopReason !== "error" ||
+      message.provider !== pending.from || message.model !== pending.modelId) return;
+  appendJournal(dir, "resume", {
+    family: family.base, from: pending.from, to: pending.to, model: pending.modelId,
+    session: String(sessionIdOf(ctx)).slice(0, 8),
+  });
+
+  return {
+    entries: [...event.entries, { type: "context_edit", targetId: source.id, replacement: null }],
+    continue: true,
+  };
+}
+
+async function onResponse(pi, dir, state, event, ctx) {
   const model = ctx ? ctx.model : null;
   const family = model ? familyOf(state, model.provider) : null;
   const status = event ? event.status : undefined;
@@ -704,11 +775,7 @@ function onResponse(pi, dir, state, config, event, ctx) {
 
   if (action === "skip") return; // transient error: neither drain nor switch
 
-  // Mid-turn rescue only: an exhausted account cannot serve the rest of
-  // this turn, so move immediately. The turn itself still ends in error
-  // (no auto-resume); the user continues on the fresh slot.
-  markCooling(family.cooldowns, model.provider, Date.now() + config.cooldownMs);
-  switchModel(pi, dir, state, family, model.provider, model, session, "exhausted", ctx);
+  await rescue(pi, dir, state, family, model, session, ctx);
 }
 
 // A turn Pi core failed before any provider request (auth resolution,
@@ -727,6 +794,8 @@ function failedTurn(event, model) {
 
   return {
     slot,
+    modelId: failure.model ?? model?.id,
+    exhausted: /usage[_\s-]*limit|insufficient[_\s-]*quota|quota.{0,30}(?:exceed|exhaust)|(?:exceed|exhaust).{0,30}quota|rate[_\s-]*limit|too many requests|credit balance.{0,30}(?:low|exhaust)/i.test(failure.errorMessage || ""),
     message: String(
       failure.errorMessage === undefined || failure.errorMessage === null
         ? "turn error"
@@ -738,17 +807,16 @@ function failedTurn(event, model) {
 // Per-turn rotation: every request of a turn stays on one slot (one cold
 // miss per onboarding instead of one per request), and the switch lands
 // before the next turn starts. Failover never rotates here by design.
-function onTurnEnd(pi, dir, state, event, ctx) {
+async function onTurnEnd(pi, dir, state, event, ctx) {
   const model = ctx ? ctx.model : null;
   const family = model ? familyOf(state, model.provider) : null;
 
-  const session =
-    family && family.strategy !== "failover" ? sessionState(family, ctx).session : null;
+  const session = family ? sessionState(family, ctx).session : null;
 
   // A fingerprinted-but-cold serving slot means its response was never
   // recorded: backfill the warmth it earned (never the drain it didn't).
   const backfilled = Boolean(
-    family && session && model && needsBackfill(session, model.provider),
+    family && family.strategy !== "failover" && session && model && needsBackfill(session, model.provider),
   );
 
   if (backfilled) session.warm.set(model.provider, Date.now());
@@ -776,10 +844,22 @@ function onTurnEnd(pi, dir, state, event, ctx) {
       message: failure.message,
       cooled: ours,
     });
+
+    // Keep the confirmed HTTP handoff instead of rotating past it. Streaming
+    // providers can also report quota failure in a 200 response body.
+    if (ours && failure.modelId === model.id) {
+      if (session.recovery?.pending?.from === failure.slot) return;
+
+      if (failure.exhausted) {
+        await rescue(pi, dir, state, family, { ...model, provider: failure.slot }, session, ctx);
+
+        return;
+      }
+    }
   }
 
   if (!model || !family || family.strategy === "failover") return;
-  switchModel(pi, dir, state, family, model.provider, model, session, "rotate", ctx);
+  await switchModel(pi, dir, state, family, model.provider, model, session, "rotate", ctx);
 }
 
 function slotLine(family, session, id, now, ttlMs) {
@@ -983,9 +1063,11 @@ export default function piRotator(pi) {
   }
 
   safeOn(pi, "session_start", () => rediscover(pi, dir, state));
+  safeOn(pi, "before_agent_start", (_event, ctx) => resetRecovery(state, ctx));
+  safeOn(pi, "agent_before_settle", (event, ctx) => onBeforeSettle(dir, state, event, ctx));
   safeOn(pi, "context_with_system", (event, ctx) => onContext(dir, state, event, ctx));
   safeOn(pi, "before_provider_request", (event, ctx) => onBeforeRequest(pi, dir, state, event, ctx));
-  safeOn(pi, "after_provider_response", (event, ctx) => onResponse(pi, dir, state, config, event, ctx));
+  safeOn(pi, "after_provider_response", (event, ctx) => onResponse(pi, dir, state, event, ctx));
   safeOn(pi, "agent_end", (event, ctx) => onTurnEnd(pi, dir, state, event, ctx));
   safeOn(pi, "session_compact", (_event, ctx) => onCompact(dir, state, ctx));
   safeOn(pi, "cache_warming_decision", (event, ctx) => onWarmDecision(dir, state, event, ctx));
