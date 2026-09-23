@@ -13,13 +13,16 @@ pi install npm:pi-rotator
 
 ---
 
-## What is new in 0.2.0
+## What is new in 0.2.1
 
-When an account exhausts during an active turn, a confirmed switch to another
-eligible account continues the existing conversation automatically (Pi 0.87+).
-The failed attempt remains in raw history, completed tool results are retained,
-and retries stop when no healthy account is available. See [Strategies](#strategies)
-for rotation and recovery limits.
+Pi 0.87.x rejects cloned provider aliases that still carry a copied
+`streamSimple` method without an `api` map. `aliasDef()` now drops that
+method so clone-registered families (opencode-go, zai, deepseek, and other
+pi-ai builtins) register again. Transport-owned families were already fine.
+
+0.2.0: when an account exhausts during an active turn, a confirmed switch to
+another eligible account continues the existing conversation automatically
+(Pi 0.87+). See [Strategies](#strategies) for rotation and recovery limits.
 
 ## Why
 

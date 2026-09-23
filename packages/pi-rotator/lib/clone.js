@@ -101,7 +101,14 @@ export function builtinBase(mod, baseId) {
 }
 
 export function aliasDef(base, aliasId, n) {
-  return { ...base, id: aliasId, name: `${base.name} (account ${n})` };
+  const def = { ...base, id: aliasId, name: `${base.name} (account ${n})` };
+  // pi 0.87.x: createProvider() attaches streamSimple to every builtin, and
+  // validateExtensionProvider rejects a registration that carries streamSimple
+  // without an api map. The host derives stream behavior from the api map, so
+  // drop the copied method from the alias. The base def is not mutated.
+  delete def.streamSimple;
+
+  return def;
 }
 
 export function registerAlias(pi, base, aliasId, n) {

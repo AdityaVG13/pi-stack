@@ -50,6 +50,21 @@ describe("clone", () => {
     assert.equal(base.name, "ChatGPT Plus/Pro");
   });
 
+  it("aliasDef drops a copied streamSimple (pi 0.87.x validation)", () => {
+    // pi 0.87.x's createProvider() attaches streamSimple to every builtin and
+    // validateExtensionProvider rejects registrations carrying streamSimple
+    // without an api map -- every clone-registered family came back
+    // "alias registration rejected". The alias must not carry it over.
+    const streamSimple = () => {};
+
+    const base = { ...fakeBase(), streamSimple };
+    const alias = aliasDef(base, "openai-codex-account-4", 4);
+
+    assert.equal(alias.streamSimple, undefined);
+    // The base keeps its method: copy semantics, no mutation.
+    assert.equal(base.streamSimple, streamSimple);
+  });
+
   it("builtinBase picks the family and misses unknown ids", () => {
     const mod = fakeModule();
 
