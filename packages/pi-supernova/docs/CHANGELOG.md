@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.10.1] - 2026-09-23
+
+### Fixed
+
+- JSON `read` folds a leftover `selector` key into `json`. The standing schema
+  wrote `json:true|selector` as a union on `json`'s value; models sent a second
+  option and hit `read does not accept option "selector"`. `json:true` plus
+  `selector:".field"` or `selector:"field"` now projects `.field`. Two real
+  projections still fail.
+
 ## [0.9.0] - 2026-09-20
 
 ### Changed

@@ -1,5 +1,5 @@
 import { errorMessage, isString, isObject, isNumber, looksLikePath } from "../shared/decode.js";
-import { sessionJsonArgs, validateJsonRead } from "../fs/json-read.js";
+import { foldJsonSelectorAlias, sessionJsonArgs, validateJsonRead } from "../fs/json-read.js";
 
 export const SESSION_URI = /^(?:agent|artifact):\/\//i;
 
@@ -79,11 +79,13 @@ function autoResolve(args) {
 export function normalizeRead(params) {
   if (!isObject(params)) throw new Error("read requires an options object");
 
-  if (params.path !== undefined && params.target !== undefined && params.path !== params.target) {
+  const folded = foldJsonSelectorAlias(params);
+
+  if (folded.path !== undefined && folded.target !== undefined && folded.path !== folded.target) {
     throw new Error("read accepts either path or target, not both");
   }
 
-  const args = sessionJsonArgs({ ...params, path: params.path ?? params.target });
+  const args = sessionJsonArgs({ ...folded, path: folded.path ?? folded.target });
   validateJsonRead(args);
   assertReadOptions(args);
   assertReadFlags(args);

@@ -12,6 +12,13 @@ Ordinary JavaScript control flow remains available; the guest command bindings
 are only `read`, `edit`, `write`, and `bash`. Supernova supplies retrieval,
 transactional file operations, batching, bounded results and the grouped nova UI.
 
+## What is new in 0.10.1
+
+- JSON reads that still send a leftover `selector` key (the standing schema's
+  `json:true|selector` union, misread as a second option) fold into `json`.
+  `json:true` plus `selector:".field"` or `selector:"field"` is `.field`.
+  Two real projections (`json:".a"` and `selector:".b"`) still fail.
+
 ## What is new in 0.10.0
 
 - Background bash sessions support launch, polling, input and stop with bounded
@@ -640,7 +647,9 @@ return {verdict, values};
 ```
 
 Selectors support "." (root), .field, .nested[0], .items[0:10], and .["quoted.key"].
-Use json:true for the complete parsed value. Selectors are not full jq: pipes,
+Use json:true for the complete parsed value. Put the selector in `json`
+(`json:".field"`), not a second `selector` key; a leftover `selector` folds
+when `json` is absent, `true`, or `"."`. Selectors are not full jq: pipes,
 filters, wildcards and negative indices fail explicitly. Missing keys and indices
 fail; false, zero and null remain values. Slices use an exclusive end and clamp to
 array length. Only own JSON properties are traversed; nothing is evaluated.

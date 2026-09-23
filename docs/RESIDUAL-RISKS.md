@@ -1,50 +1,70 @@
-# Residual risks — pi-stack public packages (0.1.0)
+# Residual risks
 
-Honest limits of **pi-papercuts** and **pi-deferred-context-engine** for the first public release.
+Honest limits of the **published** pi-stack packages. Not a security audit of Pi.
+Extensions run with full agent privileges.
 
-This is not a security audit of Pi itself. Extensions run with full agent privileges.
+Current versions this file was written against:
 
-## Scope / non-goals
+| Package | Version | Job |
+|---------|---------|-----|
+| [pi-papercuts](../packages/pi-papercuts) | 0.3.3 | Agent-filed friction log |
+| [pi-deferred-context-engine](../packages/pi-deferred-context-engine) | 0.4.3 | Defer tools/skills; promote for one run |
+| [pi-supernova](../packages/pi-supernova) | 0.10.1 | One CodeMode tool: `read` / `edit` / `write` / `bash` |
+| [pi-rotator](../packages/pi-rotator) | 0.2.1 | Multi-account rotation per provider family |
+| [pi-lakers-theme](../packages/pi-lakers-theme) | 0.1.0 | Pi theme |
+| [pi-cliffcompaction](../packages/pi-cliffcompaction) | 0.1.0 | Mechanical autocompaction (no LLM summary) |
 
-| In 0.1.0 | Not in 0.1.0 |
-|----------|----------------|
-| Standalone npm packages, portable paths | Full private harness under `pi/packages/*` |
-| Defer tools/skills; search-and-promote | LLM auto-routing over MCP |
+`pi-cxx` is in the tree and **not published**. Do not treat it as an install surface.
+
+## Scope
+
+| In | Not in |
+|----|--------|
+| Standalone npm packages | A private harness under some other path |
+| Defer / promote / CodeMode / rotation / mechanical compact | LLM auto-routing over MCP |
 | Agent-filed friction log | Automatic tool-failure sensors |
-| Size caps on evidence fields | Secret vault / redaction pipeline |
+| Size caps on papercuts evidence | Secret vault / redaction pipeline |
+| Workspace-bounded supernova writes | A security sandbox for untrusted code |
 
 ## Install surfaces
 
 | Path | What loads | Notes |
 |------|------------|--------|
-| `pi install npm:pi-papercuts` | papercuts only | Preferred for one package |
-| `pi install npm:pi-deferred-context-engine` | DCE only | Install **last** among tool packages |
-| `pi install ./packages/<name>` | one package from clone | Same as npm for that package |
-| `pi install git:github.com/AdityaVG13/pi-stack` | **both** (root `pi.extensions`) | Not a private monorepo dump |
+| `pi install npm:<name>` | that package only | Preferred |
+| `omp install npm:<name>` | that package only | Same, on OMP (theme is Pi-only) |
+| `pi install ./packages/<name>` | one package from a clone | Same as npm for that package |
+| `pi install git:github.com/AdityaVG13/pi-stack` | **root** `pi.extensions` only: supernova, papercuts, DCE | Does **not** load rotator, lakers, or cliffcompaction |
 
-Pi cannot install monorepo subpaths over git alone ([pi#4530](https://github.com/earendil-works/pi/issues/4530)).
+Pi cannot install monorepo subpaths over git alone ([pi#4530](https://github.com/earendil-works/pi/issues/4530)). Use npm or a path.
+
+Install DCE **last** among tool-owning packages so it sees tools other extensions registered.
 
 ## Threat model
 
 - Package code runs as the user (same as any Pi extension).
-- Skill bodies loaded by DCE come only from paths **Pi already discovered**; treat skills as trusted content.
+- **Supernova is trusted JavaScript in a terminable worker, not a sandbox.** `write` / `edit` stay in the workspace; `bash` and JS `import` still have process privileges. Do not run untrusted programs through it.
+- Third-party permission extensions that only watch top-level `edit` / `bash` tool_calls will **not** see inner CodeMode primitives. Guards must be CodeMode-aware.
+- Skill bodies loaded by DCE come only from paths Pi already discovered; treat skills as trusted content.
 - Papercuts stores whatever the agent puts in `text` / `cmd` / `stderr` (size-capped only). Append-only: resolve does **not** scrub cut bodies.
-- Absolute `cwd` / `repo` paths in the log can leak machine layout if committed.
+- Absolute `cwd` / `repo` paths in the papercuts log can leak machine layout if committed.
+- Rotator journals hashes and counts, not bodies or credentials, at `~/.pi/agent/pi-rotator-journal.jsonl`. The debug log can still carry error excerpts.
 
-## DCE lifecycle semantics
+## Per-package limits
+
+### pi-deferred-context-engine
 
 | Setting | Behavior |
 |---------|----------|
 | `enabled: true` (default) | Defer tools, strip skill index, dedupe identical context, short deferred blurb |
-| `enabled: false` | **No deferral** — restores full registered tool set; skills/context left as Pi provided; loader tools still **register** (package not unloaded) |
+| `enabled: false` | **No deferral** -- restores the full registered tool set. Loader tools still register (package not unloaded) |
 | `promotionLifetime: "run"` (default) | Promotions cleared on `agent_settled` |
 | `promotionLifetime: "session"` | Promotions stick until reload / reset |
-| `replaceAlwaysActive: true` + empty list | Soft-lock: only hard spine `search_tools` (plus any still-active names). Pin stock tools yourself |
-| `blockedTools` / `blockedPrefixes` non-empty | **Hard deny** — not searchable, promote refused. Stronger than empty-pin soft-lock. Escape: human `/deferred unblock` (session) or `--persist` / config edit. `search_tools` cannot be blocked. |
+| `replaceAlwaysActive: true` + empty list | Soft-lock: only hard spine `search_tools`. Pin stock tools yourself |
+| `blockedTools` / `blockedPrefixes` non-empty | **Hard deny** -- not searchable, promote refused. Escape: `/deferred unblock` or config edit. `search_tools` cannot be blocked |
 
-Hard spine is always `search_tools` only. Admin tools (`list_capabilities`, `promote_tools`, `demote_tools`) are deferred by default — use `search_tools`.
+Hard spine is always `search_tools` only. Admin tools (`list_capabilities`, `promote_tools`, `demote_tools`) are deferred by default -- use `search_tools`.
 
-## Papercuts storage semantics
+### pi-papercuts
 
 Discovery order: tool `file` → `PAPERCUTS_FILE` → nearest `.git` → `~/.papercuts/log.jsonl`.
 
@@ -54,62 +74,86 @@ Discovery order: tool `file` → `PAPERCUTS_FILE` → nearest `.git` → `~/.pap
 | Private | gitignore or `PAPERCUTS_FILE` outside repo | Machine-local only |
 | CI | Set `PAPERCUTS_FILE=$PWD/.papercuts.jsonl` | Avoid writing to `$HOME` |
 
-Log path must be a **regular file** (or not exist yet). Directories, FIFOs, and device nodes (`/dev/null`) are rejected.
+Log path must be a **regular file** (or not exist yet). Directories, FIFOs, and device nodes are rejected. Habit, not a sensor: empty log means the agent never filed.
 
-## Known footguns (ranked)
+### pi-supernova
 
-1. **Empty `replaceAlwaysActive`** under DCE — only `search_tools` left active. Recovery: fix config, `/deferred reload`, or restart Pi.
-2. **Over-broad `blockedTools` / `blockedPrefixes`** — agent cannot self-recover via promote. Recovery: `/deferred blocked` (copy names) → `/deferred unblock <name>…` or `--persist`. Prefixes like `search_` cannot block spine `search_tools` (spine wins). Blocking `grep` does **not** stop `bash`+`rg`.
-3. **MCP at scale** — not an auto-router; agent must call `search_tools` with intent; default `maxSearchResults` is 3.
-4. **Papercuts is habit, not a sensor** — empty log means the agent never filed, not that nothing went wrong.
-5. **Non-git cwd** — cuts go to `~/.papercuts/log.jsonl` unless `PAPERCUTS_FILE` is set (CI hazard).
-6. **Secrets in papercuts** — no redaction; never log tokens/env dumps; mistakes persist in append-only history.
-7. **Skill index strip** — exact match of Pi stock (and a known compressed form). If another extension rewrites the index, strip may no-op; skills still searchable.
-8. **Provider differences** — native deferred tools (some Anthropic/OpenAI models) vs Pi’s active-set fallback; debug with `/deferred audit`.
-9. **`enabled: false` naming** — means “deferral off” (and block off), not “package uninstalled”.
+Full contract: [packages/pi-supernova/README.md](../packages/pi-supernova/README.md#security-and-host-boundary).
 
-## Hardened in 0.1.0 (was residual, now fixed)
+- One CodeMode invocation per call. Independent work belongs **inside** that program (`Promise.all`), not as three parallel `supernova` tool calls.
+- `write` / `edit` refuse paths outside the workspace (including `/tmp`). Use a workspace path or a separately authorized `bash` command.
+- Foreground `bash` nonzero exits **throw**. Later statements in the same program do not run unless you `catch`.
+- `Promise.all` of reads fails the whole batch if one path is missing. Optional reads: `Promise.allSettled`.
+- JSON reads: put the selector in `json` (`json: true` or `json: ".field"`). A leftover `selector` key folds when `json` is absent, `true`, or `"."`.
+- Guest bindings are `read`, `write`, `edit`, `bash`. There is no `supernova` object in guest scope.
+- Token and display claims are measured in [TOKEN_COSTS.md](../packages/pi-supernova/docs/TOKEN_COSTS.md), not inferred.
 
-| Issue | Package | Fix |
-|-------|---------|-----|
-| Full deferred catalog dumped into system prompt | DCE | Short blurb only |
-| `enabled: false` left tools stuck deferred | DCE | Restores full active set |
-| Non-object user config merged silently | DCE | Must be a JSON object |
-| `setActiveTools` throw aborted hooks | DCE | Caught; status may show `setActiveError` |
-| Negative `list` limit used `slice` end semantics | papercuts | Rejected with `usage` |
-| `/dev/null` / FIFO log paths | papercuts | Reject non-regular files |
-| Unbounded `cmd` / tags | papercuts | Byte and count caps |
-| UTF-8 truncate overflow | papercuts | Boundary-safe clamp |
-| cutId ≠ stored text | papercuts | Hash after trim/truncate |
-| Ambiguous id prefixes | papercuts | Reported as `usage` |
+### pi-rotator
 
-## What we will not fix in 0.1.x
+- Two routers fight over `setModel`. Rotator enters **standby** rather than splitting state. See [LAYERING.md](../packages/pi-rotator/LAYERING.md).
+- Cursor (and other transport-owned families) rotate only through pi-multi-account transport. Standalone clone path is pi-ai builtins.
+- Pi 0.87.x rejects cloned aliases that still carry `streamSimple` without `api`. **0.2.1** drops that method. Stay on 0.2.1+ if you clone builtin families (opencode-go, zai, deepseek, ...).
+- Exhaustion continuation needs Pi 0.87+.
+
+### pi-cliffcompaction
+
+Full contract: [packages/pi-cliffcompaction/README.md](../packages/pi-cliffcompaction/README.md).
+
+- Takes over `session_before_compact`. Do not load a second compaction extension.
+- Pi still decides **when**. This package decides **what**.
+- `/tree` branch summaries stay on Pi's default LLM.
+- `/compact` extra instructions are ignored.
+- Long tool results older than `keepRecent` turns (default 3) and longer than 500 chars are **dropped**, not summarized. That is the expected miss.
+- Does **not** claim the paper's SWE-bench / Terminal-Bench / KernelBench scores.
+- Pi cannot keep a hole in the provider transcript; the task head is folded into the summary string.
+
+### pi-lakers-theme
+
+Theme only. Pi, not OMP. No tools, no session behavior.
+
+## Ranked footguns
+
+1. **Empty DCE `replaceAlwaysActive`** -- only `search_tools` left active. Recovery: fix config, `/deferred reload`, or restart.
+2. **Over-broad DCE blocks** -- agent cannot self-recover via promote. Recovery: `/deferred unblock`. Blocking `grep` does not stop `bash`+`rg`.
+3. **Dueling routers** -- rotator stands by; turns do not rotate. Uninstall the other router or disable rotator.
+4. **Second compaction extension** -- race on `session_before_compact`. Load one.
+5. **Supernova as a sandbox** -- it is not. `bash` is a real shell.
+6. **Papercuts is habit** -- empty log is not a clean bill of health.
+7. **Secrets in papercuts** -- no redaction; mistakes persist in append-only history.
+8. **Non-git cwd** -- papercuts go to `~/.papercuts/log.jsonl` unless `PAPERCUTS_FILE` is set (CI hazard).
+9. **Root git install** -- you did not install rotator / cliffcompaction / lakers. Add those from npm.
+10. **`/reload` after JS package edits** -- can keep old modules. Fully restart Pi/OMP.
+
+## What we will not claim or build here
 
 - Auto-filing papercuts on every tool failure
 - Secret detection / vault integration
-- Windows CI matrix (paths use Node `path` / `os.homedir`; untested on Windows CI)
+- Windows CI matrix (Node `path` / `os.homedir`; rotator tests include a known Win32 `fileURLToPath` issue on `codex.test.mjs` that is not this stack's ship gate)
 - Perfect skill-index strip against arbitrary third-party rewriters
 - Multi-process flock on the papercuts log (fold first-wins; rare duplicate lines OK)
+- Paper benchmark scores for CliffCompaction
+- That supernova inner `bash`/`edit` are visible to every third-party permission extension
 
 ## Verification
 
+Package suites only (this repo does not use root `npm test` as a routine gate):
+
 ```bash
-# package unit tests
 cd packages/pi-papercuts && npm test
 cd packages/pi-deferred-context-engine && npm install && npm test
-
-# monorepo gate
-node scripts/release-check.mjs
-
-# live Pi smoke (after install)
-/deferred status
-/deferred audit
-papercuts({ action: "doctor" })
-papercuts({ action: "add", text: "smoke: residual-risks check", tags: ["release"] })
+cd packages/pi-supernova && npm test
+cd packages/pi-rotator && npm test
+cd packages/pi-lakers-theme && npm test
+cd packages/pi-cliffcompaction && npm test
 ```
 
-## Manual Pi-page / install smoke (human)
+Release: `node scripts/release-check.mjs` (when cutting a release).
 
-1. `pi install npm:pi-papercuts` (or path) alone → file a cut → list → resolve.
-2. `pi install npm:pi-deferred-context-engine` alone → `/deferred status` → search a deferred tool → settle → tool demoted again.
-3. Both installed (DCE last) → confirm `papercuts` stays active; deferred blurb is short; no full MCP dump in system prompt.
+Live smoke after install (full restart, not only `/reload`):
+
+```text
+/deferred status
+/rotator status
+/cliff status
+papercuts({ action: "doctor" })
+```

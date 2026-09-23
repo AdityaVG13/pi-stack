@@ -96,6 +96,48 @@ export function jsonProjector(json) {
   };
 }
 
+function isWholeJson(json) {
+  return json === true || json === ".";
+}
+
+function coerceOneSelector(value) {
+  if (!isString(value) || value.length === 0 || value.length > 2048) throw new Error(SELECTOR_HELP);
+  const selector = value.startsWith(".") ? value : "." + value;
+
+  parseSelector(selector);
+
+  return selector;
+}
+
+function coerceSelector(value) {
+  if (Array.isArray(value)) {
+    if (!value.length || value.length > 64) throw new Error("JSON selector list requires 1 to 64 selectors");
+
+    return value.map(coerceOneSelector);
+  }
+
+  return coerceOneSelector(value);
+}
+
+/**
+ * Standing copy writes json:true|selector as a union on json's value.
+ * Models still send a leftover selector key (often with json:true).
+ * Fold it when json is absent or the whole document; reject two real projections.
+ */
+export function foldJsonSelectorAlias(args) {
+  if (!isObject(args) || args.selector === undefined) return args;
+
+  if (args.json !== undefined && !isWholeJson(args.json)) {
+    throw new Error("read accepts json or selector, not both; put the selector in json (json:\".field\")");
+  }
+
+  const next = { ...args, json: coerceSelector(args.selector) };
+
+  delete next.selector;
+
+  return next;
+}
+
 export function sessionJsonArgs(args) {
   if (!isString(args.path) || !/^(agent|artifact):\/\//i.test(args.path) || !args.path.includes("?")) return args;
   const [uri, query] = args.path.split("?");

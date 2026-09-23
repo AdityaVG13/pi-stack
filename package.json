@@ -2,7 +2,7 @@
   "name": "pi-stack",
   "private": true,
   "type": "module",
-  "description": "Composable Pi packages: deferred context engine, papercuts, and supernova CodeMode.",
+  "description": "Composable Pi packages: papercuts, deferred context, supernova CodeMode, rotator, theme, and CliffCompaction.",
   "scripts": {
     "test": "npm test --prefix packages/pi-papercuts && npm test --prefix packages/pi-deferred-context-engine && npm test --prefix packages/pi-supernova",
     "test:papercuts": "npm test --prefix packages/pi-papercuts",

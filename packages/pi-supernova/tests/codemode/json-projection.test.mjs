@@ -40,6 +40,7 @@ it("JSON projection parses the full report before selecting fields and array sli
   assert.deepEqual(whole,{keys:Object.keys(report),padding:50000,values:report.values});
 
   const keys = "\"padding\", \"verdict\", \"values\", \"a.b\"";
+
   const rejected = {
     ".missing": "JSON field not found: \"missing\"; available keys: " + keys,
     ".toString": "JSON field not found: \"toString\"; available keys: " + keys,
@@ -65,6 +66,22 @@ it("JSON projection parses the full report before selecting fields and array sli
   await assert.rejects(f.execute('return await read({path:"invalid.json",json:".verdict"});'), /invalid JSON/);
   await f.write("oversize.json", JSON.stringify({padding:"x".repeat(16*1024*1024)}));
   await assert.rejects(f.execute('return await read({path:"oversize.json",json:".padding"});'), /JSON input exceeds/);
+});
+
+it("leftover selector key folds into json (schema union is json's value)", async t => {
+  const f = await engineFixture(t);
+  const report = { verdict: "REVIEW", values: [false, 0], padding: "x" };
+
+  await f.write("report.json", JSON.stringify(report));
+  assert.equal((await f.execute('return await read({path:"report.json",json:true,selector:".verdict"});')).details.result, "REVIEW");
+  assert.equal((await f.execute('return await read({path:"report.json",json:true,selector:"verdict"});')).details.result, "REVIEW");
+  assert.equal((await f.execute('return await read("report.json",{json:true,selector:"verdict"});')).details.result, "REVIEW");
+  assert.equal((await f.execute('return await read({path:"report.json",selector:".values.length"});')).details.result, 2);
+  assert.deepEqual((await f.execute('return await read({path:"report.json",json:true,selector:[".verdict",".values.length"]});')).details.result, ["REVIEW", 2]);
+  await assert.rejects(
+    f.execute('return await read({path:"report.json",json:".verdict",selector:".padding"});'),
+    /read accepts json or selector, not both/,
+  );
 });
 
 it("large nested selections and small siblings retain their values without routing substitutes", async t => {
@@ -159,6 +176,7 @@ it("64 expanding JSON slice selections fail at the storage guard without killing
   const entry=fileURLToPath(new URL("../../index.js",import.meta.url));
   const expansion=JSON.stringify('return await read({path:"large.json",json:Array(64).fill(".items[0:400000]")});');
   const healthy=JSON.stringify('return await read({path:"large.json",json:".items[0:2]"});');
+
   const program=[
     'import assert from "node:assert/strict";',
     'import {registerCodeMode} from '+JSON.stringify(entry)+';',
@@ -168,6 +186,7 @@ it("64 expanding JSON slice selections fail at the storage guard without killing
     'const result=await tool.execute("healthy",{code:'+healthy+'},undefined,undefined,ctx);',
     'assert.deepEqual(result.details.result,[0,0]); console.log("budget guarded; host healthy");',
   ].join("\n");
+
   const result=await promisify(execFile)("bash",["-c",'ulimit -c 0; exec "$@"',"json-budget",process.execPath,"--max-old-space-size=128","--input-type=module","-e",program],{timeout:10000,maxBuffer:1024*1024});
   assert.match(result.stdout,/budget guarded; host healthy/);
 });

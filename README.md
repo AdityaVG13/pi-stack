@@ -123,7 +123,7 @@ cd packages/pi-cliffcompaction && npm test && npm publish --access public
 - Deferred-context-engine defaults pin stock Pi tools (`read`, `bash`, …) and `papercuts` when that package is installed. Empty `replaceAlwaysActive` leaves only `search_tools` active, so read its README before rewriting config.
 - pi-rotator enters standby instead of routing when another router is installed, and it routes Cursor only through pi-multi-account transport. See its README and LAYERING.md.
 - Papercuts only logs when the agent calls it; it does not auto-detect failures. Outside a git repo the log goes to `~/.papercuts/log.jsonl` unless you set `PAPERCUTS_FILE`.
-- Papercuts/DCE release limits: [docs/RESIDUAL-RISKS.md](./docs/RESIDUAL-RISKS.md). Supernova has its own [security and host boundary](./packages/pi-supernova/README.md#security-and-host-boundary).
+- Cross-package limits (install surfaces, threat model, footguns): [docs/RESIDUAL-RISKS.md](./docs/RESIDUAL-RISKS.md). Index: [docs/README.md](./docs/README.md). Supernova host boundary: [packages/pi-supernova/README.md](./packages/pi-supernova/README.md#security-and-host-boundary).
 - pi-cliffcompaction takes over `session_before_compact` (threshold, overflow, `/compact`). Do not load a second compaction extension. `/tree` branch summaries stay on Pi's default LLM. `/compact` instructions are ignored. Paper and cut rules: [packages/pi-cliffcompaction/README.md](./packages/pi-cliffcompaction/README.md).
 
 Pi package shape follows [packages.md](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md) (`pi-package` keyword, `pi.extensions` / `omp.extensions`, host peers as `"*"`).
