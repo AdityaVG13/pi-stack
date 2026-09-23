@@ -39,3 +39,10 @@ tools/
 .cyclomatic-reduction/
 **/.cyclomatic-reduction/
 .papers/
+
+# Local operator contract (never publish).
+/AGENTS.md
+
+# Local lint and release-check overrides (untracked on purpose).
+/.oxlintrc.json
+/scripts/release-check.mjs
