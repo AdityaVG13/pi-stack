@@ -7,21 +7,11 @@ node_modules/
 .npm/
 coverage/
 .supernova-perf/
-.tokenzero/
-**/.tokenzero/
-.fszero/
-**/.fszero/
-.graphzero/
-**/.graphzero/
-.cut-branches/
 .papercuts.jsonl
 .papercuts.archive.jsonl
 .asgrep/
 dogfood/
 # Experimental supernova forks and isolated eval homes. Never publish.
-packages/pi-supernova-astra/
-packages/pi-supernova-devin/
-packages/pi-supernova-kimi/
 .eval/
 .eval/**
 .ee/
@@ -39,10 +29,13 @@ tools/
 .cyclomatic-reduction/
 **/.cyclomatic-reduction/
 .papers/
+packages/private-packages-test/
 
 # Local operator contract (never publish).
 /AGENTS.md
+/CLAUDE.md
 
 # Local lint and release-check overrides (untracked on purpose).
 /.oxlintrc.json
 /scripts/release-check.mjs
+
