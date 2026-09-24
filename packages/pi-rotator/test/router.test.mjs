@@ -27,11 +27,13 @@ describe("router", () => {
     );
   });
 
-  it("balanced passes the warmth verdict through", () => {
+  it("balanced passes the current slot through and keeps it while warm", () => {
+    // Slot order alone would pick openai-codex; staying on account-2 proves
+    // the router hands balanced the serving slot.
     const lastActive = new Map([["openai-codex-account-2", NOW - 1000]]);
 
     assert.deepEqual(
-      routeTurn(SLOTS, "balanced", coolingOf([]), "openai-codex", lastActive, new Map(), -1, NOW, TTL),
+      routeTurn(SLOTS, "balanced", coolingOf([]), "openai-codex-account-2", lastActive, new Map(), -1, NOW, TTL),
       { provider: "openai-codex-account-2", rrIndex: -1, warm: true },
     );
   });
@@ -57,13 +59,4 @@ describe("router", () => {
     );
   });
 
-  it("balanced receives the served set for onboarding", () => {
-    const lastActive = new Map([["openai-codex", NOW - 1000]]);
-    const served = new Set(["openai-codex"]);
-
-    assert.deepEqual(
-      routeTurn(SLOTS, "balanced", coolingOf([]), "openai-codex", lastActive, new Map(), -1, NOW, TTL, served),
-      { provider: "openai-codex-account-2", rrIndex: -1, warm: false },
-    );
-  });
 });

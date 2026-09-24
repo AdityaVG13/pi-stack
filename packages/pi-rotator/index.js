@@ -167,7 +167,6 @@ function pickNext(family, session, model, excludeCurrent, excluded) {
     family.rrIndex,
     now,
     ttlFor(family, model),
-    session ? session.fingerprints : null,
   );
 
   if (!routed) return null;
@@ -584,8 +583,8 @@ function onBeforeRequest(pi, dir, state, event, ctx) {
   session.lastModelId = model.id;
 
   if (modelChanged) {
-    // New model, new cache namespace: re-onboard every slot and rebuild
-    // warmth from scratch. Old fingerprints go (the backfill must never
+    // New model, new cache namespace: rebuild warmth from scratch (the next
+    // boundary is a free drain choice). Old fingerprints go (the backfill must never
     // mistake this deliberate cold state for a missed response); the
     // just-set current one stays as fresh-namespace evidence.
     session.warm.clear();
@@ -804,9 +803,8 @@ function failedTurn(event, model) {
   };
 }
 
-// Per-turn rotation: every request of a turn stays on one slot (one cold
-// miss per onboarding instead of one per request), and the switch lands
-// before the next turn starts. Failover never rotates here by design.
+// Per-turn rotation: every request of a turn stays on one slot, and any
+// switch lands before the next turn starts. Failover never rotates here by design.
 async function onTurnEnd(pi, dir, state, event, ctx) {
   const model = ctx ? ctx.model : null;
   const family = model ? familyOf(state, model.provider) : null;

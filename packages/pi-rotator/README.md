@@ -13,6 +13,22 @@ pi install npm:pi-rotator
 
 ---
 
+## What is new in 0.2.2
+
+`balanced` no longer rotates on every turn. It keeps the slot that served the
+session's latest turn while that slot is warm and healthy, and spends drain
+choices only at cold boundaries: TTL expired, slot cooling or exhausted, or
+warmth cleared by compaction or a model change. The per-slot onboarding pass
+is gone.
+
+Why: only the serving slot holds the session's current prefix. Another slot
+holds a stale one, and pi-ai re-serializes assistant messages whose provider
+id differs from the request's (thinking becomes plain text, signatures are
+dropped). A mid-session switch therefore rewrites the conversation from the
+first such message. Measured on Opus with two slots: A→B→A read 8,088 tokens
+and rewrote the B turn, against 8,211 read / 18 written staying on A. In a
+real session one switch rewrote 20.6k tokens.
+
 ## What is new in 0.2.1
 
 Pi 0.87.x rejects cloned provider aliases that still carry a copied
@@ -88,11 +104,11 @@ Set in `~/.pi/agent/config/pi-rotator/config.json`:
 
 Warmth TTL resolves per model: the model's own cache lifetime when Pi knows it (Anthropic publishes 5 minute and 1 hour tiers), else the family override, else the global default. Codex publishes no lifetime, so it stays on the configured value until measured otherwise.
 
-- **balanced** (default): unserved slots onboard first (one cold miss each to bring every account hot), then least-drained among warm, then least-drained cold. Even drain with hot caches under any cadence.
+- **balanced** (default): stay on the session's serving slot while it is warm and healthy; at a cold boundary (TTL passed, cooling, compaction, model change) move to the least-drained healthy slot. Drain spreads across sessions and idle gaps without mid-session cache rewrites.
 - **failover**: stick to the current slot until it exhausts, then move on. Simplest, and best cache reuse when turns are sparse.
-- **round-robin**: advance every turn. Perfectly even; every slot stays warm while turn gap times slot count stays under TTL, cold-thrashing past it.
+- **round-robin**: advance every turn. Perfectly even drain, but every switch rewrites the session's conversation on the new slot (see How it works). Use it only when drain evenness matters more than cache cost.
 
-Rotation lands per turn (`agent_end`): every request of a turn stays on one slot, so multi-request turns pay one cold miss per onboarding instead of one per request. Exhaustion (`429`/`402`/`403`, or a finalized quota/rate-limit stream error) rescues the active turn: await a healthy account switch, then continue the existing conversation automatically. This works in all three strategies.
+Rotation lands per turn (`agent_end`): every request of a turn stays on one slot, so a multi-request turn never splits its prefix across accounts. Exhaustion (`429`/`402`/`403`, or a finalized quota/rate-limit stream error) rescues the active turn: await a healthy account switch, then continue the existing conversation automatically. This works in all three strategies.
 
 Automatic continuation uses Pi's `agent_before_settle` boundary (Pi 0.87+), after native retries and queued work. It omits only the failed assistant attempt from model context, retaining the raw error/partial output in history and all completed tool results. It adds no synthetic user message and does not replay completed tools. If Pi already retried on the new account, rotator does not add another continuation.
 
@@ -102,7 +118,7 @@ With `announceSwitches` on, each automatic rotation shows `pi-rotator: A → B`.
 
 ## How it works
 
-The received tradeoff (rotation kills caches) is wrong. Caches are per-account prefixes with a TTL (about 5 minutes): hit rate is prefix stability times reuse-within-TTL. Rotating the same model and session across N accounts keeps N hot prefixes, so reuse inside TTL hits everywhere. Even drain and warm caches coexist whenever cadence times N stays under TTL; `balanced` is the general form that also behaves past that line.
+Caches are per-account prefixes with a TTL: hit rate is prefix stability times reuse-within-TTL. For a growing conversation, only the slot that served the latest turn holds the current prefix; every other slot's prefix is stale by the turns served elsewhere. Worse, pi-ai treats each slot as a different provider and re-serializes earlier assistant messages from other slots (thinking to plain text), so returning to a slot breaks its cached prefix at the first such message. Rotation mid-session therefore costs a rewrite of the conversation; the shared trunk (tools, system prompt) survives. `balanced` pays that cost only where it is paid anyway: at cold boundaries.
 
 Prefix identity is load-bearing, so pi-rotator does zero per-account prompt shaping: same model id on every slot, same session, same bytes. Drain is counted in served turns (the response hook carries no token usage, and same-model same-session turns are prefix-dominated). Compaction resets every prefix at once, which makes post-compaction turns free routing choices that `balanced` spends on the least-drained slot.
 
@@ -132,7 +148,9 @@ Every request and routing decision is journaled to `~/.pi/agent/pi-rotator-journ
 | `thinking` | Repair target per switch (`deferred`, or `skipped` when no level was ever captured) |
 | `thinking_repair` | The next request's verdict (`restored`, or a `thinking_hold`/`thinking_adopt` debug line) |
 
-Warmth is per session (prefixes belong to a transcript); drain and cooldowns are per account. Model changes and compaction clear the session's warmth; a model change also re-onboards every slot for the new cache namespace.
+Warmth is per session (prefixes belong to a transcript) and only the serving slot's warmth keeps the session; drain and cooldowns are per account. Model changes and compaction clear the session's warmth, making the next boundary a free drain choice.
+
+Two logins of the same account in one family (for example `anthropic` and `anthropic-account-2` against one organization) share quota, so rotating between them buys nothing. Remove the duplicate login.
 
 ## Develop
 

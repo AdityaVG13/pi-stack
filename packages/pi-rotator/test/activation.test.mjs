@@ -112,6 +112,24 @@ function fire(pi, event, payload, context) {
   return result;
 }
 
+// balanced keeps the warm serving slot (see test/balanced.test.mjs). Tests
+// whose subject is the switch path itself end their turn past the warmth
+// TTL, where rotation is a free least-drained choice. Pick happens
+// synchronously inside the handler, so the skew only needs to cover the call.
+const PAST_TTL_MS = 10 * 60 * 1000 + 1;
+
+function endTurnCold(pi, payload, context) {
+  const real = Date.now;
+
+  Date.now = () => real() + PAST_TTL_MS;
+
+  try {
+    return fire(pi, "agent_end", payload, context);
+  } finally {
+    Date.now = real;
+  }
+}
+
 function tick() {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -348,7 +366,24 @@ describe("activation", () => {
     assert.deepEqual(pi.unregisteredProviders, [CODEX2]);
   });
 
-  it("a full turn drains, rotates to the unserved slot, and defers thinking", async () => {
+  it("a full turn drains and keeps its warm slot", async () => {
+    const dir = agentDirWith(transportFiles());
+    const pi = fakePi();
+
+    piRotator(pi);
+    fire(pi, "session_start", undefined, ctx(CODEX));
+    fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
+    fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
+    fire(pi, "agent_end", undefined, ctx(CODEX));
+    await tick();
+
+    assert.equal(ofKind(dir, "route").length, 0);
+    assert.deepEqual(pi.setModelCalls, []);
+    assert.equal(ofKind(dir, "thinking").length, 0);
+    assert.match(pi.commands.get("rotator").handler("", ctx(CODEX)), new RegExp(`${CODEX}: 1 turns · warm`));
+  });
+
+  it("a cold turn boundary drains, rotates to the least drained slot, and defers thinking", async () => {
     const dir = agentDirWith(transportFiles());
     const pi = fakePi();
     const medium = { thinkingLevel: "medium" };
@@ -357,7 +392,7 @@ describe("activation", () => {
     fire(pi, "session_start", undefined, ctx(CODEX));
     fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX, "s1", medium));
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
-    fire(pi, "agent_end", undefined, ctx(CODEX));
+    endTurnCold(pi, undefined, ctx(CODEX));
     await tick();
 
     assert.equal(ofKind(dir, "request").length, 1);
@@ -385,7 +420,10 @@ describe("activation", () => {
     assert.deepEqual(pi.thinkingWrites, []);
   });
 
-  it("the second turn rotates back on tied drain", async () => {
+  it("after a rotation the new serving slot keeps the session (no ping-pong)", async () => {
+    // Regression for the live A->B->A cache loss: CODEX is still inside its
+    // TTL after CODEX2's turn, but its prefix is stale; switching back would
+    // rewrite the conversation. The warm serving slot stays.
     const dir = agentDirWith(transportFiles());
     const pi = fakePi();
 
@@ -393,7 +431,7 @@ describe("activation", () => {
     fire(pi, "session_start", undefined, ctx(CODEX));
     fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
-    fire(pi, "agent_end", undefined, ctx(CODEX));
+    endTurnCold(pi, undefined, ctx(CODEX));
     fire(pi, "before_provider_request", { payload: { input: ["hi", "yo"] } }, ctx(CODEX2));
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX2));
     fire(pi, "agent_end", undefined, ctx(CODEX2));
@@ -401,10 +439,9 @@ describe("activation", () => {
 
     const routes = ofKind(dir, "route");
 
-    assert.equal(routes.length, 2);
-    assert.equal(routes[1].to, CODEX);
-    assert.equal(routes[1].warm, true);
-    assert.deepEqual(routes[1].drained, { [CODEX]: 1, [CODEX2]: 1 });
+    assert.equal(routes.length, 1);
+    assert.equal(routes[0].to, CODEX2);
+    assert.deepEqual(pi.setModelCalls, [{ provider: CODEX2, id: MODEL }]);
   });
 
   it("round-robin persists its index across turns", async () => {
@@ -643,8 +680,11 @@ describe("activation", () => {
     fire(pi, "agent_end", undefined, ctx(CODEX));
     await tick();
 
+    // Backfilled warmth is real warmth: the slot that served keeps the
+    // session. No drain was recorded for the missing response.
     assert.equal(ofKind(dir, "turn")[0].backfill, CODEX);
-    assert.deepEqual(ofKind(dir, "route")[0].drained, {});
+    assert.equal(ofKind(dir, "route").length, 0);
+    assert.match(pi.commands.get("rotator").handler("", ctx(CODEX)), new RegExp(`${CODEX}: 0 turns · warm`));
   });
 
   it("a model change rebuilds the cache namespace cold", async () => {
@@ -669,11 +709,9 @@ describe("activation", () => {
 
     const requests = ofKind(dir, "request");
 
+    // New cache namespace: the serving slot's earlier warmth is discarded.
     assert.equal(requests[1].modelChanged, true);
-
-    const routes = ofKind(dir, "route");
-
-    assert.equal(routes[routes.length - 1].warm, false);
+    assert.equal(requests[1].warm, false);
   });
 
   it("thinking lost to a host reset is repaired on the next request", async () => {
@@ -702,7 +740,7 @@ describe("activation", () => {
       ctx(CODEX, "s1", { thinkingLevel: "medium" }),
     );
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
-    fire(pi, "agent_end", undefined, ctx(CODEX));
+    endTurnCold(pi, undefined, ctx(CODEX));
     await tick();
 
     const thinking = ofKind(dir, "thinking")[0];
@@ -742,7 +780,7 @@ describe("activation", () => {
       ctx(CODEX, "s1", { thinkingLevel: "medium" }),
     );
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
-    fire(pi, "agent_end", undefined, ctx(CODEX));
+    endTurnCold(pi, undefined, ctx(CODEX));
     await tick();
     fire(pi, "before_provider_request", { payload: { input: ["yo"] } }, ctx(CODEX2));
     await tick();
@@ -775,7 +813,7 @@ describe("activation", () => {
       ctx(CODEX, "s1", { thinkingLevel: "medium" }),
     );
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
-    fire(pi, "agent_end", undefined, ctx(CODEX));
+    endTurnCold(pi, undefined, ctx(CODEX));
     await tick();
     fire(
       pi,
@@ -784,7 +822,7 @@ describe("activation", () => {
       ctx(CODEX2, "s1", { thinkingLevel: "low" }),
     );
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX2));
-    fire(pi, "agent_end", undefined, ctx(CODEX2));
+    endTurnCold(pi, undefined, ctx(CODEX2));
     await tick();
 
     assert.equal(ofKind(dir, "thinking_repair").length, 0);
@@ -1026,9 +1064,8 @@ describe("activation", () => {
     fire(pi, "session_start", undefined, ctx(CODEX));
     fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
-    fire(
+    endTurnCold(
       pi,
-      "agent_end",
       undefined,
       ctx(CODEX, "s1", { ui: { notify: (text) => notices.push(text) } }),
     );
@@ -1051,9 +1088,8 @@ describe("activation", () => {
     fire(pi, "session_start", undefined, ctx(CODEX));
     fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
-    fire(
+    endTurnCold(
       pi,
-      "agent_end",
       undefined,
       ctx(CODEX, "s1", { ui: { notify: (text) => notices.push(text) } }),
     );
@@ -1098,7 +1134,7 @@ describe("activation", () => {
     fire(pi, "session_start", undefined, ctx(CODEX));
     fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
-    fire(pi, "agent_end", undefined, ctx(CODEX, "s1", {
+    endTurnCold(pi, undefined, ctx(CODEX, "s1", {
       ui: {
         notify: () => {
           throw new Error("host ui down");
@@ -1130,9 +1166,8 @@ describe("activation", () => {
     fire(pi, "session_start", undefined, ctx(CODEX));
     fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
-    fire(
+    endTurnCold(
       pi,
-      "agent_end",
       undefined,
       ctx(CODEX, "s1", { ui: { notify: (text) => notices.push(text) } }),
     );
@@ -1181,7 +1216,7 @@ describe("activation", () => {
     fire(pi, "session_start", undefined, ctx(CODEX));
     fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
-    fire(pi, "agent_end", undefined, ctx(CODEX));
+    endTurnCold(pi, undefined, ctx(CODEX));
     await tick();
 
     // No debug file at all: rediscover, response, route, and thinking lines
@@ -1233,7 +1268,7 @@ describe("activation", () => {
       hasConfiguredAuth: () => true,
     };
 
-    fire(pi, "agent_end", undefined, ctx(CODEX, "s1", { modelRegistry: registry }));
+    endTurnCold(pi, undefined, ctx(CODEX, "s1", { modelRegistry: registry }));
     await tick();
 
     assert.deepEqual(pi.setModelCalls, []);
@@ -1262,7 +1297,7 @@ describe("activation", () => {
       hasConfiguredAuth: () => true,
     };
 
-    fire(pi, "agent_end", undefined, ctx(CODEX, "s1", { modelRegistry: registry }));
+    endTurnCold(pi, undefined, ctx(CODEX, "s1", { modelRegistry: registry }));
     await tick();
 
     // CODEX2 skipped, account-3 takes the rotation instead of staying put.
@@ -1285,7 +1320,7 @@ describe("activation", () => {
       hasConfiguredAuth: (model) => model.provider !== CODEX2,
     };
 
-    fire(pi, "agent_end", undefined, ctx(CODEX, "s1", { modelRegistry: registry }));
+    endTurnCold(pi, undefined, ctx(CODEX, "s1", { modelRegistry: registry }));
     await tick();
 
     assert.deepEqual(pi.setModelCalls, []);
@@ -1304,7 +1339,7 @@ describe("activation", () => {
     fire(pi, "session_start", undefined, ctx(CODEX));
     fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
-    fire(pi, "agent_end", undefined, ctx(CODEX));
+    endTurnCold(pi, undefined, ctx(CODEX));
     await tick();
 
     // Older hosts expose no modelRegistry: verify nothing, switch normally.
@@ -1328,7 +1363,7 @@ describe("activation", () => {
       },
     };
 
-    fire(pi, "agent_end", undefined, ctx(CODEX, "s1", { modelRegistry: registry }));
+    endTurnCold(pi, undefined, ctx(CODEX, "s1", { modelRegistry: registry }));
     await tick();
 
     assert.equal(pi.setModelCalls.length, 1);
@@ -1402,9 +1437,8 @@ describe("activation", () => {
     fire(pi, "session_start", undefined, ctx(CODEX));
     fire(pi, "before_provider_request", { payload: { input: ["hi"] } }, ctx(CODEX));
     fire(pi, "after_provider_response", { status: 200 }, ctx(CODEX));
-    fire(
+    endTurnCold(
       pi,
-      "agent_end",
       { messages: [{ role: "assistant", stopReason: "aborted", provider: CODEX }] },
       ctx(CODEX, "s1"),
     );
