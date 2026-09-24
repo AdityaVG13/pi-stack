@@ -11,14 +11,20 @@ function logsBlock(outcome, tail = "") {
   return `\n--- logs${outcome.logTruncated ? " [logs truncated]" : ""}\n${outcome.logs?.join("\n") ?? ""}${tail}`;
 }
 
-function mutationText(outcome) {
+// Printed only when it informs: files committed or rolled back, an uncertain
+// filesystem outcome, or (failures only) shell side effects that survive the
+// rollback. A successful program rolls nothing back, so its shell calls need
+// no warning.
+function mutationText(outcome, failed) {
   const m = outcome.mutations;
 
   if (!m) return "";
-  const external = m.external ? "; external calls attempted=" + m.external + ", their side effects cannot be rolled back" : "";
+  const external = failed && m.external ? "; external calls attempted=" + m.external + ", their side effects cannot be rolled back" : "";
   const uncertain = m.pendingCommits || m.recoveryFailed ? "; filesystem outcome uncertain: inspect disk and any recovery backups before retrying" : "";
 
-  return "\nmutations: committed=" + m.committed + " rolledBack=" + m.rolledBack + " (file versions)" + external + uncertain;
+  if (!m.committed && !m.rolledBack && !external && !uncertain) return "";
+
+  return "\nmutations: committed=" + (m.committed || 0) + " rolledBack=" + (m.rolledBack || 0) + " (file versions)" + external + uncertain;
 }
 
 function mutationReceipts(trace) {
@@ -39,17 +45,15 @@ function splitTurnHint(outcome) {
 }
 
 function errorText(outcome, call) {
-  return `error #${call} ${outcome.wallMs}ms${outcome.returnTruncated ? " [output truncated]" : ""}${mutationText(outcome)}${splitTurnHint(outcome)}
+  return `error #${call} ${outcome.wallMs}ms${outcome.returnTruncated ? " [output truncated]" : ""}${mutationText(outcome, true)}${splitTurnHint(outcome)}
 error: ${outcome.error}${logsBlock(outcome)}`;
 }
 
 function successText(outcome, call) {
   const truncated = outcome.returnTruncated ? " [return truncated]" : "";
   const hint = outcome.undefinedReturn ? " (no return statement; add `return` to get a value)" : "";
-  const m = outcome.mutations;
-  const showMutations = m && (m.committed || m.rolledBack || m.external || m.pendingCommits || m.recoveryFailed) ? mutationText(outcome) : "";
 
-  return `ok #${call} ${outcome.wallMs}ms${truncated}${showMutations}${splitTurnHint(outcome)}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
+  return `ok #${call} ${outcome.wallMs}ms${truncated}${mutationText(outcome, false)}${splitTurnHint(outcome)}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;
 }
 
 function fitOutput(outcome, call, limit, format) {

@@ -12,168 +12,38 @@ Ordinary JavaScript control flow remains available; the guest command bindings
 are only `read`, `edit`, `write`, and `bash`. Supernova supplies retrieval,
 transactional file operations, batching, bounded results and the grouped nova UI.
 
-## What is new in 0.10.1
+## What is new in 0.10.2
 
-- JSON reads that still send a leftover `selector` key (the standing schema's
-  `json:true|selector` union, misread as a second option) fold into `json`.
-  `json:true` plus `selector:".field"` or `selector:"field"` is `.field`.
-  Two real projections (`json:".a"` and `selector:".b"`) still fail.
+- Results print the `mutations:` line only when it informs: files committed or
+  rolled back, an uncertain filesystem outcome, or shell side effects left behind
+  by a failed program. It had appeared on most results, usually all zeros.
+- Clearer guest errors: naming a variable after a command (`const read = await
+  read(...)`) says so, `supernova(...)` inside a program says to call the
+  commands directly, and an empty `oldText` explains how to insert.
 
-## What is new in 0.10.0
+Earlier releases: [changelog](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/CHANGELOG.md).
 
-- Background bash sessions support launch, polling, input and stop with bounded
-  transcripts, deadlines, ownership and process-tree cleanup. macOS/Linux offer
-  interactive PTYs; Windows uses pipes and explicitly rejects PTYs.
-- Literal argv stays native across platforms. Session changes, file commits,
-  read provenance and error diagnostics retain their safety boundaries during
-  asynchronous work. See [verification](#verification) for the cross-platform
-  Node/Bun matrix and its limits.
+## Tokens: native tool calls vs Supernova
 
-## What is new in 0.9.0
+Fixed 13-program workload (inspect, reproduce, repair, verify; JSON report update;
+five-term audit), full tool-history replay, `js-tiktoken`. Regenerate with
+`npm run test:tokens --prefix packages/pi-supernova`.
 
-- **Text clipping does not stop batches:** sequential and parallel programs keep
-  running when the combined display text exceeds its allowance. Results disclose
-  truncation; execution, deadline, host-call, log and image limits remain enforced.
-- **Decoded image validation:** PNG/JPEG/GIF/WebP reads and returned attachments
-  require matching formats, canonical base64 and decodable pixels, including all
-  GIF/WebP frames. PNG preflight checks chunk boundaries and CRCs too. Failures
-  occur before shell boundaries or final commit/delivery, with no image attached.
-- **Isolated image work:** Sharp 0.35.4 decodes at most 32 million pixels across
-  all frames, one image at a time, in a Node/Bun subprocess with a 5-second kill
-  deadline. Text-only work never loads the decoder. A bounded 16-entry digest cache
-  avoids decoding unchanged bytes again; neither image data nor file paths are cached.
-  Encoded limits remain 16 attachments / 20 MiB. Sharp's platform-specific optional
-  dependencies must be installed; decoder failure never falls back to unchecked data.
-  Local decoding does not guarantee acceptance under every provider's image policy.
+| Workload | Tokenizer | Without Supernova batching | Through Supernova 0.10.2 | Reduction |
+|---|---|---:|---:|---:|
+| Mixed 13-program workload | o200k_base | 28,130 | 9,631 | **65.8%** |
+| | cl100k_base | 27,841 | 9,476 | **66.0%** |
+| 16 programs, shared source + data (32 files) | o200k_base | 17,771 | 3,559 | **80.0%** |
+| | cl100k_base | 17,595 | 3,493 | **80.1%** |
+| 8 programs sharing a 48-path input | o200k_base | 16,309 | 5,471 | **66.5%** |
+| | cl100k_base | 14,649 | 5,157 | **64.8%** |
+| Standing tool definition per request | o200k_base / cl100k_base | 908 / 901 | 617 / 606 | 32.0% / 32.7% |
 
-- **Data is not a display preview:** ordinary text reads return complete data up to
-  64 MiB; JSON selections remain actual values and directories remain arrays.
-  The former 160-line / 8192-character and 31,744-character restrictions no longer
-  constrain computation inside a program. Only returned/logged text is displayed.
-- **Large batches stay bounded:** small reads share one reply; larger items are
-  delivered with acknowledgements within eight I/O slots, not retained as one
-  giant host-side batch. Explicit arrays and coalesced reads use the same path.
-- **Output work stays in the worker:** bounded formatting avoids expanding large
-  values before clipping. Model-visible source previews retain exact ranges and
-  continuation; a clipped preview cannot be passed back as a complete edit view.
-
-- **Cancellation no longer crashes the host:** bounded reads and CAS signing use
-  abort-checked file handles instead of aborting streams. A failed read can cancel
-  sibling reads without an uncaught `AbortError` terminating OMP.
-- **Memory is charged to the guest:** worker-local heap and external buffers
-  replace process-wide RSS accounting. Bun enforcement remains best-effort.
-- **Focused internals:** read adapters, file I/O, transactions, worker lifecycle,
-  tool ownership, source ranking and rendering have separate modules. All read
-  modes, batching, checkpoints and rollback behavior remain supported.
-
-**0.9.0 release-candidate baseline:** 315/315 package tests passed on Node and
-Bun, plus actual Pi/OMP and clean tarball installation checks. See the newer
-[cross-platform verification results and coverage limits](#verification) below.
-
-### Concurrent file operations
-
-Batching and explicit parallel programs remain supported. Within one program,
-`Promise.all` now overlaps native edits and writes to different files, up to eight
-operations at once:
-
-```js
-await Promise.all([
-  edit("src/a.js", "oldA", "newA"),
-  edit("src/b.js", "oldB", "newB"),
-]);
-return await bash("npm test");
-```
-
-Same-file operations retain submission order. Reads before/after mutations,
-`bash`, edit checkpoints, and overridden mutating tools remain ordering barriers.
-Shell calls inside one program stay sequential; use `programs` with
-`parallel:true` for explicitly independent shell workflows or separate JS workers.
-Edits still stage until program success (or a shell boundary); transactional disk
-commits retain their conflict checks. `await edit(...)` one after another is still
-sequential, and multiple replacements in one file remain one edit operation.
-
-## What is new in 0.8.2
-
-This patch release fixes shell failure handling, cancellation and parallel-batch
-limits, and makes one-call batching guidance explicit.
-
-- **Shell quoting stays intact:** quoted executable paths are no longer unwrapped.
-  Shell syntax errors suggest literal `bash({command,args})` with `data` for
-  embedded scripts, or a quoted heredoc. Commands are not rewritten or retried.
-- **Validation before commit:** invalid timeouts and null-byte
-  arguments are rejected before the shell boundary flushes staged files.
-- **Useful failure output:** long command labels are bounded so the original
-  stderr is not crowded out by a repeated script.
-- **Timeouts retain diagnostics:** the outer program deadline stops the worker
-  and gives pending host calls a bounded drain to retain shell output. Explicit
-  cancellation is reported separately from timeout. The outer `timeoutMs` covers
-  every wait and command, including `sleep`.
-- **Parallel budgets fail honestly:** exceeding the shared log or image
-  allowance marks the batch failed and stops queued entries. Already-running
-  entries settle; their results and completed commits remain. Aggregate logs stay
-  capped rather than multiplying the allowance per guest. In 0.8.2 this also
-  applied to output text; 0.9.0 makes display-text clipping nonfatal.
-- **Batch known work in one call:** combine independent reads/checks with
-  `Promise.all`, then sequence edits and verification in the same program. Use
-  another invocation when returned evidence is needed for the next decision.
-
-Verified on **macOS / Node 26.7**: 267 package tests (384 repository tests),
-2,328 stress invocations, actual Pi/OMP host checks, lint and both token-budget
-checks. This is not a claim of exhaustive platform or formal mutation testing.
-
-## 0.8.0 features and measurements
-
-- **Shared program source:** top-level `code` or `file` supplies a batch default;
-  entries may override it. A shared program is sent once instead of in every entry,
-  and defaults count once against the 48,000-character admission cap.
-- **Explicit object defaults:** `mergeData:true` shallowly overlays per-entry data
-  onto common data (entry keys win; nested objects are replaced). Whole-input
-  replacement remains the default.
-- **Checkpoint failures throw:** a failed `edit(async () => {...})` rolls back and
-  rethrows its original cause; catch explicitly when rejecting a candidate is
-  intentional. Ignored failures no longer report success.
-- **Accurate failure cards:** the nova card reads the host's error flag, shows the
-  original cause and `committed`/`rolledBack` totals, marks writes whose
-  persistence cannot be attributed as attempted, and labels pure JavaScript runs
-  instead of "complete".
-- **Historical read limits (superseded in 0.9.0):** errors stated both limits (`160 lines / 8192
-  characters`) with copyable recovery (`offset`, `about`, `complete:true`, and
-  `Promise.allSettled` for optional siblings). Markdown edits skip code-reference
-  searches; exact-symbol evidence excludes generic matches.
-- **Fail-closed images:** unsupported formats (for example BMP) fail before model
-  delivery with PNG-conversion guidance, and sets over 16 images / 20 MiB report
-  aggregate sizes instead of silently omitting attachments. Pending changes roll back.
-- **Shell follows the program clock:** `bash()` inherits the program's `timeoutMs`;
-  explicit per-command limits still win.
-
-### Tokens: 0.7.1 to 0.8.0 (`js-tiktoken`, `o200k_base` / `cl100k_base`)
-
-| Metric | 0.7.1 | 0.8.0 | Change |
-|---|---:|---:|---:|
-| Standing definition per request | 596 / 588 | 631 / 626 | +35 / +38 |
-| Frozen 6-call mixed workload, total traffic | 9,596 / 9,458 | 9,841 / 9,724 | +2.6% / +2.8% |
-| 16-program job with shared source + data (32 files) | 17,771 / 17,595 | 3,587 / 3,533 | -79.8% / -79.9% |
-| 8 programs sharing a 48-path input | 16,309 / 14,649 | 5,499 / 5,197 | -66.3% / -64.5% |
-
-Rows 3-4 deliver identical complete outputs and files; only argument placement
-changes. Row 2 repeats no inputs, so it pays the +35-token guidance and nothing
-else. Method, gates and limits: [TOKEN_COSTS.md](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/TOKEN_COSTS.md).
-
-### Speed: engine micro-benchmarks (Apple M5 Max, Node 26.7)
-
-| Benchmark | Before | After | Change |
-|---|---:|---:|---:|
-| Package 200-row report (median, 10k iterations) | 0.1665 ms | 0.1314 ms | -21% |
-| Package nested source object (median) | 0.0366 ms | 0.0240 ms | -35% |
-| Idle worker exit | 267 ms | 17 ms | -94% |
-| 8-file read wave p50 / p95 (300 samples) | 1.90 / 2.74 ms | 1.77 / 2.53 ms | -7% / -8% |
-| Cold unbatched p95 vs coalesced warm p95 (8 reads) | 13.85 ms | 2.39 ms | -83% |
-
-Identical output hashes before and after. Local engine benchmarks, not end-to-end
-agent latency or provider time.
-
-See the [changelog](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/CHANGELOG.md)
-and [token measurements](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/TOKEN_COSTS.md).
+All rows deliver identical complete outputs and files; only call and argument
+placement change. The baseline is a frozen non-batched snapshot, not a separate
+product. Excludes provider envelopes, unrelated conversation, reasoning tokens and
+caching; no model-quality claim. Method and speed measurements:
+[TOKEN_COSTS.md](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/TOKEN_COSTS.md).
 
 ## Install and update
 
@@ -190,8 +60,10 @@ Local checkout installs are for development, not distribution:
 pi install /path/to/pi-stack/packages/pi-supernova
 ```
 
-0.9.0 adds Sharp for image validation. Keep its platform-specific optional
-dependencies enabled. For a local checkout, refresh dependencies before starting
+Image reads and returned images are validated with Sharp: at most 32 million
+decoded pixels across all frames, one image at a time, in a subprocess with a
+5-second kill deadline; text-only work never loads it. Keep Sharp's
+platform-specific optional dependencies enabled. For a local checkout, refresh dependencies before starting
 the host:
 
 ```bash
@@ -691,6 +563,14 @@ ceiling, and return a summary. JSON over 16 MiB needs a streaming parser via bas
 continuation handles.
 
 ## Execution and automatic batching
+
+```js
+await Promise.all([
+  edit("src/a.js", "oldA", "newA"),
+  edit("src/b.js", "oldB", "newB"),
+]);
+return await bash("npm test");
+```
 
 Put already-known independent reads and checks in **one** Supernova program using
 `Promise.all` (or `Promise.allSettled` when failures should remain independent).

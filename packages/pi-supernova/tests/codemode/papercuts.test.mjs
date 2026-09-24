@@ -401,6 +401,63 @@ it("edit misses report the closest exact bytes instead of only the file head", a
   await assert.rejects(f.execute('return await edit("deep.js","no such text anywhere","x");'),/lines total/);
 });
 
+async function failureText(promise) {
+  try { await promise; } catch (error) { return error.message; }
+
+  throw new Error("expected the program to fail");
+}
+
+// Session evidence (2026-09-19..24): guest code shadowing a command name got
+// a misleading data hint or a bare TDZ error, and `supernova(...)` inside a
+// program got a bare ReferenceError. Each now names the actual mistake.
+it("guest errors name command-shadowing and nested-tool mistakes; unrelated errors get no hint", async t => {
+  const f = await engineFixture(t);
+  await f.write("README.md", "hello\n");
+
+  const redeclared = await failureText(f.execute('const read = await read("README.md"); return read;'));
+  assert.match(redeclared, /`read` is a supernova command/);
+  assert.doesNotMatch(redeclared, /data/);
+
+  const tdz = await failureText(f.execute('{ const edit = await edit("README.md","hello","bye"); } return 1;'));
+  assert.match(tdz, /`edit` is a supernova command/);
+
+  const nested = await failureText(f.execute('return await supernova({code:"return 1"});'));
+  assert.match(nested, /call read, edit, write or bash directly/);
+
+  const withData = await failureText(f.tool.execute("red-contract", { code: "const data = 1; return data;", data: { a: 1 }, timeoutMs: 2000 }, undefined, undefined, { cwd: f.root }));
+  assert.match(withData, /do not redeclare its binding/);
+
+  const unrelated = await failureText(f.execute("return missingThing;"));
+  assert.doesNotMatch(unrelated, /supernova command|directly|redeclare/);
+});
+
+// The mutations line costs ~120 characters on most results (2,207 of 2,467
+// calls in five days) and only informs when files were committed or rolled
+// back, or when a failed program leaves shell side effects behind.
+it("the mutations line appears only when it carries information", async t => {
+  const f = await engineFixture(t);
+
+  const readOnly = modelText(await f.execute('return (await bash("echo hi")).trim();'));
+  assert.doesNotMatch(readOnly, /mutations:/);
+
+  const wrote = modelText(await f.execute('await write("a.txt","x"); await bash("true"); return 1;'));
+  assert.match(wrote, /mutations: committed=1 rolledBack=0/);
+  assert.doesNotMatch(wrote, /external calls/);
+
+  const failedAfterShell = await failureText(f.execute('await bash("true"); throw new Error("boom");'));
+  assert.match(failedAfterShell, /external calls attempted=1, their side effects cannot be rolled back/);
+
+  const syntax = await failureText(f.execute("return (;"));
+  assert.doesNotMatch(syntax, /mutations:/);
+});
+
+it("empty oldText explains how to insert with an anchor", async t => {
+  const f = await engineFixture(t);
+  await f.write("a.txt", "one\ntwo\n");
+  const message = await failureText(f.execute('await edit("a.txt","","zero");'));
+  assert.match(message, /to insert, include adjacent existing text in oldText and repeat it in newText/);
+});
+
 it("syntax errors show the offending source line and column", async t => {
   const f = await engineFixture(t);
   await assert.rejects(f.execute('return "unterminated'), error => {

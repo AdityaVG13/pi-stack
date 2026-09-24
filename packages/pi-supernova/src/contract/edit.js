@@ -82,7 +82,7 @@ function classifyReplacements(args) {
 
   if (!Array.isArray(edits) || !edits.length) throw new Error(EDIT_USAGE);
 
-  for (const e of edits) if (!isString(e?.oldText) || !e.oldText.length || !isString(e?.newText)) throw new Error(EDIT_USAGE + "; replacements require non-empty oldText and string newText");
+  for (const e of edits) if (!isString(e?.oldText) || !e.oldText.length || !isString(e?.newText)) throw new Error(EDIT_USAGE + "; replacements require non-empty oldText and string newText" + (isString(e?.oldText) && !e.oldText.length ? "; to insert, include adjacent existing text in oldText and repeat it in newText" : ""));
 
   return { kind: "edits", command: "edit", args };
 }

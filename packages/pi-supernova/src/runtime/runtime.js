@@ -12,6 +12,24 @@ import { errorMessage, isFunction, isObject, isString } from "../shared/decode.j
 import { errorContext } from "../shared/syntax-context.js";
 import {validateReturnedImages} from "../shared/image.js";
 
+const GUEST_COMMANDS = new Set(["read", "edit", "write", "bash"]);
+
+// Hints for mistakes seen in real sessions. Bindings named after a command
+// shadow it (redeclaration or TDZ); `supernova` is the tool, not a guest
+// function; `data` can only collide when the call supplied it. Anything
+// else gets no hint.
+function guestMistakeHint(message) {
+  const name = /Identifier '([^']+)' has already been declared/.exec(message)?.[1] ?? /Cannot access '([^']+)' before initialization/.exec(message)?.[1];
+
+  if (GUEST_COMMANDS.has(name)) return "; `" + name + "` is a supernova command: give your variable another name (e.g. const text = await " + name + "(...))";
+
+  if (name === "data") return "; the data parameter is already bound as `data`: do not redeclare its binding";
+
+  if (/\bsupernova is not defined\b/.test(message)) return "; inside a program, call read, edit, write or bash directly (supernova is the tool you are already in)";
+
+  return "";
+}
+
 const ABORT_MESSAGE = "supernova aborted";
 const TIMEOUT_MESSAGE = "supernova timed out: increase the outer timeoutMs (and any shorter bash timeoutMs), or split the program; sleeps count toward the deadline";
 
@@ -241,7 +259,7 @@ class GuestRun {
   guestError(msg) {
     const location = normalizeGuestLocation(this.prepared.body, msg.location);
     const where = location ? " (line " + location.line + ":" + location.col + ")" : "";
-    void this.complete(this.fail(msg.message + where));
+    void this.complete(this.fail(msg.message + where + guestMistakeHint(msg.message)));
   }
 
   onMemory(msg) {

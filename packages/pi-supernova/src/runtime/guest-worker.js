@@ -227,7 +227,7 @@ async function handleRun(msg) {
     // Existing programs may declare their own data variable; bind it only when supplied.
     compiled = compileGuest(prepared, msg.data);
   } catch (err) {
-    postFailure(runId, new Error("JavaScript syntax error: " + err.message + "; no commands ran. When passing data, do not redeclare its binding."));
+    postFailure(runId, new Error("JavaScript syntax error: " + err.message + "; no commands ran."));
 
     return;
   }

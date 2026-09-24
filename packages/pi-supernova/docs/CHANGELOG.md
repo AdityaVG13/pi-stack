@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.10.2] - 2026-09-24
+
+### Changed
+
+- Results print the `mutations:` line only when it informs: files committed or
+  rolled back, an uncertain filesystem outcome, or (failures only) shell side
+  effects that survive the rollback. Five days of sessions carried it on 2,207
+  of 2,467 results, 1,928 of them all-zero (~240k characters).
+
+### Fixed
+
+- Redeclaring or shadowing `read`/`edit`/`write`/`bash` (e.g.
+  `const read = await read(...)`) now says the name is a supernova command,
+  instead of a misleading `data` hint or a bare TDZ error. The `data` hint
+  appears only when `data` itself was redeclared.
+- `supernova(...)` called inside a program says to call the commands directly.
+- Empty `oldText` says how to insert: anchor on adjacent existing text.
+
 ## [0.10.1] - 2026-09-23
 
 ### Fixed

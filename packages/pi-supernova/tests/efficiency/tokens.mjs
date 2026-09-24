@@ -49,6 +49,13 @@ const contractEvents = structuredClone(baseline.events);
 // long-standing `edited <rel>` form; the frozen absolute marker is the
 // normalizer's /workspace/ prefix, stripped here rather than regenerated.
 for (const event of contractEvents) event.output = event.output.replaceAll("wrote /workspace/", "wrote ");
+// Contract v4 prints the mutations line only when it informs: a successful
+// program that committed and rolled back nothing omits it (shell side effects
+// matter only when a failure rolls files back). Failures keep it.
+
+const QUIET_MUTATIONS = /\nmutations: committed=0 rolledBack=0 \(file versions\)(; external calls attempted=\d+, their side effects cannot be rolled back)?(?=\n)/;
+
+for (const event of contractEvents) if (!event.error) event.output = event.output.replace(QUIET_MUTATIONS, "");
 const line = workload.files["src/fs/json-read.js"].split("\n")[2];
 const oldField = "text:" + JSON.stringify(line);
 assert.equal(contractEvents[0].output.split(oldField).length, 2);

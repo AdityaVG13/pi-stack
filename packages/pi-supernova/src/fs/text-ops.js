@@ -92,7 +92,7 @@ function nearMissPreview(content, oldText) {
 }
 function matchReplacement(target, content, replacement) {
   if (!isString(replacement?.oldText) || replacement.oldText.length === 0) {
-    throw new Error("edit requires non-empty oldText");
+    throw new Error("edit requires non-empty oldText; to insert, include adjacent existing text in oldText and repeat it in newText");
   }
 
   if (!isString(replacement?.newText)) throw new Error("edit requires newText");
