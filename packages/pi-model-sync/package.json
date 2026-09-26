@@ -1,0 +1,59 @@
+{
+  "name": "pi-model-sync",
+  "version": "0.1.0",
+  "description": "Keep Pi models fresh: /model-sync discovers live provider catalogs, enriches from models.dev, and writes missing models to models.json.",
+  "type": "module",
+  "author": "AdityaVG13",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "extension",
+    "models",
+    "catalog",
+    "sync",
+    "discovery"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "main": "./index.js",
+  "exports": "./index.js",
+  "files": [
+    "index.js",
+    "lib/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm test && node ../../scripts/preflight.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AdityaVG13/pi-stack.git",
+    "directory": "packages/pi-model-sync"
+  },
+  "bugs": {
+    "url": "https://github.com/AdityaVG13/pi-stack/issues"
+  },
+  "homepage": "https://github.com/AdityaVG13/pi-stack/tree/main/packages/pi-model-sync#readme"
+}
