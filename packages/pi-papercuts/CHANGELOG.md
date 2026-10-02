@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased (version retained at 0.3.3)
+
+- Split registration, contracts, validation, actions and rendering into focused modules; expose structured Pi results and explicit error receipts.
+- Retain TUI text and frame layout caches, sanitize terminal controls, and preserve Unicode preview boundaries.
+- Run storage actions in a lazy serial worker, snapshot caller overrides and drain accepted writes during shutdown without replaying lost receipts.
+- Coordinate add, resolve and prune through canonical-path locks and durable appends; refuse unsafe log targets and heal torn tails.
+- Index only requested common-width prefixes for bulk resolution while preserving order, deduplication and ambiguity.
+- Reject malformed wire values and stored IDs/tags before they can poison valid operations; resolve relative paths against the active execution directory.
+- Add local real-host paint, execution and responsiveness profiling with equivalence artifacts.
+
 ## 0.3.3
 
 - Make optional tool arguments explicitly nullable for strict-schema hosts and ignore null placeholders before action-specific validation.

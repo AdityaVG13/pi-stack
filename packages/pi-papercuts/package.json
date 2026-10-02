@@ -27,6 +27,12 @@
     "index.js",
     "store.js",
     "decode.js",
+    "contract.js",
+    "params.js",
+    "actions.js",
+    "render.js",
+    "worker-client.js",
+    "worker.js",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
