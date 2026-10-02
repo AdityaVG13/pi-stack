@@ -16,13 +16,19 @@ export function sourceContext(source, line, column, lineBreaks = JS_LINES) {
   if (text === undefined) return "";
   const located = Number.isInteger(column) && column >= 0;
   const position = located ? Math.min(column, text.length) : 0;
+  const {shown,caret} = renderSourceWindow(text, position, located);
+
+  return "\n  " + shown + (caret ? "\n  " + caret : "");
+}
+
+function renderSourceWindow(text, position, located) {
   const start = Math.max(0, Math.min(position - 80, text.length - 160));
   const end = Math.min(text.length, start + 160);
   const prefix = start > 0 ? "…" : "";
   const shown = prefix + displaySource(text.slice(start, end)) + (end < text.length ? "…" : "");
   const caret = located ? " ".repeat(stringWidth(prefix + displaySource(text.slice(start, position)))) + "^" : "";
 
-  return "\n  " + shown + (caret ? "\n  " + caret : "");
+  return {shown,caret};
 }
 
 /** acorn-style error that carries a loc, when it has one. */

@@ -17,7 +17,7 @@ export function recordOutlineOrigins(ledger, rel, outlineText) {
   }
 }
 
-/** Where else a name appears (declaration line excluded), for outlines and edit results. */
+/** Where else an expanded outline name appears, excluding its own declaration. */
 export function createReferenceFinder(index, vfs) {
   return async function referenceFinder(cwd, targetPath) {
     let files;
@@ -27,14 +27,20 @@ export function createReferenceFinder(index, vfs) {
 
     if (!index.canScan(files)) return () => [];
 
-    return (name, excludeLine) => {
+    // Each outline supplies its expanded names together. The row snapshot is
+    // call-local; the existing index still owns file validation and body caching.
+    let rows;
+
+    return (name, excludeLine, names) => {
       if (!name || name.length < 3) return [];
       const escaped = name.replace(/[$]/g, (c) => "\\" + c);
       const regex = new RegExp("\\b" + escaped + "\\b");
 
-      return index
-        .grepRows(files, regex, cwd, file => vfs.getOverlay(file))
-        .filter((r) => !(r.line === excludeLine && r.rel === relativeSlash(cwd, targetPath)))
+      rows ??= index.grepRows(files, new RegExp("\\b(?:" + names.filter(name => name.length >= 3)
+        .map(name => name.replaceAll("$", "\\$")).join("|") + ")\\b"), cwd, file => vfs.getOverlay(file));
+
+      return rows
+        .filter((r) => regex.test(r.text) && !(r.line === excludeLine && r.rel === relativeSlash(cwd, targetPath)))
         .map((r) => r.rel + ":" + r.line);
     };
   };

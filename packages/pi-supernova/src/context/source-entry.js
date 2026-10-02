@@ -24,6 +24,7 @@ function pythonDeclarationEnd(raw, lower, start, lineCount) {
 
   for (let i = start; i < lineCount; i++) {
     if (lower[i] === "") { end = i + 1; continue; }
+
     if (lineIndent(raw, i) <= base) break;
     end = i + 1;
   }

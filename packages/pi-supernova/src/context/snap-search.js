@@ -43,6 +43,7 @@ function bestDeclaration(items, query, tokens, needles) {
     const coverage = tokens.filter((token, index) => name.includes(needles[index] ?? token)).length;
 
     if (itemExact || coverage > definitionCoverage) { declaration = item; definitionCoverage = coverage; exact = itemExact; }
+
     if (exact) break;
   }
 
@@ -102,6 +103,7 @@ function inspectOverlay(candidate, text, needles, query, tokens, signal) {
       const lower = row.toLowerCase();
       inspectLine(candidate, line, row, query, tokens, needles, needles.some(needle => lower.includes(needle)));
     }
+
     start = end;
     line++;
   }
@@ -157,6 +159,7 @@ function rgSearchArgs(includeHidden, searchNeedles, focusFile, dir) {
 
   if (includeHidden) args.push("--hidden");
   args.push("-g", "!.git/**", "-g", "!**/.git/**");
+
   for (const needle of searchNeedles) args.push("-e", needle);
   args.push("--", focusFile ?? dir);
 
@@ -165,6 +168,7 @@ function rgSearchArgs(includeHidden, searchNeedles, focusFile, dir) {
 
 async function runContentSearch({ dir, includeHidden, searchNeedles, run, overlayText, signal, diskFiles, focusFile }) {
   const args = rgSearchArgs(includeHidden, searchNeedles, focusFile, dir);
+
   const response = diskFiles || (focusFile && overlayText(focusFile) === undefined)
     ? await run(args, { cwd: focusFile ? path.dirname(focusFile) : dir, timeoutMs: 15000, maxOutputChars: MAX_SEARCH_CHARS, signal })
     : { stdout: "", stderr: "", exitCode: 1 };
@@ -182,6 +186,7 @@ function absorbRgRecords(candidates, response, dir, includeHidden, overlayText, 
     const record = parseRgRecord(records[i], response.outputTruncated, i === records.length - 1);
 
     if (record === undefined) break;
+
     if (!record) continue;
     absorbRgHit(candidates, record, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles);
   }
@@ -200,4 +205,5 @@ async function contentCandidates({ dir, includeHidden, query, tokens, flags, pen
 
   return { candidates, truncated: response.outputTruncated === true || overlayTruncated };
 }
+
 export { inScope, makeCandidate, contentCandidates, MAX_SEARCH_CHARS };

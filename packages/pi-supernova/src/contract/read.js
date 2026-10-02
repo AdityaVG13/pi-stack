@@ -3,9 +3,9 @@ import { foldJsonSelectorAlias, sessionJsonArgs, validateJsonRead } from "../fs/
 
 export const SESSION_URI = /^(?:agent|artifact):\/\//i;
 
-const BOOL_KEYS = ["resolve", "complete", "outline", "evidence"];
+const BOOL_KEYS = ["resolve", "complete", "outline", "evidence", "indexed"];
 
-const READ_OPTION_KEYS = ["path", "target", "about", "query", "offset", "limit", "json", "resolve", "complete", "outline", "evidence", "maxChars", "_independent"];
+const READ_OPTION_KEYS = ["path", "target", "about", "query", "offset", "limit", "json", "resolve", "complete", "outline", "evidence", "maxChars", "indexed", "_independent"];
 
 /** Unknown options used to be dropped silently: {start,end} read the whole file. */
 function assertReadOptions(args) {
@@ -26,17 +26,20 @@ export function isSessionUri(value) {
 
 /** Guest call shape → one options object. */
 export function gatherReadArgs(p, a, b) {
-  if (isObject(p) && !Array.isArray(p)) {
-    const args = { ...p, path: p.path ?? p.target ?? p.query };
-
-    if (p.path === undefined && p.target !== undefined) delete args.target;
-
-    return args;
-  }
+  if (isObject(p) && !Array.isArray(p)) return gatherObjectReadArgs(p);
 
   // Only the string shorthand guesses between a path and a symbol. Explicit
   // path/target objects and path arrays must not turn missing files into search.
   return autoResolve(isObject(a) && !Array.isArray(a) ? { path: p, ...a } : { path: p, offset: a, limit: b });
+}
+
+function gatherObjectReadArgs(p) {
+  // Query text is not a scope, even when it looks like a filename.
+  const args = { ...p, path: p.path ?? p.target ?? (p.query !== undefined ? "." : undefined) };
+
+  if (p.path === undefined && p.target !== undefined) delete args.target;
+
+  return args;
 }
 
 export function assertReadPaths(targetParam) {
@@ -44,7 +47,7 @@ export function assertReadPaths(targetParam) {
 
   if (targetParam.length > 64) throw new Error("read accepts at most 64 paths per batch");
 
-  for (const item of targetParam) if (!isString(item) || !item.trim()) throw new Error("read paths must be non-empty strings");
+  for (const item of targetParam) if (!isString(item) || item.length === 0) throw new Error("read paths must be non-empty strings");
 }
 
 function assertReadFlags(args) {
@@ -57,10 +60,18 @@ function assertReadFlags(args) {
   if (args.query !== undefined && !isString(args.query)) throw new Error("read query must be a string");
 }
 
-function assertExclusiveRead(args) {
+function assertFocusModes(args) {
   const focusModes = [args.about !== undefined, args.query !== undefined, args.outline === true].filter(Boolean).length;
 
   if (focusModes > 1 || (args.outline === true && args.evidence === true)) throw new Error("read accepts only one of about, query, outline, or evidence");
+
+  return focusModes;
+}
+
+function assertExclusiveRead(args) {
+  if (args.indexed === true && indexedConflict(args)) throw new Error("indexed:true requires a source query, not another read mode or explicit window");
+
+  const focusModes = assertFocusModes(args);
 
   if (args.resolve === true && args.complete === true) throw new Error("read accepts either resolve or complete, not both");
 
@@ -70,7 +81,7 @@ function assertExclusiveRead(args) {
 function autoResolve(args) {
   if (!isString(args.path) || args.resolve !== undefined || args.complete === true || args.json !== undefined) return args;
 
-  if (args.about !== undefined || args.query !== undefined || args.offset !== undefined || args.limit !== undefined || looksLikePath(args.path) || isSessionUri(args.path)) return args;
+  if (hasDefinedOption(args, ["about", "query", "offset", "limit"]) || looksLikePath(args.path) || isSessionUri(args.path)) return args;
 
   return { ...args, resolve: true };
 }
@@ -103,20 +114,30 @@ export function needsProbe(params) {
  * Kind of read after exclusive modes are already validated.
  * `existing` is the probe result, or null/undefined when needsProbe is false or the path is missing.
  */
-function classifyExisting(params, existing) {
-  if (existing.directory) {
-    if (params.json !== undefined) throw new Error("JSON read requires a file, not a directory");
+function hasDefinedOption(args, keys) {
+  return keys.some(key => args[key] !== undefined);
+}
 
-    return isString(params.about)
-      ? { kind: "snap", query: params.about, scoped: true, existing }
-      : { kind: "dir", existing };
-  }
+function indexedConflict(args) {
+  return hasDefinedOption(args, ["about", "json", "offset", "limit"]) || ["outline", "evidence", "complete"].some(key => args[key] === true);
+}
+
+function classifyDirectory(params, existing) {
+  if (params.json !== undefined) throw new Error("JSON read requires a file, not a directory");
+
+  return isString(params.about)
+    ? { kind: "snap", query: params.about, scoped: true, existing }
+    : { kind: "dir", existing };
+}
+
+function classifyExisting(params, existing) {
+  if (existing.directory) return classifyDirectory(params, existing);
 
   if (params.resolve === true && isString(params.about)) {
     throw new Error("resolve:true cannot combine with about on a file; use about for a focused outline or resolve for source text");
   }
 
-  if (isString(params.about) && existing.size > 512 * 1024) return { kind: "focus", existing, about: params.about };
+  if (isString(params.about) && (existing.size > 512 * 1024 || /\.(?:md|markdown)$/i.test(existing.path))) return { kind: "focus", existing, about: params.about };
 
   return { kind: params.resolve ? "open" : "file", existing };
 }

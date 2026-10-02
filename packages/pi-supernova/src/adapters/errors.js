@@ -1,8 +1,11 @@
 export const IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+
 export const LARGE_FILE_BYTES = 512 * 1024;
+
 export const TEXT_MAX_BYTES = 64 * 1024 * 1024;
 
 export const ABOUT_TOKEN_MAX = 16;
+
 export const IMAGE_MIME = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -19,5 +22,6 @@ export function imageTooLarge(rel, size) {
 export function missingFile(targetPath) {
   const error = new Error("no such file: " + targetPath + " (locate it with read using a directory path or source question; use Promise.allSettled for optional reads to retain successful siblings)");
   error.code = "ENOENT";
+
   return error;
 }

@@ -59,3 +59,32 @@ it("a second drifted hunk shifts only its own receipt lines", async t => {
   assert.match(out.details.result, /edited e\.txt:6-10/);
   assert.equal(await patchedFile(f, "e.txt"), "A2\nB\nC\np1\np2\np3\nX\nY2\nZ\n");
 });
+
+it("patch hunks cannot consume earlier output or move behind it", async t => {
+  const original = "a\nb\nc\nd\ne\n";
+
+  const patches = [
+    "@@ -1,1 +1,2 @@\n a\n+MARK\n@@ -5,1 +6,0 @@\n-MARK\n",
+    "@@ -4,1 +4,2 @@\n d\n+NEW\n@@ -1,2 +1,2 @@\n a\n-b\n+B\n",
+    "@@ -1,1 +1,2 @@\n a\n+FIRST\n@@ -1,0 +1,1 @@\n+SECOND\n",
+    "@@ -1,2 +1,2 @@\n-a\n+A\n b\n@@ -2,1 +2,1 @@\n-b\n+B\n",
+  ];
+
+  for (const patch of patches) {
+    const f = await engineFixture(t);
+    await f.write("target.txt", original);
+    await assert.rejects(f.execute(`
+      await write("must-rollback.txt", "not committed");
+      return await edit({path:"target.txt", patch:${JSON.stringify(patch)}});
+    `), /patch hunk 2.*rejected/);
+    assert.equal(await patchedFile(f, "target.txt"), original);
+    await assert.rejects(fs.stat(path.join(f.root, "must-rollback.txt")), { code: "ENOENT" });
+  }
+});
+
+it("adjacent deletion and insertion hunks may start at the frozen boundary", async t => {
+  const f = await engineFixture(t);
+  await f.write("target.txt", "a\nb\nc\nd\n");
+  await f.execute(`return await edit({path:"target.txt", patch:${JSON.stringify("@@ -1,1 +0,0 @@\n-a\n@@ -2,1 +0,0 @@\n-b\n@@ -2,0 +1,1 @@\n+NEW\n")}});`);
+  assert.equal(await patchedFile(f, "target.txt"), "NEW\nc\nd\n");
+});

@@ -5,7 +5,7 @@ export const MAX_JSON_BYTES = 16 * 1024 * 1024;
 const SELECTOR_HELP = 'JSON selector supports .field, .nested[0], .items[0:3], .items.length, .["quoted.key"], or . (whole value); not full jq';
 
 function parseIdentStep(rest, first) {
-  const match = (first ? /^([A-Za-z_$][\w$]*)/ : /^\.([A-Za-z_$][\w$]*)/).exec(rest);
+  const match = (first ? /^([A-Za-z_$][\w$-]*)/ : /^\.([A-Za-z_$][\w$-]*)/).exec(rest);
 
   return match ? { step: { key: match[1] }, match } : null;
 }
@@ -57,7 +57,8 @@ function missingJsonField(value, key) {
   const keys = isObject(value) ? Object.keys(value) : [];
   const preview = keys.length ? "; available keys: " + keys.slice(0, 24).map(key => JSON.stringify(key)).join(", ") + (keys.length > 24 ? ", …" : "") : "";
 
-  return new Error("JSON field not found: " + JSON.stringify(key) + preview);
+  return new Error("JSON field not found: " + JSON.stringify(key) + preview
+    + "; for optional fields, select the parent object (json:true for the root) and apply ?? defaults in guest code");
 }
 
 function selectKey(value, key) {

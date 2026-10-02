@@ -9,6 +9,7 @@ import { truncateChars,formatReturn,displayExceeds,formatBoundedValue } from "..
 import { guestImportMessage, isDeniedGuestImport } from "./guest-deny-imports.js";
 
 const { register, registerHooks } = nodeModule;
+
 // heapUsed/external belong to this worker; rss includes the entire Pi/OMP host.
 const memoryUsage = process.memoryUsage.bind(process);
 
@@ -97,12 +98,16 @@ function encodeConsoleArg(a, limit) {
     const raw = truncateChars(a,limit,"log");
     const encoded = truncateChars(formatReturn(raw.text),limit,"log");
     encoded.truncated ||= raw.truncated;
+
     return encoded;
   }
+
   try {
     const plain = toPlain(a);
+
     if (displayExceeds(plain,limit)) return {text:formatBoundedValue(plain,limit,"log"),truncated:true};
     const encoded = JSON.stringify(plain);
+
     return truncateChars(encoded === undefined ? String(plain) : encoded,limit,"log");
   } catch { return truncateChars(formatReturn(String(a)),limit,"log"); }
 }
@@ -130,10 +135,13 @@ function handleRpcResult(msg) {
 
 function handleReadItem(msg) {
   const pending = pendingRpc.get(msg.id);
+
   if (!pending?.onItem || !runActive || msg.runId !== activeRunId) return;
   let error;
+
   try { pending.onItem(msg.index,msg.value); }
   catch (err) { error = errorMessage(err); pending.reject(err); pendingRpc.delete(msg.id); }
+
   reportMemory(activeRunId);
   post({op:"rpc:ack",id:msg.id,index:msg.index,runId:activeRunId,error});
 }
@@ -154,14 +162,19 @@ function makeConsole(runId, limits) {
 
     count++;
     let line = "", first = true;
+
     for (const arg of args) {
       const room = limits.maxLogLineChars-line.length-(first ? 0 : 1);
+
       if (room <= 0) { markTruncated(); break; }
+
       const encoded = encodeConsoleArg(arg,room);
+
       if (encoded.truncated) markTruncated();
       line += (first ? "" : " ")+encoded.text;
       first = false;
     }
+
     const clipped = truncateChars(line, limits.maxLogLineChars, "log");
 
     if (clipped.truncated) markTruncated();
@@ -171,10 +184,10 @@ function makeConsole(runId, limits) {
   return { log: emit, warn: emit, error: emit, info: emit, debug: emit };
 }
 
-function postFailure(runId, err, location) {
+function postFailure(runId, err, location, errorKind = err?.name) {
   runActive = false;
   const message = errorMessage(err);
-  post({ op: "error", runId, message, location });
+  post({ op: "error", runId, message, location, errorKind });
 }
 
 function denyBuiltin(id) {
@@ -186,6 +199,7 @@ let sealedRealm = false;
 function sealGuestRealm() {
   if (sealedRealm) return;
   sealedRealm = true;
+
   if (isFunction(process.getBuiltinModule)) {
     const orig = process.getBuiltinModule.bind(process);
     process.getBuiltinModule = (id) => {
@@ -227,7 +241,7 @@ async function handleRun(msg) {
     // Existing programs may declare their own data variable; bind it only when supplied.
     compiled = compileGuest(prepared, msg.data);
   } catch (err) {
-    postFailure(runId, new Error("JavaScript syntax error: " + err.message + "; no commands ran."));
+    postFailure(runId, new Error("JavaScript syntax error: " + err.message + "; no commands ran."), undefined, err.name);
 
     return;
   }
@@ -258,7 +272,11 @@ async function handleRun(msg) {
 parentPort.on("message", (msg) => {
   if (!isObject(msg)) return;
 
-  if (msg.op === "rpc:item") { handleReadItem(msg); return; }
+  if (msg.op === "rpc:item") {
+    handleReadItem(msg);
+
+    return;
+  }
 
   if (msg.op === "rpc:result") {
     handleRpcResult(msg);

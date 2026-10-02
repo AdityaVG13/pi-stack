@@ -25,14 +25,19 @@ const definition = {description,parameters,promptSnippet,promptGuidelines};
 
 // Frozen AFTER the preceding optimization pass, never reconstructed from a candidate.
 const baselineText = await fs.readFile(new URL("./token-baseline.json",import.meta.url),"utf8");
+
 assert.equal(createHash("sha256").update(baselineText).digest("hex"), "96964f990f481ac05afaefdd02001bd15f61835a8381349a61e38c06209d7508", "historical traffic and outputs are immutable; version contract expectations separately");
+
 const baseline = JSON.parse(baselineText);
 
 const beforeDefinition = baseline.definition;
 
 const reuseText = await fs.readFile(new URL("./batch-reuse-baseline.json",import.meta.url),"utf8");
+
 assert.equal(createHash("sha256").update(reuseText).digest("hex"),"589960c417006630872c16fae9ae5be4f5cdbdddbf86dda9fd9377651352055a","batch-reuse inputs, pre-feature definition and complete output are frozen");
+
 const reuseBaseline = JSON.parse(reuseText);
+
 const batchReuse = await runBatchReuseWorkload(reuseBaseline);
 
 const workload = auditWorkload(baseline.source,baseline.decode);
@@ -45,6 +50,7 @@ const candidate = await runWorkload(workload,{batch:!!parameters.properties.prog
 // single explicit correction is derived from the frozen input, not the candidate.
 // Historical traffic still uses the untouched v1 outputs/definition below.
 const contractEvents = structuredClone(baseline.events);
+
 // Contract v3 reports write receipts relative to the workspace, matching the
 // long-standing `edited <rel>` form; the frozen absolute marker is the
 // normalizer's /workspace/ prefix, stripped here rather than regenerated.
@@ -56,10 +62,26 @@ for (const event of contractEvents) event.output = event.output.replaceAll("wrot
 const QUIET_MUTATIONS = /\nmutations: committed=0 rolledBack=0 \(file versions\)(; external calls attempted=\d+, their side effects cannot be rolled back)?(?=\n)/;
 
 for (const event of contractEvents) if (!event.error) event.output = event.output.replace(QUIET_MUTATIONS, "");
+
+// Contract v5 keeps native stderr/source carets untouched by placing the guest
+// callsite in the error headline. Project this one frozen failure explicitly;
+// neither historical traffic nor the candidate generates the expectation.
+const oldFailure = "error: command failed (exit 1): node\nJSON input cap regression (line 1:8)";
+
+const newFailure = "error: command failed (exit 1): node (line 1:8)\nJSON input cap regression";
+
+assert.equal(contractEvents[1].output.split(oldFailure).length, 2);
+
+contractEvents[1].output = contractEvents[1].output.replace(oldFailure, newFailure);
+
 const line = workload.files["src/fs/json-read.js"].split("\n")[2];
+
 const oldField = "text:" + JSON.stringify(line);
+
 assert.equal(contractEvents[0].output.split(oldField).length, 2);
+
 contractEvents[0].output = contractEvents[0].output.replace(oldField, "text:" + JSON.stringify(line + "\n"));
+
 assert.deepEqual(candidate.logicalEvents,contractEvents,"all arguments, complete outputs and failures must match the explicit raw-line contract");
 
 // Explicitly opt into the experimental ledger on the same frozen workload. Both
@@ -80,32 +102,48 @@ assert.equal(workloadHash(observed.logicalEvents.map(event=>event.args)),workloa
 // Both arms run identical programs and deliver every source byte. Only the
 // placement of common input changes; there are no aliases, citations or codecs.
 const sharedFixture = await engineFixture({diagnostic:message=>console.error(message)});
+
 const sharedPaths = Array.from({length:48},(_,i)=>`src/area${i%8}/account-management/validation/rules/record_${String(i).padStart(3,"0")}.js`);
+
 const sharedBodies = sharedPaths.map((_,i)=>`export function validateRecord_${i}() {\n  return ${i};\n}\n`);
+
 await Promise.all(sharedPaths.map(async(file,i)=>{
   await fs.mkdir(path.dirname(path.join(sharedFixture.root,file)),{recursive:true});
   await sharedFixture.write(file,sharedBodies[i]);
 }));
+
 const sharedPrograms = Array.from({length:8},(_,i)=>({code:`return await Promise.all(data.paths.filter(p=>p.includes("/area${i}/")).map(async path=>({path,text:await read(path)})));`}));
+
 const sharedInput = {paths:sharedPaths};
+
 const repeatedArgs = {programs:sharedPrograms.map(program=>({...program,data:sharedInput}))};
+
 const defaultArgs = {programs:sharedPrograms,data:sharedInput};
+
 assert.ok(JSON.stringify(repeatedArgs.programs).length <= 48000,"the original arm must be admissible, not a hypothetical oversized request");
+
 const sharedOutputs = [];
+
 for (const args of [repeatedArgs,defaultArgs]) {
   const result = await sharedFixture.tool.execute("shared-data",args,undefined,undefined,{cwd:sharedFixture.root});
   assert.equal(result.details.ok,true);
   assert.equal(result.details.returnTruncated,false);
   assert.deepEqual(result.details.result,Array.from({length:8},(_,area)=>sharedPaths.flatMap((file,i)=>i%8===area ? [{path:file,text:sharedBodies[i]}] : [])));
   const output = modelText(result);
+
   for (const body of sharedBodies) assert.ok(output.includes(JSON.stringify(body)),"every complete source string must stay in its ordinary typed result representation");
+
   const parts = result.details.programs.map(part=>{
     assert.ok(output.includes(modelText(part)));
+
     return {...part,content:[{type:"text",text:modelText(part).replace(/^(ok|error) #\d+ \d+ms/,"$1 #0 0ms")}]};
   });
+
   sharedOutputs.push(programBatchText(parts,8));
 }
+
 assert.equal(sharedOutputs[0],sharedOutputs[1],"shared defaults must not alter or shorten any result");
+
 // Measured immediately before this feature, not reconstructed from its schema.
 const sharedBeforeDefinition = {o200k_base:618,cl100k_base:613};
 
@@ -143,6 +181,7 @@ const setup = JSON.stringify({code:"await write(data.path,data.content)",data:{p
 
 // Measured before this pass on commit d444eb7; same frozen workload and six calls.
 const priorBatchTraffic = {o200k_base:18535,cl100k_base:18310};
+
 // Captured from the unreleased working tree before shared-source/object defaults.
 const passStartingTraffic = {o200k_base:10191,cl100k_base:10067};
 

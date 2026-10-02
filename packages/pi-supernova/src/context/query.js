@@ -32,12 +32,15 @@ export function stem(token) {
 export function tokenizeQuery(query) {
   if (!isString(query) || !query.trim()) return { tokens: [], wantsTest: false, wantsType: false, wantsDoc: false };
   const words = query.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-zA-Z0-9_]+/);
+  // A document filename is one literal anchor, not a generic extension hit.
+  const document = /^[\w./\\-]+\.(?:md|mdx|rst|txt)$/i.test(query.trim());
 
   return {
-    tokens: [...new Set(words.filter(word => word.length > 1 && !STOP_WORDS.has(word)))],
+    tokens: document ? [query.trim().toLowerCase().replaceAll("\\", "/")]
+      : [...new Set(words.filter(word => word.length > 1 && !STOP_WORDS.has(word)))],
     wantsTest: words.some(word => TEST_WORDS.has(word)),
     wantsType: words.some(word => TYPE_WORDS.has(word)),
-    wantsDoc: words.some(word => DOC_WORDS.has(word)),
+    wantsDoc: document || words.some(word => DOC_WORDS.has(word)),
   };
 }
 
@@ -62,6 +65,7 @@ function topologyPenalty(normalized, flags) {
   const test = isTestPath(normalized);
 
   if (test && !flags.wantsTest) return -50;
+
   if (!test && flags.wantsTest) return -20;
 }
 
@@ -77,4 +81,5 @@ export function scorePathTopology(filePath, tokens, flags) {
 
   return score + tokenPathScore(path.basename(normalized), normalized.split(/[^a-zA-Z0-9]+/), normalized, tokens);
 }
+
 export { SOURCE_EXT, MAX_NEEDLE_CHARS };

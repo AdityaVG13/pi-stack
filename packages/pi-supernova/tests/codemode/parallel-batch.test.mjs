@@ -29,6 +29,7 @@ test("parallel:true overlaps guest workers and keeps result order", async (t) =>
 
 test("parallel programs commit disjoint writes and keep sibling results on failure", async (t) => {
   const { root, tool } = await engineFixture(t);
+
   const result = await tool.execute("par", {
     parallel: true,
     programs: [
@@ -51,6 +52,7 @@ test("parallel programs commit disjoint writes and keep sibling results on failu
 test("parallel entries share the data default like sequential ones", async (t) => {
   const { root, tool } = await engineFixture(t);
   await fs.writeFile(path.join(root, "x.txt"), "X");
+
   const result = await tool.execute("par", {
     parallel: true,
     data: { suffix: "-shared" },
@@ -81,31 +83,27 @@ test("parallel batches still enforce the shared host-call budget", async (t) => 
   assert.ok(a.capped + b.capped > 0, "expected budget errors once the shared cap was hit");
 });
 
-test("parallel batches fail honestly on shared log and image budgets", async t => {
+test("parallel batches fail honestly on the shared image budget", async t => {
   const f = await engineFixture(t);
-  const cases = [
-    {kind:"log", code:'for(let i=0;i<80;i++)console.log("line",i); return 1;'},
-    {kind:"image", code:'return Array.from({length:9},()=>({type:"image",mimeType:"image/png",data:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="}));'},
-  ];
-  for (const {kind, code} of cases) {
-    const result = await f.tool.execute("budget-" + kind, {parallel:true, programs:[{code},{code}]}, undefined, undefined, {cwd:f.root});
-    assert.equal(result.details.ok, false, kind + " budget overflow must not report success");
-    assert.equal(result.isError, true);
-    assert.match(result.details.error, new RegExp(kind + " budget exceeded"));
-    assert.ok(modelText(result).length <= 32000);
-    assert.ok(result.details.logs.length <= 100);
-    assert.ok(result.content.filter(block => block.type === "image").length <= 16);
-    if (kind === "log") assert.equal(result.details.logTruncated, true);
-    assert.equal(result.details.attempted, 2);
-  }
+  const code = 'return Array.from({length:9},()=>({type:"image",mimeType:"image/png",data:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="}));';
+  const result = await f.tool.execute("budget-image", {parallel:true, programs:[{code},{code}]}, undefined, undefined, {cwd:f.root});
+  assert.equal(result.details.ok,false,"image budget overflow must not report success");
+  assert.equal(result.isError,true);
+  assert.match(result.details.error,/image budget exceeded/);
+  assert.ok(modelText(result).length<=32000);
+  assert.ok(result.details.logs.length<=100);
+  assert.ok(result.content.filter(block=>block.type==="image").length<=16);
+  assert.equal(result.details.attempted,2);
 });
 
 test("parallel text clipping continues queued entries and preserves all commits", async t => {
   const f = await engineFixture(t);
+
   const result = await f.tool.execute("queued-budget", {
     parallel:true,
     programs:Array.from({length:12}, (_, i) => ({code:`await write("entry-${i}.txt","kept"); return "x".repeat(40000);`})),
   }, undefined, undefined, {cwd:f.root});
+
   assert.equal(result.details.ok, true, modelText(result));
   assert.equal(result.isError, false);
   assert.equal(result.details.returnTruncated, true);
@@ -114,5 +112,53 @@ test("parallel text clipping continues queued entries and preserves all commits"
   assert.ok(modelText(result).length <= 32000);
   assert.equal(result.details.attempted, 12, "text clipping must not stop queued work");
   assert.equal(result.details.mutations.committed, 12);
+
   for (let i = 0; i < 12; i++) assert.equal(await fs.readFile(path.join(f.root, `entry-${i}.txt`), "utf8"), "kept");
+});
+
+
+test("parallel log clipping preserves completed writes and continues queued programs", async t => {
+  const f = await engineFixture(t);
+
+  const result = await f.tool.execute("noisy-queue", {
+    parallel:true,
+    programs:Array.from({length:12},(_,i)=>({code:`for(let i=0;i<80;i++)console.log("line",i); await write("logged-${i}.txt","kept"); return ${i};`})),
+  }, undefined, undefined, {cwd:f.root});
+
+  assert.equal(result.details.ok,true,modelText(result));
+  assert.equal(result.isError,false);
+  assert.equal(result.details.logTruncated,true);
+  assert.equal(result.details.attempted,12);
+  assert.equal(result.details.mutations.committed,12);
+  assert.equal(result.details.logs.length,100);
+  assert.deepEqual(result.details.programs.map(part=>part.details.result),Array.from({length:12},(_,i)=>i));
+  assert.match(modelText(result),/logs truncated/);
+  assert.ok(modelText(result).length<=32000);
+
+  for (let i=0;i<12;i++) assert.equal(await fs.readFile(path.join(f.root,`logged-${i}.txt`),"utf8"),"kept");
+});
+
+test("clipped logs do not hide execution failures or discard successful commits", async t => {
+  for (const parallel of [false,true]) {
+    const f = await engineFixture(t);
+
+    const result = await f.tool.execute("noisy-failure", {parallel,programs:[
+      {code:'console.log("x".repeat(50000)); await write("kept.txt","kept"); return 1;'},
+      {code:'console.log("y".repeat(50000)); await write("rolled.txt","bad"); throw Error("real-failure-sentinel");'},
+      {code:'await write("later.txt","kept"); return 3;'},
+    ]}, undefined, undefined, {cwd:f.root});
+
+    assert.equal(result.details.ok,false);
+    assert.equal(result.isError,true);
+    assert.equal(result.details.logTruncated,true);
+    assert.equal(result.details.attempted,parallel?3:2);
+    assert.equal(result.details.programs[1].details.ok,false);
+    assert.match(modelText(result),/real-failure-sentinel/);
+    assert.equal(result.details.mutations.rolledBack,1);
+    assert.equal(await fs.readFile(path.join(f.root,"kept.txt"),"utf8"),"kept");
+    await assert.rejects(fs.stat(path.join(f.root,"rolled.txt")),{code:"ENOENT"});
+
+    if (parallel) assert.equal(await fs.readFile(path.join(f.root,"later.txt"),"utf8"),"kept");
+    else await assert.rejects(fs.stat(path.join(f.root,"later.txt")),{code:"ENOENT"});
+  }
 });

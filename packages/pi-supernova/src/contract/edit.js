@@ -20,7 +20,7 @@ export function viewSpan(value) {
 }
 
 export function isEditView(value) {
-  return isObject(value) && !Array.isArray(value) && isString(value.path) && value.path.trim() && isString(value.text) && (value.status === undefined || value.status === "found") && viewSpan(value);
+  return isObject(value) && !Array.isArray(value) && isString(value.path) && value.path.length > 0 && isString(value.text) && (value.status === undefined || value.status === "found") && viewSpan(value);
 }
 
 function classifyViewEdit(p, oldText, newText) {
@@ -60,7 +60,7 @@ function normalizeEditArgs(p, oldText, newText) {
 function namedEditArgs(p, oldText, newText) {
   const args = normalizeEditArgs(p, oldText, newText);
 
-  if (!isString(args.path) || !args.path.trim()) throw new Error(EDIT_USAGE);
+  if (!isString(args.path) || args.path.length === 0) throw new Error(EDIT_USAGE);
 
   return args;
 }
@@ -82,9 +82,17 @@ function classifyReplacements(args) {
 
   if (!Array.isArray(edits) || !edits.length) throw new Error(EDIT_USAGE);
 
-  for (const e of edits) if (!isString(e?.oldText) || !e.oldText.length || !isString(e?.newText)) throw new Error(EDIT_USAGE + "; replacements require non-empty oldText and string newText" + (isString(e?.oldText) && !e.oldText.length ? "; to insert, include adjacent existing text in oldText and repeat it in newText" : ""));
+  for (const edit of edits) if (!validReplacement(edit)) throw new Error(replacementError(edit));
 
   return { kind: "edits", command: "edit", args };
+}
+
+function validReplacement(edit) {
+  return isString(edit?.oldText) && !!edit.oldText.length && isString(edit?.newText);
+}
+
+function replacementError(edit) {
+  return EDIT_USAGE + "; replacements require non-empty oldText and string newText" + (isString(edit?.oldText) && !edit.oldText.length ? "; to insert, include adjacent existing text in oldText and repeat it in newText" : "");
 }
 
 const EDIT_OPTION_KEYS = ["path", "oldText", "newText", "edits", "patch"];
@@ -107,6 +115,7 @@ function classifyNamedEdit(p, oldText, newText) {
 /** Guest signature → { command, args } for one host call. */
 export function classifyEdit(p, oldText, newText) {
   if (isFunction(p)) return { kind: "checkpoint", fn: p };
+
   if (isEditView(p) && isString(oldText) && (newText === undefined || isString(newText))) return classifyViewEdit(p, oldText, newText);
 
   return classifyNamedEdit(p, oldText, newText);

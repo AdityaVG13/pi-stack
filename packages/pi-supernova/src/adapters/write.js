@@ -50,6 +50,7 @@ export function createWrite(ctx) {
     const unknown = Object.keys(params ?? {}).filter(key => !WRITE_OPTION_KEYS.includes(key));
 
     if (unknown.length) throw new Error("write does not accept option " + unknown.map(key => JSON.stringify(key)).join(", ") + "; supported options are " + WRITE_OPTION_KEYS.join(", "));
+
     if (!isString(params?.content)) throw new Error("write requires string content");
     assertWriteAppendFlag(params.append);
     assertWriteArtifactsFlag(params.allowReadArtifacts);

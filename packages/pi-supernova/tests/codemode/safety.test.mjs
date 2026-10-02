@@ -176,11 +176,13 @@ it("paged reads reconstruct CRLF and Unicode source without missing or duplicate
   const body=Array.from({length:1400},(_,i)=>i+": "+"λ😀 ".repeat(20)+"\r\n").join("");
   await f.write("pages.txt",body);
   let reconstructed="";
+
   for(let offset=1;offset<=1400;offset+=80) {
     const result=await f.execute('return await read({path:"pages.txt",offset:'+offset+',limit:80});');
     assert.equal(result.details.returnTruncated,false);
     reconstructed+=result.details.result;
   }
+
   assert.equal(reconstructed,body);
 });
 
@@ -218,14 +220,17 @@ it("corrupt PNGs fail before shell/commit or model delivery and leave the host u
   // Exact attachment that made Codex reject every subsequent request in the session.
   const corrupt = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
   await f.write("corrupt.png", Buffer.from(corrupt,"base64"));
+
   const noImages = error => {
     assert.match(error.message,/invalid PNG.*IDAT.*checksum/);
     assert.match(error.message,/no image attached/);
     assert.equal(error.supernovaResult.content.some(block=>block.type==="image"),false);
     assert.equal(error.supernovaResult.details.mutations.committed,0);
     assert.equal(error.supernovaResult.details.mutations.rolledBack,1);
+
     return true;
   };
+
   await assert.rejects(f.execute('await write("pending.txt","not committed"); await read("corrupt.png"); await bash("printf should-not-run");'),noImages);
   await assert.rejects(f.tool.execute("corrupt-return",{
     code:'await write("pending.txt","not committed"); return {nested:data};',
@@ -246,13 +251,16 @@ for (const [extension,mimeType,base64] of [
     const f = await engineFixture(t);
     // The PNG has correct chunk CRCs but an invalid compressed pixel stream.
     await f.write("invalid."+extension,Buffer.from(base64,"base64"));
+
     const noImages = error => {
       assert.match(error.message,/image|PNG|JPEG|GIF|WebP/);
       assert.equal(error.supernovaResult.content.some(block=>block.type==="image"),false);
       assert.equal(error.supernovaResult.details.mutations.committed,0);
       assert.equal(error.supernovaResult.details.mutations.rolledBack,1);
+
       return true;
     };
+
     await assert.rejects(f.execute(`await write("pending.txt","discard"); await read("invalid.${extension}"); await bash("printf should-not-run");`),noImages);
     await assert.rejects(f.tool.execute("undecodable-return",{
       code:'await write("pending.txt","discard"); return data;',data:{type:"image",mimeType,data:base64},
@@ -269,6 +277,7 @@ it("returned image base64 rejects invalid characters instead of decoding them pe
   },undefined,undefined,{cwd:f.root}),error=>{
     assert.match(error.message,/base64/i);
     assert.equal(error.supernovaResult.content.some(block=>block.type==="image"),false);
+
     return true;
   });
   await assert.rejects(fs.stat(path.join(f.root,"pending.txt")),{code:"ENOENT"});
@@ -277,12 +286,14 @@ it("returned image base64 rejects invalid characters instead of decoding them pe
 it("image validation preserves valid static and animated bytes in every supported format", async t => {
   const f = await engineFixture(t);
   const {default:sharp} = await import("sharp");
+
   for (const format of ["png","jpeg","gif","webp"]) {
     const image = await sharp({create:{width:2,height:2,channels:4,background:"red"}}).toFormat(format).toBuffer();
     await f.write("valid."+format,image);
     const result = await f.execute(`return await read("valid.${format}");`);
     assert.equal(result.content.find(block=>block.type==="image")?.data,image.toString("base64"));
   }
+
   for (const format of ["gif","webp"]) {
     const frames = Buffer.from([...Array(4).fill([255,0,0]).flat(),...Array(4).fill([0,0,255]).flat()]);
     const image = await sharp(frames,{raw:{width:2,height:4,pageHeight:2,channels:3}}).toFormat(format,{delay:[100,100]}).toBuffer();
@@ -312,6 +323,7 @@ it("decoded pixel budget rejects oversized images before allocating a full raste
 it("truncated non-PNG pixel streams are rejected even when their signatures survive", async t => {
   const f = await engineFixture(t);
   const {default:sharp} = await import("sharp");
+
   for (const format of ["jpeg","gif","webp"]) {
     const bytes = await sharp({create:{width:16,height:16,channels:3,background:"red"}}).toFormat(format).toBuffer();
     await f.write("truncated."+format,bytes.subarray(0,Math.floor(bytes.length/2)));
@@ -329,6 +341,7 @@ it("image validation reuses only decoded content and never a stale file path", a
   const original = childProcess.spawn;
   t.mock.method(childProcess,"spawn",function(...args){
     if (args[1]?.[0]?.endsWith("image-worker.js")) decodes++;
+
     return original.apply(this,args);
   });
   await f.execute('return "text-only";');
@@ -349,11 +362,15 @@ it("cancellation kills an image decoder and releases its queue slot", async t =>
   const controller = new AbortController();
   const {default:childProcess} = await import("node:child_process");
   const original = childProcess.spawn;
+
   const mocked = t.mock.method(childProcess,"spawn",function(...args){
     const child = original.apply(this,args);
+
     if (args[1]?.[0]?.endsWith("image-worker.js")) setImmediate(()=>controller.abort());
+
     return child;
   });
+
   await assert.rejects(validateImageBytes(bytes,"image/png","cancel.png",controller.signal),{name:"AbortError"});
   mocked.mock.restore();
   await validateImageBytes(bytes,"image/png","retry.png");
@@ -366,18 +383,158 @@ it("image decoder watchdog fails closed and permits a subsequent decode", async 
   const bytes = await sharp({create:{width:11,height:3,channels:3,background:"#142538"}}).png().toBuffer();
   await f.write("watchdog.png",bytes);
   const original = childProcess.spawn;
+
+  let injectError = false;
+
   const spawn = t.mock.method(childProcess,"spawn",function(command,args,options){
-    return original.call(this,command,args[0]?.endsWith("image-worker.js") ? ["-e","setInterval(()=>{},1000)"] : args,options);
+    const decoder = args[0]?.endsWith("image-worker.js");
+    const child = original.call(this,command,decoder ? ["-e","setInterval(()=>{},1000)"] : args,options);
+
+    if (decoder && injectError) child.once("spawn",()=>child.emit("error",Error("decoder pipe failure")));
+
+    return child;
   });
+
   const schedule = globalThis.setTimeout;
   let watchdog = false;
+
   const timer = t.mock.method(globalThis,"setTimeout",(fn,ms,...args)=>{
     if (ms === 5000) { watchdog=true; ms=20; }
+
     return schedule(fn,ms,...args);
   });
-  await assert.rejects(f.execute('await write("pending.txt","discard"); return await read("watchdog.png");'),/image decoding exceeded 5000 ms/);
-  assert.equal(watchdog,true);
-  await assert.rejects(fs.stat(path.join(f.root,"pending.txt")),{code:"ENOENT"});
-  spawn.mock.restore(); timer.mock.restore();
+
+  try {
+    for (injectError of [false,true]) {
+      watchdog = false;
+      await assert.rejects(f.execute('await write("pending.txt","discard"); return await read("watchdog.png");'),/image decoding exceeded 5000 ms/);
+      assert.equal(watchdog,true);
+      await assert.rejects(fs.stat(path.join(f.root,"pending.txt")),{code:"ENOENT"});
+    }
+  } finally { spawn.mock.restore(); timer.mock.restore(); }
+
   assert.equal((await f.execute('return await read("watchdog.png");')).details.ok,true);
+});
+
+it("queued image cancellation and verified reads do not wait for unrelated raster work", async t => {
+  const f = await engineFixture(t);
+  const {default:sharp} = await import("sharp");
+  const {default:childProcess} = await import("node:child_process");
+  const {validateImageBytes} = await import("../../src/shared/image.js");
+  const images = await Promise.all([7,8,9,10].map(width => sharp({create:{width,height:7,channels:3,background:"#496a83"}}).png().toBuffer()));
+  await f.write("verified.png", images[0]);
+  await f.execute('return await read("verified.png");');
+  await assert.rejects(validateImageBytes(images[0],"image/png","cached",AbortSignal.abort()),{name:"AbortError"});
+  const owner = new AbortController(), queued = new AbortController();
+  const original = childProcess.spawn;
+  const entered = Promise.withResolvers();
+  let holdNext = true;
+
+  const spawn = t.mock.method(childProcess,"spawn",function(command,args,options) {
+    if (holdNext && args[0]?.endsWith("image-worker.js")) {
+      holdNext = false;
+      const child = original.call(this,command,["-e","process.stdin.resume(); setInterval(()=>{},1000)"],options);
+      child.once("spawn",entered.resolve);
+
+      return child;
+    }
+
+    if (args[0]?.endsWith("image-worker.js") && !owner.signal.aborted) throw new Error("overlapping native raster decoders");
+
+    return original.call(this,command,args,options);
+  });
+
+  const held = assert.rejects(validateImageBytes(images[1],"image/png","held",owner.signal),{name:"AbortError"});
+  await entered.promise;
+  const cancelled = assert.rejects(validateImageBytes(images[2],"image/png","queued",queued.signal),{name:"AbortError"});
+  queued.abort();
+  const cached = f.execute('return await read("verified.png");');
+  let survivorDone = false;
+  const survivor = validateImageBytes(images[3],"image/png","survivor").then(() => { survivorDone = true; });
+  // Retain rejection for the assertion after cleanup without an unhandled gap.
+  void survivor.catch(() => {});
+  let timer;
+
+  try {
+    const beforeRelease = await Promise.race([
+      Promise.all([cached,cancelled]),
+      new Promise(resolve => { timer = setTimeout(() => resolve("blocked"),1000); }),
+    ]);
+
+    assert.notEqual(beforeRelease,"blocked","cached images and queued cancellation must settle without releasing the active decoder");
+    assert.equal(beforeRelease[0].content.find(block => block.type === "image")?.data,images[0].toString("base64"));
+    assert.equal(survivorDone,false,"withdrawing a request must not let the next decoder overlap its predecessor");
+  } finally {
+    clearTimeout(timer);
+    owner.abort();
+    await Promise.allSettled([held,cancelled,cached,survivor]);
+    spawn.mock.restore();
+  }
+
+  await survivor;
+  await validateImageBytes(images[2],"image/png","cancelled request can retry");
+});
+
+
+it("decoder errors retain raster ownership until the child closes and do not poison retries", async t => {
+  const {default:sharp} = await import("sharp");
+  const {default:childProcess} = await import("node:child_process");
+  const {validateImageBytes} = await import("../../src/shared/image.js");
+  const images = await Promise.all([131,133,137].map(width=>sharp({create:{width,height:7,channels:3,background:"#725139"}}).png().toBuffer()));
+  const original = childProcess.spawn;
+  const entered = Promise.withResolvers();
+  let held, closed = false, successorDone = false;
+
+  const spawn = t.mock.method(childProcess,"spawn",function(command,args,options) {
+    if (args[0]?.endsWith("image-worker.js")) {
+      if (!held) {
+        held = original.call(this,command,["-e","process.stdin.resume();setInterval(()=>{},1000)"],options);
+        held.once("close",()=>{closed=true;});
+        held.once("spawn",entered.resolve);
+
+        return held;
+      }
+
+      if (!closed) throw Error("decoder overlap before predecessor close");
+    }
+
+    return original.call(this,command,args,options);
+  });
+
+  const first = validateImageBytes(images[0],"image/png","failed child").then(()=>null,error=>error);
+  await entered.promise;
+  held.emit("error",Object.assign(Error("decoder pipe failure"),{code:"EIO"}));
+
+  const successor = validateImageBytes(images[1],"image/png","successor").then(()=>{
+    successorDone=true;
+
+    return null;
+  },error=>{
+    successorDone=true;
+
+    return error;
+  });
+
+  try {
+    assert.doesNotThrow(()=>held.emit("error",Error("later decoder failure")),"a still-owned child can report more than one error");
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(successorDone,false,"an error notification is not proof the preceding child closed");
+  } finally {
+    held.kill("SIGKILL");
+    await Promise.all([first,successor]);
+    spawn.mock.restore();
+  }
+
+  assert.match((await first)?.message,/decoder pipe failure/);
+  assert.equal(await successor,null,"the next valid image must decode after actual close");
+  await validateImageBytes(images[0],"image/png","failed bytes retry");
+
+  const missing = t.mock.method(childProcess,"spawn",function(command,args,options) {
+    return original.call(this,args[0]?.endsWith("image-worker.js") ? command + ".supernova-missing" : command,args,options);
+  });
+
+  try { await assert.rejects(validateImageBytes(images[2],"image/png","failed spawn"),/ENOENT/); }
+  finally { missing.mock.restore(); }
+
+  await validateImageBytes(images[2],"image/png","spawn failure retry");
 });

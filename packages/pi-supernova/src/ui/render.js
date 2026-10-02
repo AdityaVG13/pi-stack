@@ -1,6 +1,8 @@
 import {normalizeCallRenderArgs,normalizeResultRenderArgs} from './host-render.js';
+
 export {normalizeCallRenderArgs} from './host-render.js';
-import {formatDiffRows,operationsFromTrace,formatDuration,formatOpRow,cleanBlockText} from './trace.js';
+
+import {formatDiffRows,operationsFromTrace,formatDuration,formatOpRow,cleanBlockText,cleanInlineText} from './trace.js';
 /**
  * Supernova TUI renderers.
  *
@@ -16,7 +18,9 @@ import {formatDiffRows,operationsFromTrace,formatDuration,formatOpRow,cleanBlock
 import { isString, isObject } from "../shared/decode.js";
 import { measureWidth, hardTruncate, clampLine, wrapLine } from "./render-measure.js";
 import { novaFramedBlock, novaStatusLine } from "./omp-frame.js";
-import { formatValue } from "../output/format.js";
+import { formatBoundedValue, truncateChars } from "../output/format.js";
+
+const MAX_UI_RESULT_CHARS = 32_000;
 
 export { measureWidth, hardTruncate, clampLine };
 
@@ -38,53 +42,95 @@ function traceFor(payload, context) {
 	return Array.isArray(trace) ? trace : [];
 }
 
-function resultLines(value, width) {
-	const text = isString(value) ? value : formatValue(value);
+function resultLines(value, width, layout) {
+	// Bound display text before Unicode layout. Complete machine-facing values
+	// and the execution evidence remain untouched in result.details.
+	const text = isString(value) ? truncateChars(value, MAX_UI_RESULT_CHARS, "UI preview").text
+		: formatBoundedValue(value, MAX_UI_RESULT_CHARS);
 
-	return cleanBlockText(text).split("\n").flatMap(line => wrapLine(line, width));
+	const clean = cleanBlockText(text);
+
+	if (layout?.width === width && layout.text === clean) return layout.lines;
+	const lines = clean.split("\n").flatMap(line => wrapLine(line, width));
+
+	if (layout) Object.assign(layout, {width, text:clean, lines});
+
+	return lines;
 }
 
-function appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, isError) {
+function appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, isError, expanded) {
 	for (const op of ops.slice(0, maxOps)) {
 		lines.push(formatOpRow(theme, op, width, isPartial, isError));
 
-		if (maxDiffLines === 0 || !op.diff || !isObject(op.diff)) continue;
+		if (!expanded || maxDiffLines === 0 || !op.diff || !isObject(op.diff)) continue;
 
 		for (const row of formatDiffRows(op.diff, theme, maxDiffLines)) lines.push("  " + row);
 	}
 
-	if (ops.length > maxOps) lines.push(theme.fg("dim", `  … ${ops.length - maxOps} more calls`));
+	if (!expanded && maxDiffLines > 0) {
+		const latest = ops.findLast(op => op.diff && isObject(op.diff));
+
+		if (latest) {
+			const label = latest.mutationAttempt || latest.ok === false ? "latest attempted change" : "latest change";
+			lines.push(theme.fg("dim", `── ${label}: ${cleanInlineText(latest.target)} ──`));
+
+			for (const row of formatDiffRows(latest.diff, theme, maxDiffLines)) lines.push("  " + row);
+		}
+	}
 }
 
-function appendError(lines, theme, payload, _expanded, width) {
+function appendError(lines, theme, payload, expanded, width) {
 	const errors = [payload?.error || "error"];
+
 	for (const [i, program] of (payload?.programs ?? []).entries()) {
 		if (program.details?.ok === false) errors.push(`program ${i + 1}: ${program.details.error || resultTextContent(program)}`);
 	}
-	for (const error of errors) for (const line of resultLines("✗ " + cleanBlockText(error), width)) lines.push(theme.fg("error", line));
+
+	let remaining = expanded ? Infinity : 8;
+
+	for (const [i, error] of errors.entries()) {
+		const wrapped = resultLines("✗ " + error, width);
+		const shown = wrapped.slice(0, remaining);
+
+		for (const line of shown) lines.push(theme.fg("error", line));
+		remaining -= shown.length;
+
+		if (!expanded && (shown.length < wrapped.length || (remaining === 0 && i + 1 < errors.length))) {
+			lines.push(theme.fg("dim", "  … more error details (expand)"));
+			break;
+		}
+	}
 }
 
 function appendMutations(lines, theme, payload, width) {
   const m = payload?.mutations;
+
   if (!m || !["committed", "rolledBack", "external", "pendingCommits", "recoveryFailed"].some(key => m[key])) return;
+
   const extra = [
     [m.external, "; external calls attempted=" + m.external],
     [m.pendingCommits, "; pendingCommits=" + m.pendingCommits],
     [m.recoveryFailed, "; recovery failed: inspect files"],
-  ].filter(([enabled]) => enabled).map(([, text]) => text).join("");
+  ].flatMap(([enabled, text]) => (enabled ? [text] : [])).join("");
+
   const summary = "file versions: committed=" + (m.committed || 0) + " rolledBack=" + (m.rolledBack || 0) + extra;
   const role = m.rolledBack || m.recoveryFailed ? "warning" : "dim";
+
   for (const line of resultLines(summary, width)) lines.push(theme.fg(role, line));
 }
 
-function appendResult(lines, theme, payload, expanded, width) {
+function appendResult(lines, theme, payload, expanded, width, layout) {
 	if (expanded) lines.push(theme.fg("dim", "── result ──"));
-	const wrapped = resultLines(payload.result, width);
-	const shown = expanded ? wrapped : wrapped.slice(0, 8);
+	const wrapped = resultLines(payload.result, width, layout);
+	const shown = expanded ? wrapped : wrapped.slice(0, 5);
 
 	for (const line of shown) lines.push(theme.fg("toolOutput", line));
 
-	if (!expanded && wrapped.length > shown.length) lines.push(theme.fg("dim", `  … ${wrapped.length - shown.length} more result lines`));
+	if (!expanded && wrapped.length > shown.length) lines.push(theme.fg("dim", `  … ${wrapped.length - shown.length} more result lines (expand)`));
+
+	if (isString(payload.result) && payload.result.length > MAX_UI_RESULT_CHARS) {
+		lines.push(theme.fg("dim", "  … UI preview clipped; select fields for complete values"));
+	}
 }
 
 function appendLogs(lines, theme, payload, width) {
@@ -93,42 +139,47 @@ function appendLogs(lines, theme, payload, width) {
 	for (const log of payload.logs) for (const line of resultLines(log, width)) lines.push(theme.fg("dim", line));
 }
 
-function appendTail(lines, theme, payload, expanded, isError, width, previewResult) {
+function appendTail(lines, theme, payload, expanded, isError, width, layout, showResult) {
 	if (isError) appendError(lines, theme, payload, expanded, width);
-	else if (payload?.result !== undefined && (expanded || previewResult)) appendResult(lines, theme, payload, expanded, width);
+	else if ((expanded || showResult) && payload?.result !== undefined) appendResult(lines, theme, payload, expanded, width, layout);
 
 	if (expanded && payload?.logs?.length) appendLogs(lines, theme, payload, width);
 }
 
 function bodyLimits(expanded, isPartial) {
-	return { maxOps: expanded ? 24 : 8, maxDiffLines: expanded ? 24 : isPartial ? 0 : 8 };
+	return { maxOps: expanded ? 24 : 8, maxDiffLines: expanded ? 24 : isPartial ? 0 : 5 };
 }
 
-function visibleTrace(trace, maxOps, isPartial) {
-	return isPartial ? trace.slice(-maxOps) : trace.slice(0, maxOps);
+function visibleTrace(trace, maxOps) {
+	// Keep the viewport anchored to the same recent work when the run finishes.
+	return trace.slice(-maxOps);
 }
 
-function appendOverflow(lines, theme, trace, maxOps, isPartial) {
-	if (trace.length > maxOps) lines.push(theme.fg("dim", `  … ${trace.length - maxOps} ${isPartial ? "earlier" : "more"} calls`));
+function appendOverflow(lines, theme, trace, maxOps) {
+	if (trace.length > maxOps) lines.push(theme.fg("dim", `  … ${trace.length - maxOps} earlier calls (expand)`));
 }
 
 function appendEmptyOps(lines, theme, ops, isError, isPartial) {
 	if (ops.length === 0 && !isError && !isPartial) lines.push(theme.fg("dim", "JavaScript-only execution"));
 }
 
-function buildBodyLines(theme, width, { payload, context, expanded, isPartial, isError }) {
+function buildBodyLines(theme, width, { payload, context, expanded, isPartial, isError }, layout) {
 	const trace = traceFor(payload, context);
 	const { maxOps, maxDiffLines } = bodyLimits(expanded, isPartial);
-	const ops = operationsFromTrace(visibleTrace(trace, maxOps, isPartial));
+	const ops = operationsFromTrace(visibleTrace(trace, maxOps));
+
 	// Trace success records an operation, not persistence of every staged version.
 	// Mixed rollback/commit counts cannot safely be attributed to individual rows.
 	for (const op of ops) op.mutationAttempt = mutationAttempt(op, payload, isPartial, isError);
 	const lines = [];
-	appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, isError);
-	appendOverflow(lines, theme, trace, maxOps, isPartial);
+	appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, isError, expanded);
+	appendOverflow(lines, theme, trace, maxOps);
+
 	if (!isPartial) appendMutations(lines, theme, payload, width);
+
 	if (Array.isArray(payload?.trace)) appendEmptyOps(lines, theme, ops, isError, isPartial);
-	appendTail(lines, theme, payload, expanded, isError, width, ops.length === 0 && !isPartial);
+	// Successful adapter calls stay compact; returned source/JSON is expansion-only.
+	appendTail(lines, theme, payload, expanded, isError, width, layout, ops.length === 0 && !isPartial);
 
 	return { lines, opCount: trace.length };
 }
@@ -136,7 +187,7 @@ function buildBodyLines(theme, width, { payload, context, expanded, isPartial, i
 function describeCard(model, opCount) {
 	const wall = model.payload?.wallMs != null ? formatDuration(model.payload.wallMs) : "";
 	const calls = opCount > 0 ? `${opCount} call${opCount === 1 ? "" : "s"}` : "";
-	const status = model.isError ? "failed" : model.isPartial ? "running" : calls ? "" : "complete";
+	const status = model.isError ? "failed" : model.isPartial ? "running" : "complete";
 
 	return [calls, status, wall].filter(Boolean).join(" · ");
 }
@@ -179,6 +230,10 @@ function renderCardLines(theme, model, width, view) {
 }
 
 class UnifiedResultCard {
+	// Retain only one bounded, unstyled result layout per card. Theme invalidation
+	// still repaints every row; content or column changes replace the geometry.
+	resultLayout = {};
+
 	set(theme, model) {
 		this.theme = theme;
 		this.model = model;
@@ -193,7 +248,7 @@ class UnifiedResultCard {
 		if (!theme || !model || width <= 0) return [];
 
 		if (this.cache?.width === width) return this.cache.lines;
-		const view = buildBodyLines(theme, Math.max(1, width - 4), model);
+		const view = buildBodyLines(theme, Math.max(1, width - 4), model, this.resultLayout);
 		const lines = renderCardLines(theme, model, width, view);
 		this.cache = { width, lines };
 
@@ -215,7 +270,9 @@ function resultTextContent(result) {
 
 function payloadFromResult(result, hostError) {
 	const payload = result?.details;
+
 	if (hostError) return {...payload, ok:false, error:payload?.error || resultTextContent(result) || "tool execution failed"};
+
 	return payload ?? {result:resultTextContent(result)};
 }
 
@@ -236,6 +293,7 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 		themeArg,
 		contextArg,
 	);
+
 	// Pi omits isError from result and supplies it through render context.
 	const hostError = result?.isError === true || context?.isError === true || options?.isError === true;
 	const payload = payloadFromResult(result, hostError);

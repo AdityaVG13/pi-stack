@@ -9,7 +9,8 @@ try {
   Type = require("typebox").Type;
 } catch {
   Type = {
-    Object: (props, opts) => ({ type: "object", properties: props || {}, additionalProperties: false, ...opts }),
+    // Match Type.Object defaults; explicit nested-entry guards live in opts.
+    Object: (props, opts) => ({ type: "object", properties: props || {}, ...opts }),
     String: (opts) => ({ type: "string", ...opts }),
     Unknown: (opts) => ({ ...opts }),
     Array: (items, opts) => ({ type: "array", items, ...opts }),

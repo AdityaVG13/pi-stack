@@ -78,8 +78,8 @@ function splitFile(text) {
   });
 }
 
-function findHunkMatch(fileLines, expectedOld, nominal, hunk, oldStart) {
-  const matchAt = index => index >= 0 && index + expectedOld.length <= fileLines.length
+function findHunkMatch(fileLines, expectedOld, nominal, hunk, oldStart, floor) {
+  const matchAt = index => index >= floor && index + expectedOld.length <= fileLines.length
     && expectedOld.every((line, i) => fileLines[index + i].text === line);
 
   if (matchAt(nominal)) return { index: nominal, relocated: 0 };
@@ -127,14 +127,14 @@ function applyHunkLines(hunk, fileLines, matchIndex, ending) {
   return replacement;
 }
 
-function applyOneHunk(hunk, h, fileLines, offsetShift, relocationShift, ending) {
+function applyOneHunk(hunk, h, fileLines, offsetShift, relocationShift, ending, floor) {
   const expectedOld = hunk.lines.filter(line => line[0] !== "+").map(hunkLineText);
   const newCount = hunk.lines.filter(line => line[0] !== "-").length;
 
   if (expectedOld.length !== hunk.oldLength || newCount !== hunk.newLength) throw new Error("patch hunk " + (h + 1) + " length does not match its header");
   // The new coordinate also handles BSD diff's -1,0 header at file start.
   const nominal = hunk.oldLength === 0 ? hunk.newStart - 1 + relocationShift : hunk.oldStart - 1 + offsetShift;
-  const match = findHunkMatch(fileLines, expectedOld, nominal, h + 1, hunk.oldStart);
+  const match = findHunkMatch(fileLines, expectedOld, nominal, h + 1, hunk.oldStart, floor);
 
   if (match.index < 0) throw new Error("patch hunk " + (h + 1) + " rejected at line " + hunk.oldStart + ": context did not match");
   const replacement = applyHunkLines(hunk, fileLines, match.index, ending);
@@ -144,6 +144,7 @@ function applyOneHunk(hunk, h, fileLines, offsetShift, relocationShift, ending) 
     relocationShift: relocationShift + match.relocated,
     offsetShift: offsetShift + match.relocated + replacement.length - expectedOld.length,
     relocated: match.relocated,
+    floor: match.index + replacement.length,
   };
 }
 
@@ -155,11 +156,14 @@ export function applyPatchToText(originalText, patchText) {
   const relocations = [];
   let offsetShift = 0;
   let relocationShift = 0;
+  // Later hunks cannot reinterpret already-published output as original input.
+  let floor = 0;
 
   for (let h = 0; h < hunks.length; h++) {
-    const applied = applyOneHunk(hunks[h], h, fileLines, offsetShift, relocationShift, ending);
+    const applied = applyOneHunk(hunks[h], h, fileLines, offsetShift, relocationShift, ending, floor);
     offsetShift = applied.offsetShift;
     relocationShift = applied.relocationShift;
+    floor = applied.floor;
 
     if (applied.relocated !== 0) relocations.push({ hunk: h + 1, offset: applied.relocated });
   }

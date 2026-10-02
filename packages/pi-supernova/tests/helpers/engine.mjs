@@ -49,7 +49,7 @@ export function registrationHost() {
 export async function engineFixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "supernova-red-"));
   t.diagnostic(`Fixture retained at ${root}`);
-  const { pi, tools } = registrationHost();
+  const { pi, tools, emit } = registrationHost();
   // Exercise the registered tool, real worker, and filesystem, not a fake executor.
   registerCodeMode(pi);
   const tool = tools.get("supernova");
@@ -57,7 +57,7 @@ export async function engineFixture(t) {
   if (!tool) throw new Error("CodeMode test seam disappeared; do not replace it with a fake executor");
   const execute = code => tool.execute("red-contract", { code, timeoutMs: 2000 }, undefined, undefined, { cwd: root });
 
-  return { root, pi, tool, execute, write: (file, text) => fs.writeFile(path.join(root, file), text) };
+  return { root, pi, tool, execute, emit, write: (file, text) => fs.writeFile(path.join(root, file), text) };
 }
 
 export function modelText(result) {

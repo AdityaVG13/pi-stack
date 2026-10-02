@@ -15,6 +15,7 @@ const AI_DECAY = Math.LN2 / 3;            // per day
 const AI_MAX_HISTORY_DAYS = 7;
 
 const MAX_TIMESTAMPS_PER_FILE = 128;
+
 const MAX_FRECENCY_FILES = 10000;
 
 const AI_MODIFICATION_THRESHOLDS = [[16, 30], [8, 300], [4, 900], [2, 3600], [1, 14400]]; // [boost, seconds]
@@ -31,6 +32,10 @@ export class Frecency {
       if (this.access.size >= MAX_FRECENCY_FILES) this.access.delete(this.access.keys().next().value);
       this.access.set(filePath, (list = []));
     }
+
+    // Existing keys must move to the newest position before capacity eviction.
+    this.access.delete(filePath);
+    this.access.set(filePath, list);
     list.push(at);
 
     if (list.length > MAX_TIMESTAMPS_PER_FILE) list.splice(0, list.length - MAX_TIMESTAMPS_PER_FILE);
@@ -62,6 +67,23 @@ export class Frecency {
 
     return total;
   }
+}
+
+// Fuzzy offsets index the original UTF-16 string. Keep lowercase expansion
+// marks out of the positional projection (not full Unicode normalization).
+function foldCase(text) {
+  const lower = text.toLowerCase();
+
+  if (lower.length === text.length) return lower;
+
+  let out = "", offset = 0;
+
+  for (const char of text) {
+    out += lower.slice(offset, offset + char.length);
+    offset += char.toLowerCase().length;
+  }
+
+  return out;
 }
 
 const SEPARATORS = new Set(["/", "\\", "_", "-", ".", " "]);
@@ -177,7 +199,7 @@ function matchWithTypos(part, pCmp, partLower, hay, hayCmp, hayLowerOrNull, maxT
         start = hayCmp.lastIndexOf(subCmp[ni], start - 1);
       }
 
-      if (hayLower === null) hayLower = hay.toLowerCase();
+      if (hayLower === null) hayLower = foldCase(hay);
       best = {
         score: scoreAlignment(sub, subCmp, hay, hayCmp, start),
         start,
@@ -202,7 +224,7 @@ function matchPart(part, pCmp, partLower, hay, hayCmp, hayLowerOrNull, maxTypos)
   const direct = matchOnce(part, pCmp, hay, hayCmp);
 
   if (direct) {
-    const hayLower = hayLowerOrNull === null ? hay.toLowerCase() : hayLowerOrNull;
+    const hayLower = hayLowerOrNull === null ? foldCase(hay) : hayLowerOrNull;
 
     return { ...direct, typos: 0, exact: hayLower === partLower };
   }
@@ -214,10 +236,10 @@ function matchPart(part, pCmp, partLower, hay, hayCmp, hayLowerOrNull, maxTypos)
 
 /** Best match allowing up to maxTypos skipped needle characters. */
 export function fuzzyMatch(needle, hay, { maxTypos = 0, caseSensitive = false } = {}) {
-  if (caseSensitive) return matchPart(needle, needle, needle.toLowerCase(), hay, hay, null, maxTypos);
+  if (caseSensitive) return matchPart(needle, needle, foldCase(needle), hay, hay, null, maxTypos);
 
-  const needleLower = needle.toLowerCase();
-  const hayLower = hay.toLowerCase();
+  const needleLower = foldCase(needle);
+  const hayLower = foldCase(hay);
 
   return matchPart(needle, needleLower, needleLower, hay, hayLower, hayLower, maxTypos);
 }
@@ -258,7 +280,7 @@ function partTypos(parts, ctx) {
 }
 
 function scoredPath(rel, parts, partLower, maxTypos, caseSensitive, ctx, currentSegs, dirCache) {
-  const hayCmp = caseSensitive ? rel : rel.toLowerCase();
+  const hayCmp = caseSensitive ? rel : foldCase(rel);
   const matched = matchParts(parts, partLower, rel, hayCmp, caseSensitive ? null : hayCmp, maxTypos, caseSensitive);
 
   if (!matched) return null;
@@ -278,7 +300,7 @@ export function rankPaths(query, paths, ctx = {}) {
   // Per-query hoists: lowered parts once (not once per path per part), the
   // current directory split once (not once per candidate), plus a
   // per-call cache for candidate directory segments (paths share dirs).
-  const partLower = parts.map((p) => p.toLowerCase());
+  const partLower = parts.map(foldCase);
   const currentDir = ctx.currentFile ? ctx.currentFile.slice(0, ctx.currentFile.lastIndexOf("/") + 1) : "";
   const currentSegs = currentDir ? splitDirSegs(currentDir) : null;
   const dirCache = new Map();
@@ -317,7 +339,7 @@ function matchParts(parts, partLower, rel, hayCmp, hayLowerOrNull, maxTypos, cas
 function filenameBonus(base, rel, filenameStart, first, needleLower) {
   if (first.start < filenameStart) return 0;
 
-  return rel.slice(filenameStart).toLowerCase() === needleLower ? Math.floor((base * 2) / 5) : Math.floor(base / 5);
+  return foldCase(rel.slice(filenameStart)) === needleLower ? Math.floor((base * 2) / 5) : Math.floor(base / 5);
 }
 
 /** fff: frecency boost base·f/100 and +15% for git-modified files. */
@@ -325,6 +347,7 @@ function contextBoost(base, rel, ctx) {
   let frecency = 0;
 
   try { frecency = ctx.frecency ? ctx.frecency.score(rel, ctx.mtimeOf?.(rel)) : 0; } catch {}
+
   const gitBoost = ctx.modified?.has(rel) ? Math.floor((base * 15) / 100) : 0;
 
   return Math.floor((base * frecency) / 100) + gitBoost;

@@ -31,6 +31,7 @@ export function mapChangedChildren(value, visit, context) {
     const after = visit(before, context, key);
 
     if (Object.is(before, after)) continue;
+
     if (out === value) out = array ? value.slice() : { ...value };
     // Define rather than assign: "__proto__" must remain an ordinary data key.
     Object.defineProperty(out, key, { value: after, enumerable: true, writable: true, configurable: true });
@@ -51,9 +52,11 @@ export function assertModelImageMime(mimeType) {
 /** Node's base64 decoder is permissive; model attachments must not be. */
 export function decodeImageData(data) {
   const bytes = Buffer.from(data,"base64");
+
   if (!data || bytes.toString("base64") !== String(data)) {
     throw new Error("invalid image base64; use canonical padded base64 without a data-URL prefix or extra characters; no image attached");
   }
+
   return bytes;
 }
 
@@ -180,6 +183,9 @@ export function errorMessage(error) {
 
 // Arrays visit present indexes (including inherited ones), not extra properties.
 function* childKeys(value) {
-  if (!Array.isArray(value)) { yield* Object.keys(value); return; }
+  if (!Array.isArray(value)) { yield* Object.keys(value);
+
+ return; }
+
   for (const key of value.keys()) if (key in value) yield key;
 }

@@ -4,6 +4,7 @@ import {tokenizeQuery,stem} from '../context/snap.js';
 import {runCommand} from '../fs/workspace.js';
 import {lineStartIndex,lineTextRange} from '../fs/lines.js';
 import {textResult} from '../shared/result.js';
+
 export function createFocusedReader(vfs, readBudget) {
   function aboutStems(about, requireStem) {
     const tokens = tokenizeQuery(about).tokens;
@@ -29,6 +30,7 @@ export function createFocusedReader(vfs, readBudget) {
 
       if (stems.some(st => row.includes(st))) {
         hits.push(line);
+
         if (hits.length >= 200) break;
       }
 
@@ -53,6 +55,7 @@ export function createFocusedReader(vfs, readBudget) {
       const body = overlay.slice(first, last);
 
       if (used + body.length > budget) { truncated = true; break; }
+
       if (out.length && from > cursor) out.push("...");
       out.push(`// ${rel}:${from}\n${body}`);
       used += body.length;
@@ -71,7 +74,9 @@ export function createFocusedReader(vfs, readBudget) {
     const res = await runCommand(args, { cwd: path.dirname(targetPath), timeoutMs: 15000, maxOutputChars: budget, signal });
 
     if (res.exitCode === 0 || res.exitCode === 1) await vfs.recordExpected(targetPath, observed);
+
     if (res.exitCode === 1) return textResult("// " + rel + " · no matching text\n", { path: targetPath, outputTruncated: false, complete: false });
+
     if (res.exitCode !== 0) throw new Error(res.stderr.trim() || `rg exited ${res.exitCode}`);
     const marker = res.outputTruncated ? "\n[focused read truncated; narrow about or use read(path, line, count)]" : "";
 
@@ -94,5 +99,6 @@ export function createFocusedReader(vfs, readBudget) {
 
     return textResult("// " + rel + " · focused staged text windows (not a complete file)\n" + out.join("\n") + marker, { path: targetPath, outputTruncated: truncated, complete: false });
   }
+
   return focusAbout;
 }

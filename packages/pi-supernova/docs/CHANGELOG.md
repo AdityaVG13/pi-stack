@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.11.0 (not yet published)
+
+### Changed
+
+- Missing optional TypeBox no longer changes the public JSON schema or its
+  serialized standing-definition cost. Explicit nested program-entry validation
+  remains unchanged; clean-install token gates use the same schema as hosts.
+- Image decoder error events no longer release the raster queue before child
+  close or disarm its watchdog. Repeated errors remain handled and preserve
+  the first diagnostic; failed spawns/decodes never seed the validation cache.
+- Indexed source locators accept canonical spellings of workspace aliases while
+  retaining logical editable paths and both lexical/canonical scope admission.
+- C++ quick checks recognize prefixed/custom-delimited raw strings rather than
+  reporting valid multiline literals as unterminated ordinary strings. C++
+  edit receipts no longer search for the type keyword `auto` as a declaration;
+  JavaScript bindings named `auto` keep their reference hints. Checks remain
+  structural heuristics, not compiler validation.
+- Background output snapshots align UTF-16 boundaries to complete code points
+  and disclose skipped partial characters through outputStart/truncated.
+- Contention stress accepts concurrent-read conflicts as well as write conflicts
+  while verifying every committed increment. Idle-host tests now allow startup
+  separately from the unchanged 1.5-second initialized-host exit deadline.
+- Dense newline statistics use an adaptive character scan after the bounded
+  preview is complete, returning to native searches when text becomes sparse.
+  Read/write receipts retain identical counts, previews and EOF semantics. No
+  persistent cache or full-file line array is introduced.
+- Overlong edit/patch targets now report bounded path/view recovery guidance
+  instead of echoing source text accidentally used as a filename. Edit mismatch
+  previews no longer claim whitespace drift when a later line differs. Exact
+  matching, ambiguity rejection, workspace boundaries and rollback are unchanged.
+- Session-derived fixes keep owned foreground shell output complete inside the
+  guest up to a 2 Mi UTF-16-character capture ceiling; model previews remain
+  bounded and larger capture fails with file-redirection guidance. Positional
+  write options now honor append/explicit replacement instead of silently
+  dropping flags. JSON projection accepts literal hyphenated own-property keys
+  without evaluating expressions or traversing prototypes. Nova presentation,
+  edit/CAS guards, permissions and deadlines are unchanged.
+- Read storage accounting charges scalar strings during the container walk instead
+  of retaining them for a second pass. Typed values, alias handling and aggregate
+  selection limits are unchanged; over-budget reads still roll back staged work.
+- Repeated result repaints reuse one bounded, uncolored layout per Nova card.
+  Theme changes still repaint colors; content changes and resizing rebuild layout.
+- Compact Nova TUI cards keep the latest calls in place through completion,
+  preview the latest change and bound collapsed diagnostics. Successful call
+  cards retain their original compact default: returned source/JSON appears
+  only on expansion; JavaScript-only runs still show their short result.
+  Progress updates coalesce at 32 ms; large displayed values are bounded before
+  layout and printable ASCII wraps in bulk. Expanded detail, Unicode column
+  safety and complete machine-facing values remain available under their
+  existing execution budgets. No Pi or dependency changes are required.
+- File-local focused text reads without declarations no longer wait for workspace
+  caller discovery. Their output and empty-about fallback remain unchanged;
+  declaration outlines still include caller hints.
+- Focused outlines collect caller hints for all expanded declarations in one
+  workspace scan, preserving per-name references and rendered output without
+  adding persistent caches.
+- Successful subprocess completion wakes on output-pipe closure instead of waiting
+  for a cleanup polling interval. Source searches and background terminals retain
+  the existing process-group ownership, escalation and deadline checks. No Pi
+  modifications, runtime dependency changes or public API changes are required.
+
 ## [0.10.2] - 2026-09-24
 
 ### Changed

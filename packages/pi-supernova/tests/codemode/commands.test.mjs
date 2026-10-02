@@ -24,6 +24,7 @@ it("read accepts familiar object arguments inside CodeMode and honors the reques
 it("read normalizes numeric line parameters and reports an empty EOF window honestly", async t => {
   const fixture = await engineFixture(t);
   await fixture.write("lines.txt", "one\ntwo\nthree\n");
+
   const result = await fixture.execute(`
     return {
       stringOffset: await read({path:"lines.txt", offset:"2", limit:"1"}),
@@ -31,6 +32,7 @@ it("read normalizes numeric line parameters and reports an empty EOF window hone
       stagedTail: await write("staged.txt", "a\\nb\\n").then(() => read({path:"staged.txt", offset:2, limit:10}))
     };
   `);
+
   assert.equal(result.details.ok, true, result.details.error);
   assert.equal(result.details.result.stringOffset, "two\n");
   assert.equal(result.details.result.tail.status, "incomplete");
@@ -67,4 +69,71 @@ it("a failing command attaches a bounded source window for reported file lines",
     fixture.execute('return await bash({command:"printf \\\'a.js:2\\\\n\\\' >&2; exit 7"});'),
     /a\.js:2[\s\S]*--- source[\s\S]*►\s+2 two/,
   );
+});
+
+
+it("bash materializes a staged working directory before running, including symlink spellings", async t => {
+  const f = await engineFixture(t);
+  await fs.mkdir(path.join(f.root,"real"));
+  await fs.symlink(path.join(f.root,"real"),path.join(f.root,"alias"),"junction");
+
+  for (const [written,cwd] of [["fresh/nested","fresh/nested"],["real/new","alias/new"]]) {
+    const result = await f.tool.execute("staged-cwd", {
+      code:'await write(data.path+"/input.txt","staged"); return await bash(data.command);',
+      data:{path:written,command:{command:process.execPath,args:["-e",'const fs=require("node:fs"); fs.writeFileSync("result.txt",fs.readFileSync("input.txt"));'],cwd}},
+    }, undefined, undefined, {cwd:f.root});
+
+    assert.equal(result.details.ok,true);
+    assert.equal(result.details.mutations.committed,1);
+    assert.equal(await fs.readFile(path.join(f.root,written,"result.txt"),"utf8"),"staged");
+  }
+});
+
+it("invalid working directories cannot flush staged files or bypass checkpoints", async t => {
+  const f = await engineFixture(t);
+  t.after(()=>f.emit("session_shutdown"));
+  await f.write("existing-file.txt","original");
+
+  for (const background of [false,true]) {
+    for (const cwd of ["absent","prefix","queued-file.txt","existing-file.txt","../outside"]) {
+      await assert.rejects(f.tool.execute("invalid-cwd", {
+        code:'await write("prefix-sibling/input.txt","staged"); await write("queued-file.txt","staged"); return await bash(data);',
+        data:{command:process.execPath,args:["-e",'require("node:fs").writeFileSync("executed.txt","bad");'],cwd,background},
+      }, undefined, undefined, {cwd:f.root}),error=>{
+        assert.equal(error.supernovaResult.details.mutations.committed,0);
+        assert.equal(error.supernovaResult.details.mutations.external,0);
+        assert.match(error.message,/cwd is not a directory|escapes workspace/);
+
+        return true;
+      });
+      await assert.rejects(fs.stat(path.join(f.root,"prefix-sibling")),{code:"ENOENT"});
+      await assert.rejects(fs.stat(path.join(f.root,"queued-file.txt")),{code:"ENOENT"});
+      assert.equal(await fs.readFile(path.join(f.root,"existing-file.txt"),"utf8"),"original");
+    }
+
+    await assert.rejects(f.tool.execute("checkpoint-cwd", {
+      code:'return await edit(async()=>{await write("checkpoint/input.txt","staged"); return await bash(data);});',
+      data:{command:process.execPath,args:["-e","process.exit(0)"],cwd:"checkpoint",background},
+    }, undefined, undefined, {cwd:f.root}),/cannot run inside an edit checkpoint/);
+    await assert.rejects(fs.stat(path.join(f.root,"checkpoint")),{code:"ENOENT"});
+  }
+
+  assert.deepEqual((await f.execute('return await bash({action:"list"});')).details.result,[]);
+});
+
+
+it("C++ raw literal receipts preserve source without false string warnings or auto references", async t => {
+  const f = await engineFixture(t);
+  const original = 'const auto sql = u8R"SQL(\nSELECT "quoted", \'{ [ } ]\';\n)SQL";\n';
+  await f.write("caller.js","export const auto = 1;\n");
+  const created = await f.tool.execute("raw-cpp",{code:'return await write("query.cpp",data);',data:original},undefined,undefined,{cwd:f.root});
+  assert.doesNotMatch(created.details.result,/check:/);
+  const edited = await f.execute('return await edit("query.cpp","const auto sql","const auto query");');
+  assert.doesNotMatch(edited.details.result,/check:|auto also referenced/);
+  assert.equal(await fs.readFile(path.join(f.root,"query.cpp"),"utf8"),original.replace("const auto sql","const auto query"));
+  const malformed = await f.tool.execute("broken-cpp",{code:'return await write("broken.cpp",data);',data:original.replace(')SQL";',')OTHER";')},undefined,undefined,{cwd:f.root});
+  assert.match(malformed.details.result,/check: unterminated raw string/);
+  await f.write("value.js","export const auto = 1;\n");
+  const js = await f.execute('return await edit("value.js","auto = 1","auto = 2");');
+  assert.match(js.details.result,/auto also referenced/);
 });

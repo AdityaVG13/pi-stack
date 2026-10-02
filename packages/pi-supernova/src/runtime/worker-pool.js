@@ -4,6 +4,8 @@ const WORKER_URL = new URL("./guest-worker.js", import.meta.url);
 
 let idleWorker = null;
 
+let generation = 0;
+
 function spawnWorker(config) {
   const maxHeapMb = config.maxHeapMb ?? 512;
   // An inline bootstrap accepts inherited --input-type from stdin/eval SDK hosts.
@@ -55,6 +57,7 @@ function killWorker(handle) {
 }
 
 function acquireWorker(config) {
+  const acquiredGeneration = generation;
   const candidate = idleWorker;
   idleWorker = null;
   const reusable = candidate && !candidate.dead && candidate.maxHeapMb === (config.maxHeapMb ?? 512);
@@ -68,7 +71,10 @@ function acquireWorker(config) {
   // so the two constructions never overlap. The finish-time warm usually
   // becomes a no-op, so steady-state spawn count is unchanged.
   if (reusable) warmGuestWorker(config).catch(() => {});
-  else handle.ready.then(() => warmGuestWorker(config).catch(() => {}), () => {});
+  else handle.ready.then(() => {
+    // A cold worker can finish starting after session_shutdown drained the pool.
+    if (generation === acquiredGeneration) return warmGuestWorker(config).catch(() => {});
+  }, () => {});
 
   return handle;
 }
@@ -86,6 +92,9 @@ export function warmGuestWorker(config = {}) {
 }
 
 export function stopWarmGuestWorker() {
+  generation++;
+
   return killWorker(idleWorker);
 }
+
 export { acquireWorker, killWorker };

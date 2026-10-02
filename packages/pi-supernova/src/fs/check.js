@@ -23,6 +23,17 @@ function skipString(text, i, quote) {
   return -1;
 }
 
+// C++ raw strings carry their own delimiter; embedded quotes and brackets do
+// not terminate them. Bound opener inspection to the 16-character delimiter.
+function consumeCppRaw(text, i) {
+  const opener = /^(?:u8|u|U|L)?R"([^\s()\\]{0,16})\(/.exec(text.slice(i, i + 22));
+
+  if (!opener) return null;
+  const end = text.indexOf(")" + opener[1] + '"', i + opener[0].length);
+
+  return end < 0 ? { error: "unterminated raw string", at: i } : { end: end + opener[1].length + 2, prev: "value" };
+}
+
 function skipTemplate(text, i, stack) {
   for (let j = i + 1; j < text.length; j++) {
     if (text[j] === "\\") {
@@ -134,8 +145,14 @@ function consumeSlash(text, i, prev) {
 }
 
 /** Try to consume a comment, string, template, or regex at i. Returns { end, prev } | { error, at } | null. */
-function consumeLiteral(text, i, stack, prev, rust) {
+function consumeLiteral(text, i, stack, prev, rust, cpp) {
   const c = text[i];
+
+  if (cpp && ["R", "u", "U", "L"].includes(c)) {
+    const raw = consumeCppRaw(text, i);
+
+    if (raw) return raw;
+  }
 
   if (rust && c === "'") {
     const lifetime = /^'[\p{ID_Start}_][\p{ID_Continue}]*/u.exec(text.slice(i));
@@ -171,13 +188,13 @@ function bracket(c, i, stack, stopDepth) {
 }
 
 /** Skips comments, strings, templates and regex literals; `prev` is the last code token, which decides regex-vs-division. */
-function scan(text, start, stack, stopDepth, rust = false) {
+function scan(text, start, stack, stopDepth, rust = false, cpp = false) {
   let i = start;
   let prev = "";
 
   while (i < text.length) {
     const c = text[i];
-    const literal = consumeLiteral(text, i, stack, prev, rust);
+    const literal = consumeLiteral(text, i, stack, prev, rust, cpp);
 
     if (literal) {
       if (literal.error) return literal;
@@ -223,7 +240,7 @@ export function quickCheck(text, ext) {
 
   if (!CODE_EXT.has(ext)) return null;
   const stack = [];
-  const r = scan(text, 0, stack, undefined, ext === ".rs");
+  const r = scan(text, 0, stack, undefined, ext === ".rs", [".cc", ".cpp", ".h", ".hpp"].includes(ext));
 
   if (r.error) return { ok: false, kind: "balance", message: r.error + " at line " + lineOf(text, r.at) };
 

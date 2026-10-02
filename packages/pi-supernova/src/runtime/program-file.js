@@ -1,4 +1,4 @@
-import { readLimitedBytes } from "../fs/file-io.js";
+import { readLimitedBytes, sameFileVersion } from "../fs/file-io.js";
 import * as fs from "node:fs/promises";
 import { resolveWorkspacePath } from "../fs/workspace.js";
 
@@ -24,6 +24,7 @@ export async function readProgramFile(file, cwd, maxChars, signal) {
 
     const bytes = await readLimitedBytes(handle, stat, maxBytes, file, signal, tooLarge);
 
+    if (!sameFileVersion(stat, await handle.stat())) throw new Error("program file changed while reading: " + file + "; retry with a stable source file");
     signal?.throwIfAborted();
     // Do not silently replace invalid bytes in executable source. Preserve BOMs.
     let code;

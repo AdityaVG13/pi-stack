@@ -77,3 +77,34 @@ it("file program admission rechecks symlinks and rejects FIFOs without a writer"
   try { await assert.rejects(run(f,{file:"pipe.js",timeoutMs:1000}), /regular file/); }
   finally { await release; }
 });
+
+it("file programs reject mixed snapshots before a hybrid program can run commands", async t => {
+  const f = await engineFixture(t);
+  const padding = "/*" + "界".repeat(24000) + "*/";
+  const before = "if (1) {" + padding + 'return 1; }';
+  const after = "if (0) {" + padding + 'await write("never.txt","hybrid program ran"); } return 2;';
+  await f.write("changing.js", before);
+  const handle = await fs.open(path.join(f.root,"changing.js"));
+  const prototype = Object.getPrototypeOf(handle), original = prototype.read;
+  await handle.close();
+  let changed = false;
+
+  const mock = t.mock.method(prototype,"read",async function(...args) {
+    const result = await original.apply(this,args);
+
+    if (!changed && result.bytesRead > 0 && args[0].subarray(0,8).toString() === "if (1) {") {
+      changed = true;
+      await f.write("changing.js",after);
+    }
+
+    return result;
+  });
+
+  try {
+    await assert.rejects(run(f,{file:"changing.js"}), /file changed while reading/);
+  } finally { mock.mock.restore(); }
+
+  assert.equal(changed,true,"the file must change between source chunks");
+  await assert.rejects(fs.stat(path.join(f.root,"never.txt")),{code:"ENOENT"});
+  assert.equal((await run(f,{file:"changing.js"})).details.result,2);
+});

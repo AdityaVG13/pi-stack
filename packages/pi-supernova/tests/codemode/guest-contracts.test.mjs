@@ -2,7 +2,7 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { engineFixture, modelText } from "../helpers/engine.mjs";
+import { engineFixture, modelText, limits } from "../helpers/engine.mjs";
 
 async function rejection(execute) {
   try {
@@ -122,9 +122,9 @@ it("a missing JSON field isolates siblings, lists exact keys, and does not inven
   `);
 
   assert.deepEqual(settled.details.result, [
-    { status: "rejected", error: "JSON selection failed for plots.json (.method): JSON field not found: \"method\"; available keys: \"pitch\", \"amplitude\"" },
+    { status: "rejected", error: "JSON selection failed for plots.json (.method): JSON field not found: \"method\"; available keys: \"pitch\", \"amplitude\"; for optional fields, select the parent object (json:true for the root) and apply ?? defaults in guest code" },
     { status: "fulfilled", value: "acf" },
-    { status: "rejected", error: "JSON selection failed for empty.json (.method): JSON field not found: \"method\"" },
+    { status: "rejected", error: "JSON selection failed for empty.json (.method): JSON field not found: \"method\"; for optional fields, select the parent object (json:true for the root) and apply ?? defaults in guest code" },
   ]);
   const all = await rejection(f.execute('return await Promise.all([read({path:"plots.json",json:".method"}),read({path:"ok.json",json:".method"})]);'));
   assert.ok(all.includes('JSON selection failed for plots.json (.method): JSON field not found: "method"; available keys: "pitch", "amplitude"'));
@@ -147,7 +147,7 @@ it("a JSON miss after edits rolls the edits back; a settled miss does not", asyn
 
   assert.equal(settled.details.ok, true);
   assert.equal(settled.details.result.status, "rejected");
-  assert.equal(settled.details.result.error, "JSON selection failed for meta.json (.schema): JSON field not found: \"schema\"; available keys: \"title\"");
+  assert.equal(settled.details.result.error, "JSON selection failed for meta.json (.schema): JSON field not found: \"schema\"; available keys: \"title\"; for optional fields, select the parent object (json:true for the root) and apply ?? defaults in guest code");
   assert.equal(await fs.readFile(path.join(f.root, "doc.md"), "utf8"), "gone\n");
 });
 
@@ -286,4 +286,138 @@ it("a 40-edit program applies every match but receipts only the first 32", async
   assert.match(out.details.result, /…8 more matches \(receipt shows the first 32\)/);
   const after = await fs.readFile(path.join(f.root, "many.txt"), "utf8");
   assert.equal(after, body.replaceAll("=0", "=1"));
+});
+
+
+it("oversized named and record read batches retain every file preview", async t => {
+  const f = await engineFixture(t);
+  const names = Array.from({length:7}, (_, index) => "document-" + index + ".md");
+
+  for (const [index, name] of names.entries()) await f.write(name, "DOCUMENT_" + index + "\n" + "line of source 🦀\n".repeat(5000));
+
+  for (const body of [
+    'return Object.fromEntries(await Promise.all(data.map(async path=>[path,await read(path)])));',
+    'return await Promise.all(data.map(async path=>({text:await read(path),path})));',
+  ]) {
+    const result = await f.tool.execute("read-preview", {code:body,data:names}, undefined, undefined, {cwd:f.root});
+    const text = modelText(result);
+
+    assert.equal(result.details.ok, true);
+    assert.equal(result.details.returnTruncated, true);
+    assert.ok(text.length <= 32000);
+    assert.equal(text.isWellFormed(), true);
+
+    for (const [index, name] of names.entries()) {
+      assert.ok(text.includes(name), "missing file label " + name);
+      assert.ok(text.includes("DOCUMENT_" + index), "missing file preview " + name);
+    }
+
+    assert.match(text, /UTF-16 units/);
+    assert.match(text, /truncated/);
+  }
+
+  const lengths = await f.tool.execute("read-lengths", {
+    code:'return await Promise.all(data.map(async path=>(await read(path)).length));', data:names,
+  }, undefined, undefined, {cwd:f.root});
+
+  assert.deepEqual(lengths.details.result, names.map((_, index) => ("DOCUMENT_" + index + "\n" + "line of source 🦀\n".repeat(5000)).length));
+});
+
+it("error output escapes lone surrogate code units before budgeting without damaging valid Unicode", async t => {
+  const f = await engineFixture(t);
+
+  for (const [message,visible] of [["bad\ud800tail", "bad\\ud800tail"], ["bad\udfff\nnext", "bad\\udfff\nnext"], ["normal 😀 error", "normal 😀 error"]]) {
+    await assert.rejects(f.tool.execute("unicode-error", {code:'throw new Error(data);',data:message}, undefined, undefined, {cwd:f.root}), error => {
+      const text = error.supernovaResult.content.filter(block => block.type === "text").map(block => block.text).join("\n");
+      assert.ok(text.isWellFormed());
+      const [headline, ...lines] = visible.split("\n");
+      assert.ok(text.includes(headline));
+
+      for (const line of lines) assert.ok(text.includes("\n" + line));
+
+      return true;
+    });
+  }
+
+  await assert.rejects(f.execute('throw new Error("\\ud800".repeat(10000));'), error => {
+    const text = error.supernovaResult.content[0].text;
+    assert.ok(text.isWellFormed());
+    assert.ok(text.length <= limits.maxReturnChars);
+    assert.equal(error.supernovaResult.details.returnTruncated, true);
+
+    return true;
+  });
+});
+
+
+it("modern callable tools use the invocation executor and preserve bounded structured data", async t => {
+  const f = await engineFixture(t);
+  const tool = {name:"read",description:"Read a remote fixture",sourceInfo:{source:"local"},parameters:{type:"object",properties:{}},outputSchema:{type:"object"},exposure:"codemode",annotations:{readOnlyHint:true},async execute(){assert.fail("raw executor bypassed the invocation boundary");}};
+  f.pi.registerTool(tool);
+  f.pi.getActiveTools = () => ["supernova"];
+  const controller = new AbortController();
+  const seen = [];
+
+  const ctx = {cwd:f.root,tools:[tool],async executeTool(name,args,options) {
+    assert.equal(name,"read");
+    assert.equal(options.signal.aborted,false);
+    seen.push(args);
+    const payload=args.path==="large"?{text:"x".repeat(100000)}:{answer:42};
+
+    return {isError:false,result:{content:[{type:"text",text:"display-only"}],structuredContent:payload,details:{batch:true,items:["ui-only"]}}};
+  }};
+
+  // Shorthand queries normally decode JSON; clipped typed replies must not be reparsed.
+  const result = await f.tool.execute("modern-data",{code:'const small=await read("small"); const large=await read("large"); return {small,largeType:typeof large,largeLength:large.length,truncated:large.includes("truncated")};'},controller.signal,undefined,ctx);
+  assert.deepEqual(result.details.result.small,{answer:42});
+  assert.equal(result.details.result.largeType,"string","oversized structured data must be visibly bounded, not silently reshaped");
+  assert.equal(result.details.result.truncated,true);
+  assert.ok(result.details.result.largeLength<=limits.maxCallResultChars);
+  assert.deepEqual(seen.map(args=>args.path),["small","large"]);
+  assert.equal(f.tool.exposure,"model-only","an orchestrator must not be recursively callable by native codemode");
+});
+
+it("modern invocation outcomes retain failure and cannot fall back to raw or withdrawn tools", async t => {
+  const f = await engineFixture(t);
+  const tool={name:"read",description:"Read remote",sourceInfo:{source:"local"},parameters:{type:"object",properties:{}},annotations:{readOnlyHint:true},exposure:"direct",async execute(){assert.fail("raw host executor must never run");}};
+  f.pi.registerTool(tool);
+  f.pi.getActiveTools = () => ["supernova","read"];
+  const callable=[tool];
+
+  const ctx={cwd:f.root,get tools(){return callable;},async executeTool(name) {
+    assert.equal(name,"read");
+
+    return {isError:true,result:{content:[{type:"text",text:"permission-denied-sentinel"}],details:undefined}};
+  }};
+
+  await assert.rejects(f.tool.execute("modern-denied",{code:'return await read({path:"remote"});'},undefined,undefined,ctx),/permission-denied-sentinel/);
+  callable.length=0;
+
+  for (const exposure of ["direct","hidden","model-only"]) {
+    tool.exposure=exposure;
+    await assert.rejects(f.tool.execute("modern-withdrawn",{code:'return await read({path:"remote"});'},undefined,undefined,ctx),/unknown tool "read"/);
+  }
+});
+
+it("modern host delegation preserves owned filesystem rollback and host overrides", async t => {
+  const f=await engineFixture(t);
+  const originalGetAll=f.pi.getAllTools;
+  const builtin={name:"write",description:"builtin write",parameters:{type:"object",properties:{}},sourceInfo:{source:"builtin"},async execute(){assert.fail("raw builtin must not bypass owned staging");}};
+  f.pi.getAllTools=()=>[...originalGetAll(),builtin];
+  const ctx={cwd:f.root,tools:[builtin],async executeTool(){assert.fail("owned filesystem writes must not delegate");}};
+  await assert.rejects(f.tool.execute("modern-rollback",{code:'await write("rolled-back.txt","staged"); throw Error("reject-owned");'},undefined,undefined,ctx),/reject-owned/);
+  await assert.rejects(fs.stat(path.join(f.root,"rolled-back.txt")),{code:"ENOENT"});
+
+  const override={...builtin,sourceInfo:{source:"local"}};
+  f.pi.getAllTools=()=>[...originalGetAll(),override];
+
+  const accepted=await f.tool.execute("modern-override",{code:'return await write("remote.txt","kept");'},undefined,undefined,{cwd:f.root,tools:[override],async executeTool(name,args) {
+    assert.equal(name,"write");
+    assert.equal(args.content,"kept");
+
+    return {isError:false,result:{content:[{type:"text",text:"host-override-kept"}],details:undefined}};
+  }});
+
+  assert.equal(accepted.details.result,"host-override-kept");
+  await assert.rejects(fs.stat(path.join(f.root,"remote.txt")),{code:"ENOENT"});
 });

@@ -5,6 +5,7 @@ import {clampLine,fitPath} from './render-measure.js';
 function diffGut(theme, item) {
   const [sign, color, textColor] = DIFF_STYLES.get(item.type) ?? [" ", "dim", "toolDiffContext"];
   const gutter = theme.fg(color, (sign + (item.lineNum || 0)).padStart(5));
+
   return gutter + theme.fg("borderMuted", " │ ") + theme.fg(textColor, sign + " " + cleanInlineText(item.text));
 }
 
@@ -212,6 +213,7 @@ function opMarker(theme, op, isPartial, isError) {
     [isError, "error", "×"],
     [true, "success", "✓"],
   ].find(([matches]) => matches);
+
   return theme.fg(status[1], status[2]);
 }
 
@@ -269,7 +271,8 @@ function formatOpRow(theme, op, width, isPartial, isError) {
 
 	return opRowSuffix(theme, op, prefix, Math.max(1, width - used));
 }
-export { formatDiffRows, operationsFromTrace, formatDuration, formatOpRow, cleanBlockText };
+
+export { formatDiffRows, operationsFromTrace, formatDuration, formatOpRow, cleanBlockText, cleanInlineText };
 
 const DIFF_STYLES = new Map([
   ["remove", ["-", "toolDiffRemoved", "toolDiffRemoved"]],

@@ -77,9 +77,19 @@ function hasUnpairedSurrogate(text) {
   return SURROGATE_CODE_UNIT.test(text) && UNPAIRED_SURROGATE.test(text);
 }
 
+// Error messages bypass value formatting. Escape, rather than replace, invalid
+// code units before budgeting so provider text remains well-formed and lossless.
+export function escapeUnpairedSurrogates(text) {
+  return hasUnpairedSurrogate(text)
+    ? text.replace(/[\uD800-\uDFFF]/gu, unit => "\\u" + unit.charCodeAt(0).toString(16).padStart(4, "0"))
+    : text;
+}
+
 export function isStringArray(value) {
   if (!Array.isArray(value) || !value.length) return false;
+
   for (const item of value) if (!isString(item)) return false;
+
   return true;
 }
 
@@ -91,6 +101,7 @@ function hasWellFormedStrings(values) {
 
 function boundedStringText(value, limit) {
   const text = truncateChars(value,limit,"return").text;
+
   return hasUnpairedSurrogate(text) ? truncateChars(JSON.stringify(text),limit,"return").text : text;
 }
 
@@ -100,15 +111,18 @@ export function formatBoundedStringArray(values, budget) {
   const header = "strings[" + n + "]\n";
   let remaining = Math.max(0, budget - header.length);
   let out = header;
+
   if (header.length >= budget) return truncateChars(header,budget,"return").text;
   const omitted = count => "…[return truncated; " + count + " string items omitted]…\n";
 
   for (let i = 0; i < n; i++) {
     const itemHeader = "[" + i + "] " + values[i].length + " UTF-16 units\n";
     const footer = i + 1 < n ? omitted(n - i - 1) : "";
+
     if (remaining < itemHeader.length + Math.min(32,values[i].length) + 1 + footer.length) {
       return out + truncateChars(omitted(n - i),remaining,"return").text;
     }
+
     const per = Math.min(remaining - itemHeader.length - 1 - footer.length, Math.max(32, Math.floor(remaining / (n - i)) - itemHeader.length - 1));
     const chunk = itemHeader + boundedStringText(values[i],per) + "\n";
     remaining = Math.max(0, remaining - chunk.length);
@@ -291,6 +305,7 @@ export function formatValue(value, indent = "", width = FORMAT_WIDTH, seen = new
   if (value?.[RAW_TEXT] !== undefined) return value[RAW_TEXT];
 
   if (!isObject(value) && !Array.isArray(value)) return formatPrimitive(value);
+
   if (seen.has(value)) return "[Circular]";
   seen.add(value);
 
@@ -314,65 +329,106 @@ function displayKeys(value) {
 export function displayExceeds(value, budget) {
   const seen = new Set();
   const spend = units => (budget -= units) < 0;
+
   function container(item) {
     if (seen.has(item)) return false;
     seen.add(item);
     const array = Array.isArray(item);
+
     if (array && spend(item.length)) return true;
+
     for (const key of displayKeys(item)) {
       if (!array && spend(key.length+1)) return true;
+
       if (visit(item[key])) return true;
     }
+
     seen.delete(item);
+
     return false;
   }
+
   function visit(item) {
     if (spend(isString(item) ? item.length : 1)) return true;
+
     return isObject(item) || Array.isArray(item) ? container(item) : false;
   }
+
   return visit(value);
 }
 
-/** Display-only prefix; never constructs an oversized JSON/string rendering. */
+function boundedQuotedText(text, budget, label) {
+  if (budget < 2) return "";
+  const end = maxJsonStringPrefix(text, budget);
+
+  if (end === text.length) return JSON.stringify(text);
+  const marker = "…[" + label + " truncated; " + text.length + " UTF-16 units]…";
+  const markerChars = JSON.stringify(marker).length - 2;
+
+  if (markerChars + 2 > budget) return JSON.stringify(text.slice(0, end));
+  const prefix = maxJsonStringPrefix(text, budget - markerChars);
+
+  return JSON.stringify(text.slice(0, prefix) + marker);
+}
+
+/** Fair display-only previews; bounded work, no expansion of full strings. */
 export function formatBoundedValue(value, budget, label = "return") {
-  const footer = "\n…["+label+" truncated]…";
-  const parts = [];
+  const footer = "\n…[" + label + " truncated]…";
+  const limit = charLimit(budget, 32000);
   const seen = new Set();
-  let remaining = Math.max(0,budget-footer.length), stopped = false;
-  const push = text => {
-    if (text.length > remaining) { stopped = true; return false; }
-    remaining -= text.length; parts.push(text); return true;
-  };
-  function quoted(text) {
-    const end = maxJsonStringPrefix(text,remaining);
-    push(JSON.stringify(text.slice(0,end)));
-    if (end < text.length) stopped = true;
-  }
-  function visitChild(item,key,array) {
-    if (!array) { quoted(key); push(":"); }
-    visit(array && item[key] === undefined ? null : item[key]);
-  }
-  function container(item) {
-    if (seen.has(item)) { push('"[Circular]"'); return; }
+
+  function render(item, room, depth) {
+    if (isString(item)) return boundedQuotedText(item, room, label);
+
+    if (!isObject(item) && !Array.isArray(item)) return truncateChars(formatPrimitive(item), room, label).text;
+
+    if (seen.has(item)) return truncateChars('"[Circular]"', room, label).text;
+
+    if (depth >= 32 || room < 4) return truncateChars("…[" + label + " truncated]…", room, label).text;
     seen.add(item);
-    const array = Array.isArray(item);
-    push(array ? "[" : "{");
-    let first = true;
-    for (const key of displayKeys(item)) {
-      if (stopped) break;
-      if (!first) push(",");
-      first = false;
-      visitChild(item,key,array);
+
+    try {
+      return container(item, room, depth);
+    } finally {
+      seen.delete(item);
     }
-    if (!stopped) push(array ? "]" : "}");
-    seen.delete(item);
   }
-  function visit(item) {
-    if (stopped) return;
-    if (isString(item)) quoted(item);
-    else if (isObject(item) || Array.isArray(item)) container(item);
-    else push(formatPrimitive(item));
+
+  function container(item, room, depth) {
+    const array = Array.isArray(item);
+    const keys = displayKeys(item);
+    const count = array ? item.length : keys.length;
+    const parts = [array ? "[" : "{"];
+    let remaining = room - 2;
+    let index = 0;
+
+    for (const key of keys) {
+      const separator = index === 0 ? "" : ",";
+      const heading = array ? "" : boundedQuotedText(key, Math.max(2, Math.floor(remaining / 3)), "key") + ":";
+      const omitted = "…[" + label + " truncated; " + (count - index) + " items omitted]…";
+      const reserve = index + 1 < count ? omitted.length + 1 : 0;
+      const available = remaining - separator.length - heading.length - reserve;
+
+      if (available < 4) {
+        parts.push(truncateChars(omitted, remaining, label).text);
+        break;
+      }
+
+      // Small siblings give unused space back. Large siblings cannot consume
+      // later paths/results; very large collections disclose the omitted count.
+      const share = Math.min(available, Math.max(64, Math.floor(remaining / (count - index)) - heading.length - separator.length));
+      const child = array && item[key] === undefined ? null : item[key];
+      const text = separator + heading + render(child, share, depth + 1);
+
+      parts.push(text);
+      remaining -= text.length;
+      index += 1;
+    }
+
+    parts.push(array ? "]" : "}");
+
+    return parts.join("");
   }
-  visit(value);
-  return truncateChars(parts.join("")+footer,budget,"return").text;
+
+  return render(value, Math.max(0, limit - footer.length), 0) + truncateChars(footer, limit, label).text;
 }

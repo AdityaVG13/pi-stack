@@ -69,6 +69,7 @@ it("one batch deadline covers earlier guests and leaves their completed commits 
 
 it("batch text clipping preserves success and executes later programs", async t => {
   const f = await engineFixture(t);
+
   for (const repeats of [7000,14000]) {
     const output = await run(f,[{code:`return "λ😀".repeat(${repeats});`},{code:'return "other".repeat(4500);'},{code:'await write("continued.txt","kept"); return "later program completed";'}]);
     assert.equal(output.details.ok,true); assert.equal(output.isError,false);
@@ -82,13 +83,24 @@ it("batch text clipping preserves success and executes later programs", async t 
   }
 });
 
-it("batch log budgets still stop further programs and disclose clipping", async t => {
+it("batch log clipping preserves success and executes later programs", async t => {
   const f = await engineFixture(t);
-  const logs = await run(f,[{code:'for(let i=0;i<100;i++)console.log("line",i); return 1;'},{code:'console.log("extra"); return 2;'},{code:'await write("never.txt","bad");'}]);
-  assert.equal(logs.details.ok,false); assert.equal(logs.details.logTruncated,true);
-  assert.equal(logs.details.logs.length,100); assert.equal(logs.details.attempted,2);
-  assert.match(modelText(logs),/log budget exceeded/);
-  await assert.rejects(fs.stat(path.join(f.root,"never.txt")),{code:"ENOENT"});
+
+  const cases = [
+    {name:"count",code:'for(let i=0;i<100;i++)console.log("line",i); return 1;',lines:100},
+    {name:"width",code:'console.log("x".repeat(50000)); return 1;',lines:2},
+  ];
+
+  for (const {name,code,lines} of cases) {
+    const logs = await run(f,[{code},{code:'console.log("extra"); return 2;'},{code:`await write("continued-${name}.txt","kept"); return 3;`}]);
+    assert.equal(logs.details.ok,true,modelText(logs)); assert.equal(logs.isError,false);
+    assert.equal(logs.details.logTruncated,true);
+    assert.equal(logs.details.logs.length,lines); assert.equal(logs.details.attempted,3);
+    assert.match(modelText(logs),/logs truncated/);
+    assert.ok(modelText(logs).length<=32000);
+    assert.deepEqual(logs.details.programs.map(part=>part.details.result),[1,2,3]);
+    assert.equal(await fs.readFile(path.join(f.root,`continued-${name}.txt`),"utf8"),"kept");
+  }
 });
 
 it("stop reports retain earlier images instead of throwing their content away", async t => {
@@ -281,6 +293,7 @@ it("failed cutovers compose file reuse, JSON, checkpoints, argv, images and repa
 // entry. Explicit data replaces (never merges) the default, including falsy data.
 it("batch data defaults preserve literals and explicit per-entry overrides", async t => {
   const f = await engineFixture(t);
+
   for (const data of [false,0,null,"",{paths:["a","b"],literal:"λ😀\r\n"}]) {
     const result = await run(f,[{code:"return data;"},{code:"return data;",data:{local:true}},{code:"return data;",data:null},{code:"return data;",data:false}],{data});
     assert.equal(result.details.ok,true);
@@ -291,10 +304,12 @@ it("batch data defaults preserve literals and explicit per-entry overrides", asy
 it("each guest gets an independent copy of shared batch data", async t => {
   const f = await engineFixture(t);
   const data = {paths:["original"],nested:{count:0}};
+
   const result = await run(f,[
     {code:'data.paths.push("changed"); data.nested.count=9; return data;'},
     {code:'return data;'},
   ],{data});
+
   assert.equal(result.details.ok,true);
   assert.deepEqual(result.details.result,[{paths:["original","changed"],nested:{count:9}},{paths:["original"],nested:{count:0}}]);
   assert.deepEqual(data,{paths:["original"],nested:{count:0}});
@@ -307,6 +322,7 @@ it("shared batch data counts once against admission and never bypasses its cap",
   assert.equal(result.details.ok,true);
   assert.deepEqual(result.details.result,Array(8).fill(8000));
   const write = {code:'await write("never-shared.txt","bad");'};
+
   for (const data of ["x".repeat(48000),1n]) await assert.rejects(run(f,[write],{data}),/no programs ran/);
   const cyclic = {}; cyclic.self = cyclic;
   await assert.rejects(run(f,[write],{data:cyclic}),/no programs ran/);
@@ -319,12 +335,14 @@ it("shared program source preserves overrides, fresh guests and live file loadin
   const code = 'if(globalThis.used)throw Error("guest reused"); globalThis.used=true; return data;';
   await f.write("shared.js",code);
   await f.write("override.js",'return "file override";');
+
   for (const source of [{code},{file:"shared.js"}]) for (const parallel of [false,true]) {
     const result = await run(f,[{}, {data:null}, {code:'return "code override";'}, {file:"override.js"}],{...source,data:{literal:"λ😀\r\n"},parallel});
     assert.equal(result.details.ok,true);
     assert.deepEqual(result.details.result,[{literal:"λ😀\r\n"},null,"code override","file override"]);
     assert.equal(result.details.returnTruncated,false);
   }
+
   const changed = await run(f,[{code:'return await edit("shared.js","return data;","return 42;");'},{}],{file:"shared.js"});
   assert.equal(changed.details.ok,true);
   assert.equal(changed.details.result[1],42,"a shared file is loaded per run, not snapshotted before earlier commits");
@@ -334,6 +352,7 @@ it("explicit object overlays are shallow, prototype-safe and isolated without ch
   const f = await engineFixture(t);
   const defaults = JSON.parse('{"nested":{"original":true},"flag":true,"text":"λ😀\\r\\n","__proto__":{"literal":1}}');
   const local = {nested:{local:true},flag:false,count:0,empty:"",nil:null};
+
   for (const parallel of [false,true]) {
     const result = await run(f,[{data:local},{}],{code:'const value=JSON.parse(JSON.stringify(data)); data.nested.mutated=true; return value;',data:defaults,mergeData:true,parallel});
     assert.equal(result.details.ok,true);
@@ -343,6 +362,7 @@ it("explicit object overlays are shallow, prototype-safe and isolated without ch
     assert.deepEqual(local.nested,{local:true});
     assert.deepEqual(defaults.nested,{original:true});
   }
+
   const replacement = await run(f,[{data:local},{data:null},{data:false}],{code:'return data;',data:defaults});
   assert.deepEqual(replacement.details.result,[local,null,false]);
 });
@@ -350,11 +370,13 @@ it("explicit object overlays are shallow, prototype-safe and isolated without ch
 it("shared defaults reject malformed flags and oversized inputs before any program, while preserving failure commits", async t => {
   const f = await engineFixture(t);
   const write = {code:'await write("never-defaults.txt","bad");'};
+
   for (const options of [
     {mergeData:"yes",data:{}}, {mergeData:true}, {mergeData:true,data:[]},
     {code:"return 1",file:"ambiguous.js"}, {code:" "}, {file:0},
     {code:"x".repeat(48000)}, {data:"x".repeat(48000)},
   ]) await assert.rejects(run(f,[write],options),/no programs ran/);
+
   for (const data of [null,false,0,"",[]]) await assert.rejects(run(f,[write,{code:'return data;',data}],{data:{},mergeData:true}),/no programs ran/);
   await assert.rejects(f.tool.execute("lone-merge",{...write,mergeData:true},undefined,undefined,{cwd:f.root}),/mergeData applies to the programs array; no commands ran/);
   await assert.rejects(fs.stat(path.join(f.root,"never-defaults.txt")),{code:"ENOENT"});
@@ -366,6 +388,7 @@ it("shared defaults reject malformed flags and oversized inputs before any progr
   assert.deepEqual(stopped.details.mutations.rolledBack,1);
   assert.match(modelText(stopped),/preserved failure/);
   assert.equal(await fs.readFile(path.join(f.root,"kept-default.txt"),"utf8"),"exact\r\n");
+
   for(const name of ["rolled-default.txt","unrun-default.txt"])await assert.rejects(fs.stat(path.join(f.root,name)),{code:"ENOENT"});
 });
 
@@ -384,11 +407,13 @@ it("shared source counts once without raising admission or worker code limits", 
 
 it("a real failure after clipped text still stops sequential work and retains prior commits", async t => {
   const f = await engineFixture(t);
+
   const result = await run(f,[
     {code:'await write("kept.txt","committed"); return "x".repeat(40000);'},
     {code:'throw Error("failure after clipping");'},
     {code:'await write("never.txt","bad");'},
   ]);
+
   assert.equal(result.isError,true);
   assert.equal(result.details.ok,false);
   assert.equal(result.details.attempted,2);
@@ -396,4 +421,54 @@ it("a real failure after clipped text still stops sequential work and retains pr
   assert.match(modelText(result),/failure after clipping/);
   assert.equal(await fs.readFile(path.join(f.root,"kept.txt"),"utf8"),"committed");
   await assert.rejects(fs.stat(path.join(f.root,"never.txt")),{code:"ENOENT"});
+});
+
+
+it("failed batches project host error status without discarding completed results", async t => {
+  const f = await engineFixture(t);
+
+  const result = await run(f, [
+    { code: 'await write("kept.txt", "kept"); return "completed";' },
+    { code: 'throw Error("batch-failure-sentinel");' },
+    { code: 'await write("never.txt", "bad");' },
+  ]);
+
+  const event = { toolName: "supernova", isError: false, content: result.content, details: result.details };
+  const projected = Object.assign({}, event, ...await f.emit("tool_result", event));
+  assert.equal(projected.isError, true, "Pi ignores isError on the resolved execute result");
+  assert.equal(projected.content, result.content);
+  assert.equal(projected.details.programs[0].details.result, "completed");
+  assert.equal(await fs.readFile(path.join(f.root, "kept.txt"), "utf8"), "kept");
+  await assert.rejects(fs.stat(path.join(f.root, "never.txt")), { code: "ENOENT" });
+
+  for (const other of [
+    { ...event, toolName: "unrelated" },
+    { ...event, details: { ok: true } },
+  ]) {
+    const untouched = Object.assign({}, other, ...await f.emit("tool_result", other));
+    assert.equal(untouched.isError, false);
+  }
+});
+
+it("oversized batches keep every program's diagnostics visible", async t => {
+  const f = await engineFixture(t);
+
+  // Each value fits its per-program limit; only aggregate clipping is under test.
+  const result = await run(f, [
+    { code: 'return "first " + "λ😀".repeat(10000);' },
+    { code: 'throw Error("middle-failure-sentinel");' },
+    { code: 'return "last " + "λ😀".repeat(10000);' },
+  ], { parallel: true });
+
+  const text = modelText(result);
+  assert.equal(result.details.ok, false);
+  assert.equal(result.details.attempted, 3);
+  assert.equal(result.details.returnTruncated, true);
+  assert.ok(text.length <= 32000);
+  assert.equal(text.isWellFormed(), true);
+  assert.match(text, /first /);
+  assert.match(text, /middle-failure-sentinel/);
+  assert.match(text, /last /);
+  assert.equal(result.details.programs[0].details.result, "first " + "λ😀".repeat(10000));
+  assert.equal(result.details.programs[2].details.result, "last " + "λ😀".repeat(10000));
 });

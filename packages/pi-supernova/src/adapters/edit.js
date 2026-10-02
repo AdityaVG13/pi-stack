@@ -8,16 +8,40 @@ import { resolveWorkspacePath, relativeSlash } from "../fs/workspace.js";
 import { referencesForNames } from "../context/search.js";
 import {
   textResult, sourceLines, lineTextRange, applyReplacements, applyViewReplace,
-  shiftDiffLines, contentLineInfo, boundedEditDiff, QUICK_CHECK_MAX_CHARS,
+  shiftDiffLines, contentLineInfo, boundedEditDiff, QUICK_CHECK_MAX_CHARS, lineStartIndex, lineEndIndex,
 } from "../fs/text-ops.js";
 
 export function createEdit(ctx) {
   const { getCwd, vfs, index, ledger } = ctx;
-  function lineAt(updated, newLines, n) {
-    if (newLines) return newLines[n - 1] ?? "";
-    const { start, end } = lineTextRange(updated, n);
 
-    return updated.slice(start, end).replace(/\r?\n$/, "");
+  async function editTargetPath(cwd, inputPath, command) {
+    try { return await resolveWorkspacePath(cwd, inputPath, command, false); }
+    catch (error) {
+      if (error?.code !== "ENAMETOOLONG") throw error;
+
+      // A plain read value mistaken for a path can contain an entire source
+      // file. Keep the errno, but do not reflect that value in the diagnostic.
+      const failure = new Error(command + " path exceeds the filesystem limit; expected a filename. Ordinary read(path) returns text; use edit(path,oldText,newText), or read(path,{resolve:true}) for an editable view");
+
+      failure.code = error.code;
+
+      throw failure;
+    }
+  }
+
+  function editBlockLines(updated, newLines, start, last) {
+    if (newLines) return newLines.slice(start - 1, last);
+    const lines = [];
+    let from = lineStartIndex(updated, start);
+
+    // Consecutive preview lines share one prefix scan, even in large files.
+    for (let line = start; line <= last; line++) {
+      const end = lineEndIndex(updated, from, 1);
+      lines.push(updated.slice(from, end).replace(/\r?\n$/, ""));
+      from = end;
+    }
+
+    return lines;
   }
 
   function spanEditRange(span, lineCount) {
@@ -39,6 +63,7 @@ export function createEdit(ctx) {
 
     if (explicit) return explicit;
     const ranges = [];
+
     const positions = diff.lines.filter(row => row.type !== "context")
       .map(row => Math.min(lineCount, row.newLineNum ?? row.lineNum)).sort((a, b) => a - b);
 
@@ -53,7 +78,7 @@ export function createEdit(ctx) {
 
     for (const { start, end } of ranges) {
       const last = Math.min(end, start + perRange - 1);
-      const lines = Array.from({ length: Math.max(0, last - start + 1) }, (_, i) => lineAt(updated, newLines, start + i));
+      const lines = editBlockLines(updated, newLines, start, last);
       ledger.recordOrigin(rel, start, lines);
       blocks.push("edited " + rel + ":" + start + "-" + last + "\n" + lines.map((line, i) => String(start + i).padStart(5) + " " + line).join("\n"));
 
@@ -94,7 +119,9 @@ export function createEdit(ctx) {
     const name = declaredName(lineText(source, cached, number));
 
     if (name) return name;
+
     if (!canMapOwners) return;
+
     if (!spans.has(l.type)) spans.set(l.type, WorkspaceIndex.spansOf(WorkspaceIndex.fromText(target, source)));
 
     return spans.get(l.type).find(span => span.start <= number && number <= span.end)?.name;
@@ -111,7 +138,10 @@ export function createEdit(ctx) {
       if (l.type === "context") continue;
       const name = nameAtDiffLine(l, original, updated, oldLines, newLines, canMapOwners, target, spans);
 
-      if (name) names.add(name);
+      // The generic declaration heuristic reads "const auto" as a binding.
+      // In C++ it is a type keyword, not a symbol to search across the repo.
+      if (name && !(name === "auto" && /\.(?:cc|cpp|h|hpp)$/i.test(target))) names.add(name);
+
       if (names.size >= 3) break;
     }
 
@@ -159,9 +189,11 @@ export function createEdit(ctx) {
   async function applyViewEdit(cwd, target, content, params, signal) {
     const viewText = String(params.viewText);
     const nextText = String(params.newText);
+
     const windowNext = isString(params.oldText)
       ? applyReplacements(target, viewText, [{ oldText: String(params.oldText), newText: nextText }]).updated
       : nextText;
+
     const { updated } = applyViewReplace(target, content, params.viewStart, params.viewEnd, viewText, windowNext);
     const diffFrom = isString(params.oldText) ? String(params.oldText) : viewText;
     const diff = shiftDiffLines(buildEditDiff(target, viewText, diffFrom, isString(params.oldText) ? nextText : windowNext), params.viewStart - 1);
@@ -172,6 +204,7 @@ export function createEdit(ctx) {
 
   function diffForMatches(target, content, updated, matches) {
     if (content.length > 512 * 1024 || updated.length > 512 * 1024) return boundedEditDiff(target, content, matches);
+
     if (matches.length === 1) return buildEditDiff(target, content, matches[0].oldText, matches[0].newText);
 
     return buildMultiEditDiff(target, content, matches);
@@ -179,7 +212,7 @@ export function createEdit(ctx) {
 
   async function edit(params, signal) {
       const cwd = getCwd();
-      const target = await resolveWorkspacePath(cwd, params?.path, "edit", false);
+      const target = await editTargetPath(cwd, params?.path, "edit");
 
       if (signal?.aborted) throw new Error("aborted");
       const content = await vfs.read(target, { maxBytes: 64 * 1024 * 1024 });
@@ -220,7 +253,7 @@ export function createEdit(ctx) {
 
   async function apply_patch(params, signal) {
       const cwd = getCwd();
-      const target = await resolveWorkspacePath(cwd, patchInputPath(params), "apply_patch", false);
+      const target = await editTargetPath(cwd, patchInputPath(params), "apply_patch");
 
       if (!isString(params?.patch) || !params.patch.trim()) {
         throw new Error("apply_patch requires patch");
@@ -228,6 +261,7 @@ export function createEdit(ctx) {
 
       if (signal?.aborted) throw new Error("aborted");
       const original = await readPatchOriginal(target);
+
       if (original.length > 2 * 1024 * 1024) throw new Error("apply_patch input exceeds 2 MiB; use edit() for targeted replacements");
       const { resultText, hunkCount, relocations } = applyPatchToText(original, params.patch);
       const { speculative } = await vfs.write(target, resultText);

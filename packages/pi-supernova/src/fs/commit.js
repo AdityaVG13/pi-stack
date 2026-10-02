@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {fileSignature,sameSignature,textSignature} from './file-io.js';
+import {fileSignature,sameSignature,sameFileVersion,textSignature} from './file-io.js';
 
 // realpath() cannot resolve a missing leaf. Canonicalize its nearest existing
 // ancestor so two symlink spellings still share one commit destination.
@@ -25,6 +25,8 @@ async function resolveExistingFile(logicalPath) {
   const stat = await fs.stat(target);
 
   if (!stat.isFile()) throw new Error("cannot write to a non-file: " + logicalPath);
+
+  if (stat.nlink > 1) throw new Error("cannot replace a hard-linked file without splitting its aliases: " + logicalPath);
 
   return { target, stat };
 }
@@ -87,7 +89,7 @@ async function stageReplacement(entry, content, stat, target) {
 function makeStageEntry(logicalPath, target, content, parent, stat) {
   const token = ".supernova-" + randomUUID();
 
-  return { logicalPath, target, content, temporary: path.join(parent, token + ".new"), backup: path.join(parent, token + ".bak"), existed: !!stat, replaced: false };
+  return { logicalPath, target, content, temporary: path.join(parent, token + ".new"), backup: path.join(parent, token + ".bak"), existed: !!stat, observed: stat, replaced: false };
 }
 
 async function recoverReplaced(staged) {
@@ -97,12 +99,21 @@ async function recoverReplaced(staged) {
     if (!entry.replaced) continue;
 
     try {
+      const expected = textSignature(entry.content);
+      const stat = await fs.stat(entry.target);
+
+      // Recovery must not destroy changes made after our publication. Check
+      // cheap type/size differences before hashing a possibly replaced file.
+      if (!stat.isFile() || stat.size !== expected.size || !sameSignature(await fileSignature(entry.target, undefined, stat), expected)) {
+        throw new Error("destination changed after publication; left unchanged");
+      }
+
       if (entry.existed) await fs.rename(entry.backup, entry.target);
       else await fs.unlink(entry.target);
     } catch (err) {
       // Keep the backup if recovery fails; never delete the remaining original.
-      entry.keepBackup = true;
-      recoveryErrors.push(entry.target + ": " + err.message + " (backup: " + entry.backup + ")");
+      entry.keepBackup = entry.existed;
+      recoveryErrors.push(entry.target + ": " + err.message + (entry.existed ? " (backup: " + entry.backup + ")" : ""));
     }
   }
 
@@ -111,9 +122,9 @@ async function recoverReplaced(staged) {
 
 async function cleanupStaged(staged, failed, createdDirs) {
   for (const entry of staged) {
-    // A successful rename consumed the temporary path. These are known
-    // files, so unlink avoids rm's extra type probe; missing files stay benign.
-    if (!entry.replaced) await fs.unlink(entry.temporary).catch(() => {});
+    // Existing-file rename consumes the staging name; new-file linking does
+    // not. Remove only our staging names, never a conflicting destination.
+    if (!entry.replaced || !entry.existed) await fs.unlink(entry.temporary).catch(() => {});
 
     if (entry.existed && !entry.keepBackup) await fs.unlink(entry.backup).catch(() => {});
   }
@@ -132,12 +143,35 @@ async function assertExpectedSignature(vfs, logicalPath, target, stat) {
 
 async function installStaged(vfs, staged) {
   for (const entry of staged) {
-    // Staging and earlier renames await I/O. Recheck before each disk effect;
-    // failCommit restores earlier replacements if ownership changed mid-commit.
+    if (entry.existed) {
+      let current;
+
+      try { current = await fs.stat(entry.target); }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+
+      if (!current || !sameFileVersion(entry.observed, current)) throw new Error("write conflict: file changed during commit staging: " + entry.logicalPath + "; read it again before retrying");
+    }
+
+    // Staging, version checks and earlier publications await I/O. Recheck
+    // ownership immediately before each disk effect; failCommit handles recovery.
     vfs.assertCurrent?.();
     vfs.signal?.throwIfAborted();
-    await fs.rename(entry.temporary, entry.target);
+
+    if (entry.existed) await fs.rename(entry.temporary, entry.target);
+    else {
+      // Let the filesystem enforce absence, including case/Unicode aliases.
+      // A preflight stat followed by rename would still clobber a racing file.
+      try { await fs.link(entry.temporary, entry.target); }
+      catch (error) {
+        if (error.code === "EEXIST") throw new Error("write conflict: destination appeared before publication: " + entry.logicalPath + "; read it again before retrying", {cause:error});
+        throw error;
+      }
+    }
+
     entry.replaced = true;
+    // Record publication first so invalidation during awaited I/O triggers recovery.
+    vfs.assertCurrent?.();
+    vfs.signal?.throwIfAborted();
   }
 
   for (const entry of staged) {
@@ -164,4 +198,4 @@ async function failCommit(vfs, staged, error) {
   throw error;
 }
 
-export {assertExpectedSignature,collectMissingAncestors,makeStageEntry,stageReplacement,installStaged,failCommit,cleanupStaged};
+export {canonicalNewPath,assertExpectedSignature,collectMissingAncestors,makeStageEntry,stageReplacement,installStaged,failCommit,cleanupStaged};

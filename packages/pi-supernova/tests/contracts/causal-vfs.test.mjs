@@ -74,6 +74,7 @@ it("a failed commit keeps CAS baselines for unrelated files", async () => {
 // Run in a child: a caught read rejection must not emit a later unhandled stream error.
 it("cancelled bounded reads and CAS signing do not crash the host", () => {
   const moduleUrl = new URL("../../src/fs/vfs.js", import.meta.url).href;
+
   const source = `import assert from 'node:assert/strict';
     import { CausalVfs } from ${JSON.stringify(moduleUrl)};
     const target = ${JSON.stringify(fileURLToPath(new URL("../../package.json", import.meta.url)))};
@@ -90,6 +91,7 @@ it("cancelled bounded reads and CAS signing do not crash the host", () => {
       }
     }
     console.log('survived all cancellations');`;
+
   const child = spawnSync(process.execPath, ["--input-type=module", "-e", source], {encoding: "utf8", timeout: 5000});
   assert.equal(child.status, 0, child.stderr || child.error?.message);
   assert.match(child.stdout, /survived all cancellations/);
@@ -104,4 +106,55 @@ it("bounded reads preserve multiple chunks and enforce the exact byte cap", asyn
   await assert.rejects(vfs.read(target, {maxBytes: maxBytes - 1}), /exceeds/);
   await fs.writeFile(target, "");
   assert.equal(await vfs.read(target, {maxBytes: 0}), "");
+});
+
+
+it("concurrent observations isolate file versions and failed signatures do not poison retries", async () => {
+  const file = path.join(await scratch(), "versions.txt");
+  await fs.writeFile(file, "old");
+  const oldVersion = await fs.stat(file);
+  await fs.writeFile(file, "current-version");
+  const currentVersion = await fs.stat(file);
+  const vfs = new CausalVfs();
+
+  const observed = await Promise.allSettled([
+    vfs.recordExpected(file, oldVersion),
+    vfs.recordExpected(file, oldVersion),
+    vfs.recordExpected(file, currentVersion),
+    vfs.recordExpected(file, currentVersion),
+  ]);
+
+  assert.deepEqual(observed.map(result => result.status), ["rejected", "rejected", "fulfilled", "fulfilled"]);
+
+  for (const result of observed.slice(0, 2)) assert.match(result.reason.message, /file changed while reading/);
+  await vfs.write(file, "committed");
+  assert.equal(await fs.readFile(file, "utf8"), "committed");
+
+  const latest = await fs.stat(file);
+  await Promise.all([vfs.recordExpected(file, latest), vfs.recordExpected(file, latest)]);
+  await fs.writeFile(file, "external");
+  await assert.rejects(vfs.write(file, "stale"), /write conflict/);
+  assert.equal(await fs.readFile(file, "utf8"), "external");
+});
+
+it("loaded complete bytes retain CAS safety without accepting prefixes or stale versions", async () => {
+  const file = path.join(await scratch(),"loaded.bin");
+  const before = Buffer.from([0,255,128,10]);
+  const after = Buffer.from([1,255,128,10]);
+  await fs.writeFile(file,before);
+  const initial = await fs.stat(file);
+  const vfs = new CausalVfs();
+  await assert.rejects(vfs.recordExpected(file,initial,before.subarray(0,3)),/complete bytes/);
+  await vfs.recordExpected(file,initial,before);
+  await fs.writeFile(file,after);
+  await assert.rejects(vfs.write(file,"lost update"),/write conflict/);
+  await assert.rejects(vfs.recordExpected(file,initial,before),/file changed while reading/);
+  assert.deepEqual(await fs.readFile(file),after);
+  const current = await fs.stat(file);
+  vfs.signal = AbortSignal.abort();
+  await assert.rejects(vfs.recordExpected(file,current,after),{name:"AbortError"});
+  vfs.signal = undefined;
+  await vfs.recordExpected(file,current,after);
+  await vfs.write(file,"fresh write");
+  assert.equal(await fs.readFile(file,"utf8"),"fresh write");
 });

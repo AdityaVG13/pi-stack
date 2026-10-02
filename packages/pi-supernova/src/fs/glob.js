@@ -26,6 +26,7 @@ function globGroup(glob, i, open) {
 
   if (end < 0) throw new SyntaxError("unclosed " + open + " in glob");
   const inner = glob.slice(i + 1, end);
+
   const source = open === "{"
     ? "(?:" + inner.split(",").map(globBody).join("|") + ")"
     : "[" + (inner.startsWith("!") ? "^" + inner.slice(1) : inner) + "]";

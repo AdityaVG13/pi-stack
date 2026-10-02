@@ -206,19 +206,24 @@ export async function runBatchReuseWorkload(baseline) {
   assert.deepEqual(result.details.result,baseline.result);
   assert.equal(result.details.attempted,baseline.programs.length);
   const full = modelText(result);
+
   const parts = result.details.programs.map(part=>{
     assert.ok(full.includes(modelText(part)),"every complete result must be visible, not hidden in details");
+
     return {...part,content:[{type:"text",text:modelText(part).replace(/^(ok|error) #\d+ \d+ms/,"$1 #0 0ms")}]};
   });
+
   const output = programBatchText(parts,baseline.programs.length);
   assert.equal(output,baseline.output,"no output compression, citations, elision or changed observations");
   assert.deepEqual(await fs.readdir(root),["packages"],"reuse must not create hidden program/input files");
   assert.deepEqual((await fs.readdir(path.join(root,"packages"))).sort(),baseline.programs.map(p=>p.data.directory.split("/").at(-1)).sort());
+
   for (const p of baseline.programs) {
     const directory = path.join(root,p.data.directory);
     assert.deepEqual((await fs.readdir(directory)).sort(),["LICENSE","README.md"]);
     assert.equal(await fs.readFile(path.join(directory,"LICENSE"),"utf8"),baseline.data.license);
     assert.equal(await fs.readFile(path.join(directory,"README.md"),"utf8"),"# "+p.data.directory.split("/").at(-1)+"\n\n"+baseline.data.introduction+"\n");
   }
+
   return {args,repeated,output};
 }

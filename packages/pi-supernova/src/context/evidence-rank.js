@@ -150,4 +150,5 @@ function pickEvidence(spans, fileScores, profile, opts) {
 
   return { picks: closure(main, spans, graph, fused, opts.k), fused };
 }
+
 export { pickEvidence };

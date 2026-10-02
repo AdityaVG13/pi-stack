@@ -14,6 +14,7 @@ export function createNativeAdapters(getCwd, vfs, config, index, ledger, hooks) 
   const bash = createBash(ctx);
   const list = createList(ctx);
   hooks.summarizeEdit = edit.editSummary;
+
   return {
     read: read.read,
     write: write.write,

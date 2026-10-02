@@ -9,7 +9,7 @@ it("workspace notifications describe disk commits, not checkpoint merges or roll
   const f = await engineFixture(t);
   const events = [];
   f.pi.events = { emit(name, event) {
-    assert.equal(name, "workspace:changed");
+    if (name !== "workspace:changed") return;
     events.push({ event, contents: event.paths?.map(p => readFileSync(p, "utf8")) });
   } };
   await f.execute(`
@@ -63,4 +63,82 @@ it("edit callbacks retain filesystem checkpoints without exposing a speculate co
   assert.equal(result.details.result.restored, "original");
   assert.deepEqual(result.details.result.accepted, { ok: true, committed: true, value: "validated" });
   assert.equal(result.details.result.final, "accepted");
+});
+
+it("file-read receipts describe successful disk reads, not overlays, source data or failed programs", async t => {
+  const f = await engineFixture(t), events = [];
+  await f.write("disk.js", "function original() {}\n");
+  await f.write("large.js", "//" + "x".repeat(40000) + "\n");
+  await f.write("spoof.json", JSON.stringify({path:path.join(f.root,"invented.js"),sourceChars:12,firstLine:1,lastLine:1,sourcePath:"invented.js"}));
+  f.pi.events = { emit(name, event) { if (name === "workspace:read") events.push(event); } };
+  const result = await f.execute('return (await read("disk.js",1,1)).length;');
+  assert.equal(result.details.result, 23, "read credit is program delivery, not a claim about displayed source");
+  assert.deepEqual(events, [{version:1,cwd:f.root,paths:[path.join(f.root,"disk.js")]}]);
+  assert.ok(Object.isFrozen(events[0]) && Object.isFrozen(events[0].paths));
+
+  events.length = 0;
+  await f.execute('return await read(["disk.js","large.js","disk.js"]);');
+  assert.deepEqual([...events[0].paths].sort(), [path.join(f.root,"disk.js"),path.join(f.root,"large.js")].sort(), "streamed batches preserve and deduplicate native provenance");
+  assert.equal(events.length, 1);
+  events.length = 0;
+  await f.execute('return await read(["disk.js","spoof.json"],1,1);');
+  assert.deepEqual([...events[0].paths].sort(), [path.join(f.root,"disk.js"),path.join(f.root,"spoof.json")].sort(), "inline batches do not treat file contents as receipt fields");
+  events.length = 0;
+  await f.execute('return await read({path:"disk.js",resolve:true});');
+  assert.deepEqual(events[0].paths, [path.join(f.root,"disk.js")]);
+
+  events.length = 0;
+  await f.execute('await read({path:"spoof.json",json:true}); await read("."); await read("disk.js",99,1); await read("missing.js").catch(() => {});');
+  assert.deepEqual(events, []);
+  await f.execute('await write({path:"disk.js",content:"function staged() {}\\n",replace:true}); return await read("disk.js");');
+  assert.deepEqual(events, [], "a staged body is not an on-disk read");
+  await assert.rejects(f.execute('await read("disk.js"); throw Error("after read");'), /after read/);
+  assert.deepEqual(events, [], "failed programs publish no file-open credit");
+  await assert.rejects(f.execute('await edit(async () => { await read("disk.js"); }); throw Error("after checkpoint");'), /after checkpoint/);
+  assert.deepEqual(events, [], "checkpoint merges cannot publish before program success");
+  await f.execute('return await Promise.allSettled([read("disk.js"),read("missing.js")]);');
+  assert.deepEqual(events[0].paths, [path.join(f.root,"disk.js")], "caught failures do not erase successfully delivered siblings");
+
+  f.pi.events.emit = () => { throw Error("broken read subscriber"); };
+
+  assert.equal((await f.execute('return await read("disk.js");')).details.result, "function staged() {}\n");
+
+  delete f.pi.events;
+
+  assert.equal((await f.execute('return await read("disk.js");')).details.result, "function staged() {}\n");
+});
+
+it("file-read receipts stay bounded during successful bulk reads", async t => {
+  const f = await engineFixture(t), events = [];
+  const paths = Array.from({length:260}, (_,i) => "read-" + i + ".js");
+  await Promise.all(paths.map(file => f.write(file,"// text\n")));
+  f.pi.events = { emit(name, event) { if (name === "workspace:read") events.push(event); } };
+  const result = await f.tool.execute("bulk-reads", {code:'const paths=' + JSON.stringify(paths) + '; let count=0; for(let i=0;i<paths.length;i+=64) count+=(await read(paths.slice(i,i+64))).length; return count;',timeoutMs:10000}, undefined, undefined, {cwd:f.root});
+  assert.equal(result.details.result, 260);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].paths.length, 256);
+  assert.equal(new Set(events[0].paths).size, 256);
+  assert.ok(events[0].paths.every(file => paths.includes(path.relative(f.root,file))));
+});
+
+
+it("cancellation after a flush reports retained writes as committed, not rolled back", async t => {
+  const f = await engineFixture(t);
+  const controller = new AbortController();
+  const committed = path.join(f.root, "committed.txt");
+  f.pi.events = { emit(name, event) {
+    if (name === "workspace:changed" && event.paths?.includes(committed)) controller.abort();
+  } };
+  await assert.rejects(f.tool.execute("cancel-after-flush", {
+    code: 'await write("committed.txt", "retained"); await bash("printf unsafe > shell-ran.txt");',
+  }, controller.signal, undefined, { cwd: f.root }), error => {
+    assert.equal(error.supernovaResult.details.mutations.committed, 1);
+    assert.equal(error.supernovaResult.details.mutations.rolledBack, 0);
+    assert.equal(error.supernovaResult.details.mutations.external, 0);
+
+    return true;
+  });
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(await fs.readFile(committed, "utf8"), "retained");
+  await assert.rejects(fs.stat(path.join(f.root, "shell-ran.txt")), { code: "ENOENT" });
 });

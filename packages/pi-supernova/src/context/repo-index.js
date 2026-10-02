@@ -1,5 +1,7 @@
 export {globToRegExp} from '../fs/glob.js';
+
 export {declaredName} from './source-entry.js';
+
 import {fromText,linesOf,spansOf,surfaceOf} from './source-entry.js';
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -24,6 +26,7 @@ const WATCH_DEBOUNCE_MS = 150;
 const MAX_INDEXED_FILES = 4000;
 
 const MAX_FILE_BYTES = 512 * 1024;
+
 const MAX_ENTRY_CACHE_BYTES = 64 * 1024 * 1024;
 
 const BINARY_EXT = new Set([
@@ -95,7 +98,9 @@ function grepPendingHuge(pending, rel, regex, out) {
     const text = pending.slice(start, stop).replace(/\r$/, "");
 
     line++;
+
     if (regex.test(text)) out.push({ rel, line, text, def: false });
+
     if (end === -1) break;
     start = end + 1;
   }

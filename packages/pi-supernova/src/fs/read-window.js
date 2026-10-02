@@ -75,17 +75,25 @@ export function createWindowReader(vfs) {
 
       if (!stat.isFile()) throw new Error("read requires a regular file: " + target);
 
-      if (lineCount === 0) return { text: "", satisfied: true, whole: stat.size === 0 };
-      const scan = await scanWindow(file, stat, startLine, lineCount, maxBytes, signal);
+      const scan = lineCount === 0
+        ? { startByte: undefined }
+        : await scanWindow(file, stat, startLine, lineCount, maxBytes, signal);
 
-      if (scan.startByte === undefined) return { text: "", satisfied: true, whole: stat.size === 0 };
+      if (scan.startByte === undefined) {
+        await vfs.recordExpected(target, stat);
+
+        return { text: "", satisfied: true, whole: stat.size === 0 };
+      }
+
+      if (scan.collected > maxBytes) return { text: "", satisfied: false, whole: false };
       const bytes = Buffer.concat(scan.parts, scan.collected);
       const end = scan.startByte + scan.collected;
       const eof = end >= stat.size;
-      const text = eof ? decodeUtf8Strict(bytes, target) : decodeUtf8Window(bytes);
-      await vfs.recordExpected(target, stat);
+      const text = eof ? decodeUtf8Strict(bytes, target) : decodeUtf8Window(bytes, target);
+      const whole = startLine === 1 && scan.startByte === 0 && eof;
+      await vfs.recordExpected(target, stat, whole ? bytes : undefined);
 
-      return { text, satisfied: end >= scan.endByte || eof, whole: startLine === 1 && scan.startByte === 0 && eof };
+      return { text, satisfied: end >= scan.endByte || eof, whole };
     } finally { await file.close(); }
   };
 }

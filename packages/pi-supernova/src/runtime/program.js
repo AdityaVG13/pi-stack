@@ -24,7 +24,7 @@ function parseExpressionFunction(code) {
     const candidate = statement?.type === "ExpressionStatement" ? statement.expression : statement;
 
     if (candidate && FUNCTION_TYPES.has(candidate.type)) {
-      return { program, expression: candidate, expressionSource: code.slice(statement.start, statement.end).replace(/;\s*$/, "") };
+      return { program, expression: candidate, sourceStart: statement.start, expressionSource: code.slice(statement.start, statement.end).replace(/;\s*$/, "") };
     }
 
     return { program };
@@ -44,14 +44,23 @@ function parseExpressionFunction(code) {
 
 function deniedSpecifier(node) {
   if (node?.type === "Literal" && isString(node.value)) return node.value;
+
   if (node?.type === "TemplateLiteral" && node.expressions.length === 0) return node.quasis[0]?.value?.cooked;
 }
 
 function assertGuestImports(node) {
-  if (Array.isArray(node)) { node.forEach(assertGuestImports); return; }
+  if (Array.isArray(node)) {
+    node.forEach(assertGuestImports);
+
+    return;
+  }
+
   if (!isObject(node)) return;
+
   if (["ImportDeclaration", "ImportExpression"].includes(node.type)) rejectGuestImport(node.source);
+
   if (node.type === "CallExpression" && node.callee?.type === "Identifier" && node.callee.name === "require") rejectGuestImport(node.arguments?.[0]);
+
   for (const key of Object.keys(node)) {
     if (!["start", "end", "loc", "range"].includes(key)) assertGuestImports(node[key]);
   }
@@ -61,11 +70,12 @@ function prepareProgram(code) {
   const parsed = parseExpressionFunction(code);
   assertGuestImports(parsed.program ?? parsed.expression);
   const body = parsed.expression ? "return await (" + parsed.expressionSource + "\n)();" : code;
+
   const returns = parsed.expression
     ? parsed.expression.type === "ArrowFunctionExpression" && parsed.expression.body.type !== "BlockStatement" || hasReturn(parsed.expression.body)
     : hasReturn(parsed.program);
 
-  return { body, hasReturn: returns };
+  return { body, hasReturn: returns, sourceStart: parsed.sourceStart ?? 0, prefixLength: parsed.expression ? "return await (".length : 0 };
 }
 
 function admitData(data, cap) {
@@ -75,6 +85,7 @@ function admitData(data, cap) {
     const encoded = JSON.stringify(data);
 
     if (encoded === undefined) return { error: "data must be JSON-serializable" };
+
     if (encoded.length > cap) return { error: "data exceeds " + cap + " characters (serialized JSON: " + encoded.length + " UTF-16 characters); no commands ran. Split literal inputs across invocations; large text can use write({path,content,append:true}) chunks without omitting content" };
 
     return { data: JSON.parse(encoded) };
@@ -83,7 +94,9 @@ function admitData(data, cap) {
 
 function admitCode({ code, file, cap }) {
   if ((code === undefined) === (file === undefined)) return { error: "supply exactly one of code or file; no commands ran" };
+
   if (file === undefined && (!isString(code) || !code.trim())) return { error: "code must be a non-empty string" };
+
   if (file === undefined && code.length > cap) return { error: "code exceeds " + cap + " characters; split large writes into write({path,content,append:true}) chunks" };
 }
 
@@ -109,6 +122,7 @@ function admitGuest({ code, file, data, config }) {
 
   return { data: admitted.data, timeoutMs: timeout.timeoutMs };
 }
+
 export { admitGuest, prepareProgram };
 
 function rejectGuestImport(source) {
@@ -119,23 +133,43 @@ function rejectGuestImport(source) {
 
 function containingAwait(node, offset) {
   if (Array.isArray(node)) return node.map(child => containingAwait(child, offset)).find(Boolean);
+
   if (!isObject(node) || offset < node.start || offset >= node.end) return null;
+
   for (const child of Object.values(node)) {
     const found = containingAwait(child, offset);
+
     if (found) return found;
   }
+
   return node.type === "AwaitExpression" ? node : null;
 }
 
-// V8 points at 'await'; JSC points at the called function's parenthesis. Report
-// the enclosing await expression consistently, using source syntax, not offsets.
-export function normalizeGuestLocation(source, location) {
-  if (!location?.awaited) return location;
-  const {line, col} = location;
-  const prefix = source.split("\n").slice(0, line - 1).join("\n");
-  const offset = prefix.length + Number(line > 1) + col - 1;
-  try {
-    const node = containingAwait(parse(source, {...PARSE_OPTIONS, locations:true}), offset);
-    return node ? {line:node.loc.start.line, col:node.loc.start.column + 1} : location;
-  } catch { return location; }
+// V8 points at 'await'; JSC points at the call parenthesis. Resolve the await
+// in executable syntax, then undo wrapper/sliced-comment offsets. ECMAScript
+// line separators differ from file/JSONL LF framing.
+export function normalizeGuestLocation(source, location, prepared = { body: source }) {
+  if (!location) return location;
+  const body = prepared.body;
+  const lines = /\r\n|[\n\r\u2028\u2029]/g;
+  let start = 0;
+
+  for (let line = 1; line < location.line; line++) {
+    if (!lines.exec(body)) return null;
+    start = lines.lastIndex;
+  }
+
+  let offset = start + location.col - 1;
+
+  if (location.awaited) {
+    try { offset = containingAwait(parse(body, PARSE_OPTIONS), offset)?.start ?? offset; }
+    catch { /* Keep the engine's position when syntax cannot be recovered. */ }
+  }
+
+  offset += (prepared.sourceStart ?? 0) - (prepared.prefixLength ?? 0);
+
+  if (offset < 0 || offset > source.length) return null;
+  const original = source.slice(0, offset).split(/\r\n|[\n\r\u2028\u2029]/);
+
+  return { ...location, line: original.length, col: original.at(-1).length + 1 };
 }

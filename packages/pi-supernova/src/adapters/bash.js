@@ -1,5 +1,10 @@
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { canonicalNewPath } from "../fs/commit.js";
 import { readResult } from "../shared/result.js";
+import { truncateChars } from "../output/format.js";
+
+const BASH_CAPTURE_CHARS = 2 * 1024 * 1024;
 
 import { normalizeBash } from "../contract/bash.js";
 import { sourceForReferences } from "../fs/source-window.js";
@@ -20,7 +25,7 @@ export function createBash(ctx) {
       const command = String(params.command);
       const literal = Array.isArray(params.args);
       const argv = literal ? [command, ...params.args] : ["bash", "-c", command];
-      const targetCwd = await commandCwd(params, cwd);
+      const targetCwd = await commandCwd(params, cwd, vfs);
 
       const transactionBarrier = await vfs.prepareExternalMutation("bash");
       let res;
@@ -32,7 +37,7 @@ export function createBash(ctx) {
           commandLabel: command,
           timeoutMs: params?.timeoutMs === undefined ? config.timeoutMs : params.timeoutMs,
           signal,
-          maxOutputChars: config.maxCallResultChars,
+          maxOutputChars: BASH_CAPTURE_CHARS,
         });
       } catch (error) {
         if (!signal?.aborted) error.message += await sourceForReferences(cwd, targetCwd, error.message, signal, ledger);
@@ -43,6 +48,8 @@ export function createBash(ctx) {
         clearPathCache();
         hooks.workspaceChanged();
       }
+
+      if (res.outputTruncated) throw new Error("bash output exceeds " + BASH_CAPTURE_CHARS + " character capture limit; redirect output to a file and read it with complete:true or json");
 
       const { stdout, stderr } = res;
       let text = combineBashText(stdout, stderr);
@@ -55,11 +62,14 @@ export function createBash(ctx) {
         text += await sourceForReferences(cwd, targetCwd, text, signal, ledger);
       }
 
-      return {
-        content: [{ type: "text", text }],
-        details: { exitCode: res.exitCode, signal: res.signal, outputTruncated: res.outputTruncated, transactionBarrier },
-        isError: res.exitCode !== 0,
-      };
+      // Computation owns the complete captured value; traces/model output get
+      // only a bounded preview. Never feed a clipped JSON string to the guest.
+      const result = readResult(text, { exitCode: res.exitCode, signal: res.signal, outputTruncated: false, transactionBarrier },
+        truncateChars(text, config.maxCallResultChars, "command output").text);
+
+      result.isError = res.exitCode !== 0;
+
+      return result;
   }
 
   async function background(params, signal) {
@@ -71,7 +81,7 @@ export function createBash(ctx) {
 
     if (params.background === true) {
       await manager.validateStart(params, hooks.terminalGeneration);
-      targetCwd = await commandCwd(params, getCwd());
+      targetCwd = await commandCwd(params, getCwd(), vfs);
     } else manager.validateControl(params, owner, hooks.terminalGeneration);
     const transactionBarrier = mutating ? await vfs.prepareExternalMutation("bash") : false;
 
@@ -97,13 +107,33 @@ export function createBash(ctx) {
   return { bash };
 }
 
-async function commandCwd(params, cwd) {
+// Admit only directories that the pending file set will materialize. Checking
+// before the barrier keeps invalid cwd requests from committing unrelated files.
+async function stagedDirectory(target, vfs) {
+  const pending = vfs.getOverlayPaths();
+
+  if (!pending.length) return false;
+  const directory = await canonicalNewPath(target);
+  let found = false;
+
+  for (const logicalPath of pending) {
+    const file = await canonicalNewPath(logicalPath);
+
+    if (file === directory) return false;
+
+    if (file.startsWith(directory + path.sep)) found = true;
+  }
+
+  return found;
+}
+
+async function commandCwd(params, cwd, vfs) {
   const target = params.cwd ? await resolveWorkspacePath(cwd, params.cwd, "bash cwd", true) : cwd;
 
   if (params.cwd !== undefined) {
     const stat = await fs.stat(target).catch(() => null);
 
-    if (!stat?.isDirectory()) throw new Error("bash cwd is not a directory: " + params.cwd);
+    if (!stat?.isDirectory() && (stat || !await stagedDirectory(target, vfs))) throw new Error("bash cwd is not a directory: " + params.cwd);
   }
 
   return target;

@@ -10,6 +10,7 @@ import { REFERENCE } from "./src/runtime/reference.js";
 import { errorMessage, isString } from "./src/shared/decode.js";
 import { loadConfig } from "./src/config/config.js";
 import { createHostBridge } from "./src/bridge/host-bridge.js";
+import { NATIVE_NAMES } from "./src/bridge/native-tools.js";
 
 import { runGuestProgram, warmGuestWorker, stopWarmGuestWorker } from "./src/runtime/runtime.js";
 import { renderSupernovaCall, renderSupernovaResult } from "./src/ui/render.js";
@@ -65,11 +66,10 @@ export function registerCodeMode(pi) {
   function makeNovaApi(runBridge, cancel) {
     return {
       call: (name, args, onItem) => runBridge.call(name, args, onItem),
-      callMany: (calls) => runBridge.callMany(calls),
       speculateBegin: () => runBridge.barrier(() => runBridge.beginSpeculation()),
       speculateCommit: () => runBridge.barrier(() => runBridge.commitSpeculation()),
       speculateRollback: () => runBridge.barrier(() => runBridge.rollbackSpeculation()),
-      names: () => ["read", "edit", "write", "bash"],
+      names: () => NATIVE_NAMES,
       describeMemory: () => runBridge.describeMemory?.() ?? null,
       batchRead: runBridge.supportsBatchRead(),
       nativeArgv: runBridge.supportsNativeArgv?.() === true,
@@ -102,16 +102,18 @@ export function registerCodeMode(pi) {
   }
 
   async function runAndCommit(params, runCwd, runBridge, abortRun, runController, budget) {
+    const started = performance.now();
+    const timeoutMs = params?.timeoutMs === undefined ? config.timeoutMs : Number(params.timeoutMs);
     refreshCatalog(runBridge);
     runBridge.beginSpeculation();
 
-    const outcome = await runGuestProgram({
+    let outcome = await runGuestProgram({
       code: params?.code,
       file: params?.file,
       cwd: runCwd,
       data: params?.data,
       nova: makeNovaApi(runBridge, abortRun),
-      config: { ...config, maxLogLines: Math.max(0,config.maxLogLines-(budget?.logLines ?? 0)), timeoutMs: params?.timeoutMs === undefined ? config.timeoutMs : Number(params.timeoutMs) },
+      config: { ...config, maxLogLines: Math.max(0,config.maxLogLines-(budget?.logLines ?? 0)), timeoutMs },
       signal: runController.signal,
       onTimeout: abortRun,
     });
@@ -119,12 +121,33 @@ export function registerCodeMode(pi) {
     runBridge.close();
 
     if (outcome.ok) {
-      if (runBridge.getOverlayDepth() !== 1) throw new Error("program ended with an unfinished edit checkpoint; await it before returning");
-      await runBridge.commitSpeculation();
+      try {
+        if (runBridge.getOverlayDepth() !== 1) throw new Error("program ended with an unfinished edit checkpoint; await it before returning");
+        await commitBeforeDeadline(runBridge, runController, timeoutMs, started);
+      } catch (error) {
+        abortRun();
+        outcome = {ok:false,error:errorMessage(error),logs:outcome.logs,logTruncated:outcome.logTruncated};
+      }
     }
-    else while (runBridge.getOverlayDepth()) runBridge.rollbackSpeculation();
+
+    if (!outcome.ok) while (runBridge.getOverlayDepth()) runBridge.rollbackSpeculation();
+    outcome.wallMs = Math.round(performance.now() - started);
 
     return outcome;
+  }
+
+  async function commitBeforeDeadline(runBridge, controller, requestedTimeout, started) {
+    // The guest has finished, but its public invocation still owns the queued
+    // and on-disk commit. Carry the same admitted timeout through this phase.
+    const timeout = Math.max(1, Math.min(2147483647, Math.floor(requestedTimeout)));
+    const remaining = timeout - (performance.now() - started);
+    const expire = () => controller.abort(new Error("program timed out after " + Math.round(performance.now()-started) + "ms during final commit (timeoutMs=" + timeout + ")"));
+    const timer = remaining > 0 ? setTimeout(expire, remaining) : undefined;
+
+    if (remaining <= 0) expire();
+
+    try { await runBridge.commitSpeculation(); }
+    finally { clearTimeout(timer); }
   }
 
   function scheduleWarm(runController) {
@@ -172,6 +195,7 @@ export function registerCodeMode(pi) {
 
   pi.registerTool({
     name: "supernova",
+    exposure: "model-only",
     label: "Supernova",
     description: TOOL_DESCRIPTION,
     promptSnippet: "read, write, edit, bash",
@@ -230,6 +254,12 @@ export function registerCodeMode(pi) {
     },
   });
 
+  // Pi treats resolved execute() calls as successful, ignoring result.isError.
+  // Keep partial batch results/images intact and correct the final host status.
+  pi.on("tool_result", event => {
+    if (event.toolName === "supernova" && event.details?.ok === false) return { isError: true };
+  });
+
   // This is a pre-conversion observation, not a final-payload retention proof.
   // Shipping seenWindow:0 must not subscribe: a no-op listener still runs on every
   // provider context event. Opt-in windows register here.
@@ -263,7 +293,7 @@ export function registerCodeMode(pi) {
     handler: async (_args, ctx) => {
       bridge.bindCallContext(ctx);
       refreshCatalog();
-      const commands = ["read", "edit", "write", "bash"].filter(bridge.isCallable);
+      const commands = NATIVE_NAMES.filter(bridge.isCallable);
 
       const lines = [
         `Supernova CodeMode: ${commands.join(", ")}`,

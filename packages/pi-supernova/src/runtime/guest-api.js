@@ -47,6 +47,14 @@ function leanEnvelope(res) {
   return res;
 }
 
+// RPC and coalesced-read rejection callbacks run outside the awaiting guest's
+// stack. Recreate their error at this async boundary, only on failure, so V8 can
+// retain the guest await frames. Do not capture stacks on successful calls.
+async function withGuestStack(promise) {
+  try { return await promise; }
+  catch (error) { throw new Error(error.message, { cause: error.cause }); }
+}
+
 function swallow(promise) {
   promise.catch(() => {});
 
@@ -240,7 +248,7 @@ export function buildGuestApi(rpc, batchRead) {
   const invoke = (name, args) => {
     assertScope(); flushReads();
 
-    return swallow(rpc("call", [name, args]).then(leanEnvelope));
+    return swallow(withGuestStack(rpc("call", [name, args]).then(leanEnvelope)));
   };
 
   const read = async (p, a, b) => {
@@ -250,9 +258,13 @@ export function buildGuestApi(rpc, batchRead) {
 
     if (Array.isArray(p)) return await readManyPaths(read, args, p);
 
-    return !batchRead
-      ? unwrapRead(await invoke("read", args), args, noteReadPath)
-      : await enqueueCompatibleRead(readState, flushReads, args);
+    // Preserve streamed-item timing by restoring failures in this existing
+    // async boundary, not through another successful-path Promise hop.
+    try {
+      return !batchRead
+        ? unwrapRead(await invoke("read", args), args, noteReadPath)
+        : await enqueueCompatibleRead(readState, flushReads, args);
+    } catch (error) { throw new Error(error.message, { cause: error.cause }); }
   };
 
   const readFiles = new Set();
@@ -265,8 +277,18 @@ export function buildGuestApi(rpc, batchRead) {
     if (isString(envelope.sourcePath)) readFiles.add(envelope.sourcePath);
   }
 
-  const write = async (p, content) => {
-    const args = isObject(p) ? p : { path: p, content };
+  const write = async (p, content, options) => {
+    if (isObject(p) && (content !== undefined || options !== undefined)) throw new Error("write object form does not accept positional content or options");
+
+    if (options !== undefined && (!isObject(options) || Object.keys(options).some(key => !["append", "replace", "allowReadArtifacts"].includes(key)))) {
+      throw new Error("write options must be an object containing only append, replace, allowReadArtifacts");
+    }
+
+    const args = isObject(p) ? p : { ...options, path: p, content };
+
+    for (const key of ["append", "replace", "allowReadArtifacts"]) {
+      if (args[key] !== undefined && args[key] !== true && args[key] !== false) throw new Error("write " + key + " must be a boolean");
+    }
 
     if (args.append !== true && args.replace !== true && isString(args.path) && readFiles.has(args.path)) {
       throw new Error("file was already read this program; use edit(oldText, newText) or edit(view, ...). write({path,content,replace:true}) replaces anyway");

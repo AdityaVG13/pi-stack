@@ -11,8 +11,23 @@ The model submits JavaScript, not four separately advertised native tools.
 Ordinary JavaScript control flow remains available; the guest command bindings
 are only `read`, `edit`, `write`, and `bash`. Supernova supplies retrieval,
 transactional file operations, batching, bounded results and the grouped nova UI.
+There is no `supernova` object inside a program: use `await bash(...)`, not
+`const { bash } = supernova`. Do not shadow the four command names with variables.
 
-## What is new in 0.10.2
+## What is new in 0.11.0
+
+- Pi 0.99+ nested execution uses the current host invocation and its permissions;
+  optional `indexed:true` source lookup opens owned, editable source bytes.
+- Final commit deadlines, concurrent filesystem reads and atomic publication
+  keep transaction outcomes explicit under cancellation and contention.
+- Compact Nova cards retain successful call rows without source/JSON clutter;
+  Unicode layout reuse and dense-line scans reduce measured local costs.
+- Command capture, write options, JSON selectors and edit diagnostics fix
+  session-derived failures without weakening exact-match or workspace guards.
+- Image decoders retain ownership until close; repeated errors, watchdogs and
+  failed retries remain fail-closed. Background output preserves code points.
+
+### Previous release: 0.10.2
 
 - Results print the `mutations:` line only when it informs: files committed or
   rolled back, an uncertain filesystem outcome, or shell side effects left behind
@@ -62,7 +77,13 @@ pi install /path/to/pi-stack/packages/pi-supernova
 
 Image reads and returned images are validated with Sharp: at most 32 million
 decoded pixels across all frames, one image at a time, in a subprocess with a
-5-second kill deadline; text-only work never loads it. Keep Sharp's
+5-second kill deadline; text-only work never loads it. Exact-content cache hits
+do not wait for unrelated decoders. Cancelled queued validations withdraw without
+releasing the active decoder's memory slot. Decoder errors retain that slot and
+watchdog until the child closes; repeated errors keep the original diagnostic.
+Whole image reads and whole text
+windows sign their loaded bytes rather than rereading the file; partial windows
+still sign the complete file. Keep Sharp's
 platform-specific optional dependencies enabled. For a local checkout, refresh dependencies before starting
 the host:
 
@@ -75,11 +96,11 @@ between operating systems or CPU architectures. Published-package installation
 resolves these dependencies through the host's package manager.
 
 Git pushes do not update npm installations. Publish the new npm version first,
-then reinstall it in your host. To pin **0.9.0** once it is published:
+then reinstall it in your host. To pin **0.11.0** after it is published:
 
 ```bash
-pi install npm:pi-supernova@0.9.0
-omp install npm:pi-supernova@0.9.0
+pi install npm:pi-supernova@0.11.0
+omp install npm:pi-supernova@0.11.0
 ```
 
 In Pi, `pi list` shows the configured package sources. A local path uses that
@@ -114,9 +135,14 @@ settings. The runtime does not silently rewrite your tool policy.
 | `edit` | `edit(view,text)` CAS-replaces that span; `edit(view,old,new)` is unique inside it |
 | `edit` | `edit({path,patch})`; unified patch application |
 | `edit` | `edit(async () => {...})`; filesystem-only checkpoint, described below |
-| `write` | `write(path,text)`, `write({path,content})`; atomic replacement |
+| `write` | `write(path,text,options?)`, `write({path,content})`; atomic replacement |
 | `bash` | `bash(command,{cwd,timeoutMs})`, `bash({command,timeoutMs})`; bounded output, nonzero exits throw |
 | `bash` | `bash({command,args:[...]})`; literal executable argv, without shell expansion of argument strings |
+
+Patch hunks must advance past the preceding hunk's output region, including its
+context lines. Neither nominal matches nor relocation may consume earlier output;
+adjacent hunks at the boundary remain valid. A rejected patch leaves its target
+unchanged, and an uncaught rejection rolls back the current staged writes.
 
 `bash` also accepts `timeout` in seconds for familiar object arguments. `timeoutMs`
 is milliseconds and takes precedence. The owned adapter launches executable argv
@@ -129,6 +155,10 @@ Windows limits process command lines to 32K characters; use a workspace script f
 for larger payloads. Argument payloads are not repeated in owned direct-execution errors;
 stdout/stderr, exit status and source context remain. Session environment variables are taken
 from the current execution context, not inherited from a different parent session.
+Pending owned writes are committed before foreground or background launch. A `cwd`
+created by those writes is accepted, including in-workspace symlink spellings.
+Unrelated missing directories, file paths, and escaping paths still fail before
+pending files commit; bash remains forbidden inside an edit checkpoint.
 
 Shell strings are executed unchanged, including quoted executable paths. For inline
 Python/Node scripts, prefer literal argv with `data` instead of nested shell quotes:
@@ -175,7 +205,13 @@ not as an absent match. Do not combine incompatible modes such as `outline:true`
 and `evidence:true`.
 
 Ordinary reads stay self-contained. Outlines and graph evidence remain explicit
-options, not mandatory stages of source resolution. Ordinary calls also get:
+options, not mandatory stages of source resolution. Focused outlines collect
+lexical caller hints for all expanded declarations in one workspace scan. The
+per-name order and counts are preserved, staged callers stay visible, and the
+matching-row snapshot lives only for that outline. Existing index cache rules
+still apply; these hints are not semantic caller resolution. Focused text shaping
+for files without declarations skips the unrelated caller catalog entirely.
+Ordinary calls also get:
 
 - Bounded fuzzy filename hints when a bare source name has no literal match. Existing
   frecency/directory ranking orders hints; fuzzy matches never select a path. This
@@ -193,12 +229,52 @@ options, not mandatory stages of source resolution. Ordinary calls also get:
 Distant edit regions have separate windows and continuation pointers for omitted
 lines. Structural warnings and source windows are not substitutes for tests.
 
+### Optional indexed source discovery
+
+```js
+const view = await read({query:"formatLabel", path:"src/labels.js", indexed:true});
+if (view.status !== "found") return view;
+await edit(view, "label.trim()", "label.trimStart()");
+```
+
+This opt-in route uses a callable `isearch` tool (pi-indexer protocol 6), then
+performs Supernova's own byte read and returns an ordinary source view. Indexer
+text/fingerprints are locators, not read receipts or edit tokens. Returned paths
+must stay inside both the workspace and requested scope, including symlink targets.
+Canonical absolute locator paths for an aliased workspace are mapped back to its
+logical scoped path; this does not admit external paths or escaping symlinks.
+Multiple or incompletely selected candidates remain ambiguous. Staged writes use
+the existing overlay-aware resolver instead, so uncommitted source stays visible.
+Unavailable/disabled/excluded providers fail explicitly. The host's callable set
+is authoritative: on Pi v0.99, inactive `codemode`/`deferred` tools may remain
+callable, while hidden, model-only and inactive direct tools cannot be invoked.
+Normal call budgets and traces include the internal isearch operation.
+
+Pi v0.99 delegation uses the current tool invocation's `ctx.tools` and
+`ctx.executeTool()`. Indexer and host overrides pass through host validation,
+permissions, cancellation and nested tool hooks; a denied call never falls back
+to a captured raw executor. No legacy event-bus delegation runs on that path.
+Older Pi hosts can use the synchronous, version-1
+`pi-indexer:readonly-provider` handshake, bound to the active definition's schema
+identity and session. Exactly one provider is accepted; withdrawal, replacement,
+session changes and shutdown revoke access. That older read-only API does not
+replay nested Pi hooks. OMP keeps its native registry/approval route.
+
+Both packages work independently. Ordinary source reads retain their existing
+resolver. Explicit windows, about, evidence, outline and JSON cannot combine with
+indexed:true. Named edits already read source internally; no new blanket prior-read
+authorization rule is claimed. View-span comparison and commit CAS are unchanged.
+
 ### Safe read-modify-write
 
 A plain file read returns its complete text up to the **64 MiB UTF-8 I/O limit**,
 independently of model-facing character budgets. Explicit `offset`/`limit` reads
-return exact line windows, including long lines and LF/CRLF endings, or fail at
-the same byte ceiling. Staged and on-disk data obey the same ceiling.
+return exact line windows, including long lines, BOM characters and LF/CRLF
+endings, or fail at the same byte ceiling. Malformed UTF-8 fails rather than
+discarding bytes. Only JSON parsing consumes a leading BOM. Staged and on-disk
+data obey the same ceiling. Line-statistics scans adapt to dense newline regions
+after collecting the bounded preview, then return to native searches for sparse
+regions; counts, EOF handling and preview bytes remain unchanged.
 `complete:true` additionally rejects a window that omits part of the file.
 For larger files/JSONL, use a bounded parser through `bash({command,args})`.
 
@@ -206,6 +282,10 @@ Compute on the full value and return only what the model needs. A direct large
 return is an explicitly truncated display, not a complete artifact to parse or
 write back. `resolve:true` source previews retain path/range/continuation metadata;
 clipped previews are not editable. Prefer `edit` for replacements.
+Plain read text is not an editable view: pass the filename to `edit`, or use
+`read(path,{resolve:true})`. Overlong edit/patch paths fail with bounded recovery
+guidance instead of echoing a source body mistaken for a filename. Near-match
+previews show exact nearby bytes without guessing why a replacement failed.
 A write after reading that path still requires `edit` or explicit `replace:true`.
 Writes reject Supernova truncation markers, including legacy host-result markers.
 For intentionally writing literal marker documentation only, opt in with
@@ -213,7 +293,7 @@ For intentionally writing literal marker documentation only, opt in with
 full dataflow tracking or a security sandbox.
 
 Read/modify/write conflict checks retain a signature of the actual disk bytes,
-including for partial and large-file reads. A fresh explicit text read refreshes
+including for empty windows, partial and large-file reads. A fresh explicit text read refreshes
 that observation; internal receipt reads and body-cache eviction do not. Commits
 reject changed content and conflicting symlink aliases, including new file paths.
 These checks do not provide a cross-process lock or make shell/import mutations
@@ -278,7 +358,9 @@ an arbitrary JavaScript module or a Python/shell script.
 
 Program files must be regular UTF-8 files inside the workspace, including symlink
 targets. Invalid encoding, oversized input and syntax errors fail before commands;
-no truncated prefix is executed. Review untrusted source before running it.
+no truncated prefix is executed. A file changed during loading is rejected before
+compilation; diagnostic source windows omit unstable snapshots as well. Review
+untrusted source before running it.
 Use ordinary `edit` to revise saved programs. This is explicit source reuse, not
 conversation compression: prior calls and read results remain intact. Creation
 costs an additional call unless combined with other work, so prefer inline code
@@ -353,11 +435,14 @@ programs that depend on whole-input replacement keep that behavior unless the
 caller explicitly requests `mergeData:true`.
 
 The batch stops on the first failed entry, cancellation/deadline, or exhausted
-log/image budget. Display-text clipping does not stop execution or mark a
-successful batch failed. Earlier successful commits remain; only the active
+image budget. Display-text and console-log clipping do not stop execution or mark
+a successful batch failed; clipped logs set `details.logTruncated` and carry a
+bounded warning. Earlier successful commits remain; only the active
 program's uncommitted writes roll back. Admission errors throw before any program.
 Execution failures return a **typed stop report**, rather than throwing away prior
-results/images: isError and details.ok identify failure, details.programs contains
+results/images. A `tool_result` hook also projects the error flag into Pi, which
+otherwise treats a resolved tool call as successful. `isError` and `details.ok`
+identify failure, `details.programs` contains
 every attempted result, and details.attempted/total identifies unstarted work.
 Single code/file invocations retain their existing throwing behavior.
 
@@ -366,16 +451,19 @@ Set `parallel: true` with `programs` to run independent entries concurrently
 in submission order. A failed entry does not stop siblings. Two entries writing
 the same file race: the losing commit reports a conflict. Sequential remains the
 default. `parallel` and `mergeData` are invalid on a lone `code` or `file` call.
-Log/image budget overflow marks the batch failed and stops queued entries;
-already-running entries settle and their completed commits remain. Text overflow
-only clips the displayed result and sets `details.returnTruncated`; queued entries
-still run. Parallel execution does not multiply the aggregate allowances.
+Image budget overflow marks the batch failed and stops queued entries;
+already-running entries settle and their completed commits remain. Text/log
+overflow only clips delivery and sets `details.returnTruncated` or
+`details.logTruncated`; queued entries still run. Parallel execution does not multiply the aggregate allowances.
 
-The outer deadline, host-call budget, log allowance, text budget and image limits
-are shared across the batch. Individual read budgets are not reduced. Every
-attempted program's text is assembled in length-delimited blocks, then the combined
-display is clipped if necessary. Images retain program/image labels. Return
-summaries or use focused windows when you need every result to fit on display.
+The outer deadline, host-call budget, batch log allowance, text budget and image
+limits are shared across the batch. Batch `details.logs` stays capped at the log
+allowance; individual receipts retain their bounded per-program logs. Individual read budgets are not reduced. Every
+attempted program's text is assembled in length-delimited blocks. Oversized batches
+divide the available text budget among per-program previews, so a large success
+does not hide a later failure. Extremely small budgets may also clip the framing.
+Images retain program/image labels. Return summaries or use focused windows when
+you need complete results on display.
 
 Batch only continuations already chosen by the agent, such as edit then known
 verification, or create then run known audits. Keep a separate call whenever new
@@ -390,7 +478,10 @@ to serialized JSON `data`, including quote/newline escaping and object keys.
 Oversized input fails before commands run and reports its actual serialized size.
 Split larger documents into
 separate invocations: first `write(path, firstChunk)`, then
-`write({path,content:nextChunk,append:true})`. Append uses the complete internal
+`write({path,content:nextChunk,append:true})`. Positional `write(path,text,options)`
+also accepts `append`, `replace`, and `allowReadArtifacts` boolean flags. Unknown
+options and mixed object/positional signatures reject; options never override the
+path or content arguments. Append uses the complete internal
 file buffer, never a bounded model-facing read; it retains conflict checks and
 per-program rollback. Missing files are created. Multiple invocations are not
 one atomic transaction: for an all-or-nothing publication, assemble a new staging
@@ -399,6 +490,13 @@ file and publish it only when complete. External write overrides reject append.
 Supernova supports bounded foreground execution and session-owned background terminals
 (see below), not durable jobs across host restarts. For long archive scans, use a
 background terminal or resumable chunks and write progress records under `.work`.
+Owned foreground `bash` returns complete combined stdout/stderr to the program
+within a 2,097,152 UTF-16-code-unit capture ceiling; model/trace output remains a
+bounded preview. Exceeding the capture ceiling throws instead of returning
+corrupted partial JSON. Redirect larger output to a file and use
+`read({path,complete:true})` or JSON projection. External bash overrides remain
+authoritative and may have their own output limits.
+
 Foreground shell commands inherit the current program `timeoutMs` unless they
 specify their own; increasing the outer deadline no longer
 leaves a hidden 60-second shell cap. Set the inner `bash` timeout shorter than the
@@ -407,15 +505,67 @@ deadline covers **all** waits and commands, including `sleep`; a shell's own `ti
 command does not extend it. On a deadline or cancellation, the worker stops and
 pending host calls get a bounded 250ms drain to retain owned-shell diagnostics and
 finalize process termination. Non-cooperating host executors may still outlive that
-drain. Cancellation is reported separately from timeout; neither triggers a retry.
+drain. The same deadline covers the final workspace commit; cancelled queued
+commits withdraw without writing later or releasing another transaction's lock.
+Read-only results do not wait for that lock. In-progress filesystem I/O and safe
+rollback must settle before reporting completion, so they can extend elapsed time.
+Cancellation or session invalidation during publication triggers recovery, including
+on the final file. After a completed flush, cancellation keeps the committed files
+but prevents the pending external command from starting; those versions are not
+reported as rolled back.
+Cancellation is reported separately from timeout; neither triggers a retry.
 Progress files survive shell execution but staged VFS writes may roll back.
+Termination is a hard stop: guest `catch`/`finally` cleanup is not guaranteed to run.
 On macOS/Linux, foreground and background commands share process-group cleanup:
 normal leader exit, cancellation and timeout retire ordinary descendants before
 reporting completion. A shell's `command &` does not create a durable job; launch
 the long-running command itself with `background:true` instead.
 
-Large returned objects are bounded previews, not retained artifacts. Select fields
-and array windows before returning, rather than parsing a truncated preview.
+Filesystem paths preserve literal leading/trailing filename whitespace; malformed
+Unicode paths are rejected instead of aliasing replacement-character filenames.
+Owned text writes, appends, edits and patches require well-formed Unicode. Unpaired
+UTF-16 surrogates are rejected rather than silently encoded as replacement characters.
+Valid surrogate pairs, BOMs, combining characters and line endings are preserved.
+Use an explicit byte-writing command for non-UTF-8 file content.
+
+Large returned objects are bounded previews, not retained artifacts. Oversized
+named/record batches divide the display budget among sibling entries instead of
+letting the first file hide the rest. Clipped strings disclose their original
+UTF-16 length; collections that cannot fit disclose omitted item counts. Error
+messages escape lone surrogate code units before display budgeting, preserving
+valid Unicode and newlines. This
+does not shorten values inside the guest or create resumable artifact handles.
+Select fields and array windows before returning, rather than parsing a truncated
+preview; read explicit file windows when you need complete source.
+
+## TUI presentation
+
+Pi and OMP use the compact Nova result card. The default view stays anchored to
+its latest eight calls during execution and after completion, rather than jumping
+back to the earliest operations. Completion is explicitly labelled.
+
+- Successful collapsed cards show call rows, not returned source or JSON bodies;
+  expand to inspect the result. JavaScript-only runs still show a short result.
+  Latest-change previews use five diff rows; failures keep at most eight
+  diagnostic rows with expansion hints. Failed or rolled-back changes are
+  labelled as attempts, not successful persistence.
+- Expansion shows up to 24 recent calls, up to 24 diff rows per operation, logs,
+  and a larger result preview. It is not an unlimited transcript or file artifact.
+- Partial updates deliver the latest state on a coalesced 32 ms cadence (about
+  31 updates/second at most), not one repaint per operation. Completion cancels
+  queued updates; snapshot frames do not change after delivery.
+- Each displayed value has a 32,000-character UI text budget before layout.
+  Long strings retain a labelled head/tail preview; clipping does not shorten
+  the machine-facing value. Select fields or read explicit source windows when
+  complete content is needed. Expansion does not remove the UI text budget.
+- Printable ASCII wraps in bulk; Unicode uses grapheme-aware wrapping. Each card
+  retains one bounded, uncolored result layout across repaints and expansion.
+  Content or width changes replace it; theme invalidation still repaints all rows.
+  Terminal-width safety remains part of the renderer contract.
+
+These are package-owned renderers using the host TUI, not modifications to Pi or
+a second terminal renderer. Headless host checks establish layout and repaint
+contracts, not live-terminal frame-rate, subjective smoothness or model speed.
 
 ## Background terminal sessions
 
@@ -467,7 +617,10 @@ return await bash({action:"list"});
 - `cursor` is an absolute UTF-16 output offset. Pass the previous cursor for
   incremental output, or omit it to replay retained output. stdout/stderr share
   a 65,536-character tail. `truncated:true` and `outputStart` disclose discarded
-  history; polling does not consume it. `waitMs` is 0--30,000 (default 0).
+  history; polling does not consume it. A retained boundary or manually supplied
+  cursor inside a UTF-16 pair advances to the next complete code point, with
+  `outputStart` and `truncated:true` disclosing the skipped partial character.
+  `waitMs` is 0--30,000 (default 0).
 - Input is literal, at most 16,384 characters per call. Include `\n` for Enter
   and `\u0003` for Ctrl-C in a PTY. Input is not echoed into tool traces, but
   the child/terminal may echo it into output. Do not send secrets casually.
@@ -519,6 +672,9 @@ return {verdict, values};
 ```
 
 Selectors support "." (root), .field, .nested[0], .items[0:10], and .["quoted.key"].
+Hyphenated names such as `.credentials.openai-codex` are literal own-property
+keys, not subtraction. Other punctuation and leading hyphens use quoted keys;
+selectors still never evaluate code or traverse prototypes.
 Use json:true for the complete parsed value. Put the selector in `json`
 (`json:".field"`), not a second `selector` key; a leftover `selector` folds
 when `json` is absent, `true`, or `"."`. Selectors are not full jq: pipes,
@@ -534,7 +690,9 @@ separate **64 MiB estimated storage limit per read**, including aggregate
 multi-selector expansion. Within it, arrays/objects/scalars retain their actual
 values, even when larger than the display. No routing object is substituted:
 `.map` and `.filter` work on the selected array. Multi-selector values remain
-independently mutable. The input/storage safety limits throw with guidance.
+independently mutable. Storage accounting charges scalar strings in the same
+pass rather than retaining a second string worklist; container and alias
+accounting, aggregate limits and failure guidance are unchanged.
 Plain .json reads are raw text, including malformed JSON; parsing is requested
 only by `json`. Explicit line windows are not necessarily JSON documents.
 Do not combine json with complete, line windows, or source views. External read
@@ -561,6 +719,11 @@ For focused Markdown/log audits, use read(path,{about:"document path"}) or
 explicit offset/limit. Use complete reads for computation within the 64 MiB
 ceiling, and return a summary. JSON over 16 MiB needs a streaming parser via bash. Arbitrary returned objects still have bounded previews, not implicit
 continuation handles.
+
+Successful subprocess cleanup wakes on pipe closure rather than waiting for the
+fallback poll. Completion still requires both closed output pipes and retired
+owned POSIX process groups; cancellation, escalation and cleanup deadlines are
+unchanged. This applies to source-search subprocesses and background terminals.
 
 ## Execution and automatic batching
 
@@ -606,12 +769,20 @@ process-memory or security boundary.
 File changes are staged until program success. A throw before an external-mutation
 barrier rolls them back. Shell execution flushes preceding changes; external shell
 side effects cannot be rolled back. Stale commits fail explicitly rather than
-silently overwriting successful concurrent changes. This is not a cross-process
-filesystem lock. Outcomes explicitly report committed/rolledBack **file versions**
+silently overwriting successful concurrent changes. New files use atomic
+no-clobber publication, so filesystem-equivalent names and destinations created
+during staging conflict rather than replace existing data. This requires hard-link
+support on the workspace filesystem; unsupported creation fails without an unsafe
+rename/copy fallback. Existing files recheck their observed version after staging
+and before atomic replacement. These checks are not a cross-process filesystem
+lock. Outcomes explicitly report
+committed/rolledBack **file versions**
 (counted per flush/checkpoint, not unique paths) and external-call attempts. A
 successful inner checkpoint merges into the program, not necessarily onto disk.
-Pending commits or failed recovery are reported as uncertain: inspect disk and
-recovery backups before retrying. Import-based mutations and shell side effects
+Recovery checks destinations against the bytes this transaction published before
+restoring or removing them. Detected intervening changes remain intact, and any
+original backup is retained. Pending commits or failed recovery are reported as
+uncertain: inspect disk and recovery backups before retrying. Import-based mutations and shell side effects
 are outside the VFS counters; this is not a filesystem audit.
 
 `edit(async () => {...})` creates a nested filesystem checkpoint. It returns
@@ -632,6 +803,9 @@ or a worker deadline can prevent cleanup from running.
 
 - Plain reads are not replaced with earlier-context references. A local cache hit
   is not proof the model still retains an earlier result after compaction.
+- Concurrent windows into the same observed file version share only an in-flight
+  conflict-signature hash. Completed hashes are not a read cache; every window
+  still checks its own version, and writes retain compare-and-swap validation.
 - Text and JSON computation is independent of display limits. Source previews
   provide exact continuation; raw displayed text can be clipped and must not be
   parsed as a complete file. I/O/storage limits still fail explicitly.
@@ -682,7 +856,7 @@ provides an advisory `workspace:changed` event for independent cache/index consu
 `cwd` identifies the calling workspace. `paths` contains absolute file paths after
 a successful disk flush; paths may contain filesystem aliases. The frozen event
 and path array contain no source text. Checkpoint merges, restored rollbacks, and
-read-only programs emit nothing. A shell boundary can flush paths before a later
+read-only programs emit no change event. A shell boundary can flush paths before a later
 program failure, so notifications are not conditional on overall tool success.
 
 `paths: null` means the changed paths are unknown: shell or delegated mutation
@@ -696,6 +870,29 @@ Observer failures cannot roll back writes. This is an optional extension convent
 not a built-in host standard, durable event log, or cross-process filesystem watcher.
 There is no dependency on or automatic routing to any consumer package.
 
+### Optional file-read receipts
+
+A successful program may emit `workspace:read` with the same frozen
+`{version:1,cwd,paths}` envelope, containing at most 256 distinct absolute paths.
+These are file-open hints from native on-disk text reads, not source versions or
+proof that the model saw the text. A program can summarize a read and still
+qualify. Receipts cover ordinary, ranged and resolved text reads, including
+inline/streamed batches; paths may contain filesystem aliases.
+
+Provenance is carried by a private host-side marker, never inferred from source
+content, result-shaped JSON or the truncated tool trace. Staged overlay reads,
+empty windows, failed reads, JSON projections, directories, images and
+structural/focused-only outputs do not qualify. Failed programs publish no read
+receipt; caught read failures do not discard successfully delivered siblings.
+Checkpoint merges do not publish before outer program success. Successful earlier
+programs in a later-failing batch may already have published, like disk commits.
+
+`pi.events.on("workspace:read", handler)` is optional, synchronous and best-effort.
+Subscriber errors do not fail the read/program, and there is no import or
+requirement on an indexer, cache or memory service. A consumer should deduplicate
+these hints and apply its own repository/inclusion rules; this is neither a
+complete I/O audit nor an authenticated or durable cross-process event stream.
+
 ## Security and host boundary
 
 CodeMode executes trusted JavaScript in a terminable worker, **not a security
@@ -706,13 +903,29 @@ or a separately authorized external command. Errors identify the rejected path
 and workspace, including symlink escapes. JavaScript imports and shell commands still have process
 privileges. Do not run untrusted programs as though these adapters isolate them.
 
-Pi preflights the outer `supernova` call. Internal primitives do not emit ordinary
-native `tool_call` events, so third-party guards that only recognize top-level
-`edit` or `bash` need CodeMode-aware handling. Configured exclusions and supported
+Pi preflights the outer `supernova` call. It registers with `model-only` exposure
+on hosts supporting that contract, preventing recursive invocation by native
+codemode. The guest surface is still exactly `read`, `write`, `edit`, and `bash`;
+this does not expose arbitrary registered tools as guest functions.
+
+Owned filesystem primitives keep their transactional adapters and do not emit
+ordinary native `tool_call` events, so third-party guards that only recognize
+top-level `edit` or `bash` need CodeMode-aware handling. On Pi v0.99, delegated
+host overrides and indexed discovery emit real nested hooks with the host's
+parent IDs. Their usage is aggregated by Pi, not added again by Supernova. Configured exclusions and supported
 host-session execution safeguards remain enforced. Guards inspecting code/file
 inputs must also understand the programs array; its entries do not emit separate
 top-level tool_call events. Actual-host smoke checks are
 not a claim that every third-party permission extension has been validated.
+
+Delegated tools with `outputSchema` can return `structuredContent`: successful
+values reach the existing command as data, independently of UI text/details.
+Oversized structured values become explicitly clipped JSON display strings under
+`maxCallResultChars`, never silently reshaped objects or complete-file claims.
+Host errors still throw through the guest command, even when the nested outcome
+stores its error flag outside the result. Redaction hooks can remove structured
+content; Supernova then uses the redacted text rather than stale data. Use explicit
+`read({path:...})` for remote filenames that could otherwise look like symbols.
 
 ## Development and evidence
 
@@ -849,6 +1062,9 @@ not hard real-time guarantees.
 It excludes model latency, provider tokens and prewarm time; it is not a universal
 comparison against every CodeMode implementation.
 
+Supernova retains its own execution engine and supported public Pi/OMP host
+APIs. A rebase onto native Pi codemode is not part of this release.
+
 See [the changelog](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/CHANGELOG.md) for changes and compatibility notes.
 
 ## Research and prior art
@@ -869,3 +1085,21 @@ an additional model call are not silently invoked by the tools.
 ## License
 
 MIT. fff is © Dmitriy Kovalenko and contributors, also MIT.
+
+### Reviewed concurrency and ranking boundaries
+
+Owned reads reject a view if an in-process Supernova commit overlapped its read path or search scope; disk text, window and image observations settle pending commits before publishing or validating their baseline. Query/evidence views use the same read-revision check. A rejected view must be retried. This is conservative within a directory/search scope, not a repeatable-read or multi-file snapshot promise. Read cancellation does not release another transaction's commit ownership. Staged overlay reads remain speculative by design.
+
+Markdown `about` reads use bounded keyword windows over prose and code blocks, not declaration outlines. Unmatched terms report no matching text.
+
+Existing destinations with multiple hard links are refused rather than silently splitting their aliases. Other processes, older Supernova instances, delegated tools and shell commands do not participate in the in-process protocol. In particular, existing-file version checks still have a check-to-rename race against an uncooperative external writer, including during recovery. Portable Node provides no atomic exchange/compare-and-swap primitive here; **external-writer losslessness is not established**. Failed recovery continues to retain backups and report uncertain state.
+
+Frecency capacity eviction is now LRU. Fuzzy matching uses a length-preserving lowercase projection so expanding characters cannot shift source offsets or filename bonuses; it preserves contextual lowercase but is not full Unicode normalization. Evidence ranking remains heuristic: min-max fusion is outlier-sensitive and fixed-iteration floating-point PageRank is approximate, not a certified converged ranking.
+
+### Read-only reference outlines
+
+`read({path, outline:true})` uses the same read-only filesystem path rules as
+plain reads, including absolute external references and symlinks to them.
+The outline remains bounded to a 2 MiB source read. This does not grant external
+write or edit access; those operations still require workspace admission, and
+a denied mutation rolls back pending workspace writes before a barrier.

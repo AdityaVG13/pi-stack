@@ -13,8 +13,9 @@ const mutationTotals = results => results.reduce((total, result) => {
   return total;
 }, {committed:0,rolledBack:0,external:0,pendingCommits:0,recoveryFailed:false});
 
-export function programBatchText(results, total, stopped = "", failed = 0) {
+export function programBatchText(results, total, stopped = "", failed = 0, texts = results.map(textOf)) {
   const m = mutationTotals(results);
+
   const summary = stopped
     ? "error: programs stopped: " + stopped + " " + results.length + "/" + total
     : failed > 0
@@ -22,9 +23,7 @@ export function programBatchText(results, total, stopped = "", failed = 0) {
       : "ok: programs " + results.length + "/" + total;
 
   return summary +
-    (m.recoveryFailed || m.pendingCommits ? "; filesystem outcome uncertain: inspect disk" : "") + "\nresults (UTF-16 lengths):\n" + results.map((result,i) => {
-      const text = textOf(result);
-
+    (m.recoveryFailed || m.pendingCommits ? "; filesystem outcome uncertain: inspect disk" : "") + "\nresults (UTF-16 lengths):\n" + texts.map((text,i) => {
       return "[" + i + "] " + text.length + "\n" + text + "\n";
     }).join("");
 }
@@ -98,12 +97,10 @@ class ProgramBatch {
   }
 
   parallelBudgetStop(settled) {
-    const results = settled.filter(Boolean);
     const {images, bytes} = imageTotals(settled);
-    let kind;
-    if (images > 16 || bytes > 20 * 1024 * 1024) kind = "image";
-    else if (results.some(result => result.details?.logTruncated) || results.reduce((n, result) => n + (result.details?.logs?.length ?? 0), 0) > (this.config.maxLogLines ?? 100)) kind = "log";
-    return kind ? "batch " + kind + " budget exceeded; completed commits remain" : "";
+
+    return images > 16 || bytes > 20 * 1024 * 1024
+      ? "batch image budget exceeded; completed commits remain" : "";
   }
 
   async runParallel() {
@@ -134,10 +131,8 @@ class ProgramBatch {
     if (this.imageDropped) stopped = "batch image budget exceeded; remaining programs did not run";
 
     if (result.details?.ok === false) stopped = "program " + (i+1) + " failed; remaining programs did not run; earlier commits remain";
-    // Display clipping is not an execution failure. Finish every requested entry
-    // unless a real execution/resource limit stops it; boundedText caps delivery.
-
-    if (result.details?.logTruncated) stopped ||= "batch log budget exceeded; remaining programs did not run; earlier commits remain";
+    // Text/log clipping is not an execution failure. Finish every requested
+    // entry unless a real execution/resource limit stops it; delivery is bounded.
 
     // The deadline explains a killed program better than "program N failed".
     if (this.combined.aborted || performance.now() >= this.deadline) stopped = "batch deadline or cancellation; earlier commits remain" + this.deadlineNote();
@@ -162,18 +157,35 @@ class ProgramBatch {
     return this.stopped || (this.parallel && failed ? failed + " program" + (failed>1?"s":"") + " failed" : undefined);
   }
 
-  boundedText(failed) {
-    const note = this.imageDropped && !this.stopped ? "some images dropped: batch image budget" : "";
+  boundedText(failed, logTruncated) {
+    const note = [
+      this.imageDropped && !this.stopped ? "some images dropped: batch image budget" : "",
+      logTruncated ? "logs truncated: batch log budget" : "",
+    ].filter(Boolean).join("; ");
 
-    return truncateChars(programBatchText(this.results,this.programs.length,this.stopped,this.parallel ? failed : 0) + (note ? "; " + note : ""),Math.max(0,this.config.maxReturnChars-this.imageTextChars()),"batch output");
+    const limit = Math.max(0, this.config.maxReturnChars - this.imageTextChars());
+    const texts = this.results.map(textOf);
+    const render = previews => programBatchText(this.results, this.programs.length, this.stopped, this.parallel ? failed : 0, previews) + (note ? "; " + note : "");
+    const text = render(texts);
+
+    if (text.length <= limit) return { text, truncated: false };
+    const marker = "\n[batch output truncated; per-program previews]";
+    // Reserve framing and length digits before dividing space. Clipping the
+    // combined string can erase an entire program, including its error reason.
+    const overhead = render(texts.map(() => "")).length + marker.length + texts.length * String(limit).length;
+    const share = Math.max(0, Math.floor((limit - overhead) / Math.max(1, texts.length)));
+    const previews = texts.map(value => truncateChars(value, share, "program output").text);
+
+    return { ...truncateChars(render(previews) + marker, limit, "batch output"), truncated: true };
   }
 
   finish() {
     const failed = this.results.filter(result => result.details?.ok === false).length;
-    const bounded = this.boundedText(failed);
-    const content = [{type:"text",text:bounded.text}];
     const logs = this.results.flatMap(result => result.details?.logs ?? []);
     const logLimit = this.config.maxLogLines ?? 100;
+    const logTruncated = logs.length > logLimit || this.results.some(result=>result.details?.logTruncated);
+    const bounded = this.boundedText(failed, logTruncated);
+    const content = [{type:"text",text:bounded.text}];
     this.images.forEach((image,i) => content.push({type:"text",text:this.imageLabels[i]},image));
 
     // Return a typed stop report instead of throwing away earlier results/images.
@@ -182,7 +194,7 @@ class ProgramBatch {
       programs:this.results,attempted:this.results.length,total:this.programs.length,stopped:this.stopped,parallel:this.parallel,
       result:bounded.truncated ? bounded.text : this.results.map(result=>result.details?.result),
       returnTruncated:bounded.truncated || this.results.some(result=>result.details?.returnTruncated),
-      logTruncated:logs.length > logLimit || this.results.some(result=>result.details?.logTruncated),logs:logs.slice(0,logLimit),trace:this.trace,mutations:mutationTotals(this.results)}};
+      logTruncated,logs:logs.slice(0,logLimit),trace:this.trace,mutations:mutationTotals(this.results)}};
   }
 
   async run() {
@@ -208,11 +220,13 @@ function imageBlocks(result) {
 
 function imageTotals(settled) {
   let images = 0, bytes = 0;
+
   for (const result of settled) {
     for (const block of imageBlocks(result)) {
       images++;
       bytes += Buffer.byteLength(block.data, "base64");
     }
   }
+
   return {images, bytes};
 }

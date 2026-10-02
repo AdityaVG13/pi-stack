@@ -5,6 +5,12 @@ import path from "node:path";
 import { runGuestProgram, warmGuestWorker, stopWarmGuestWorker, formatMemoryAttribution } from "../../src/runtime/runtime.js";
 import { engineFixture, limits } from "../helpers/engine.mjs";
 import { runCommand } from "../../src/fs/workspace.js";
+import { acquireWorker, killWorker } from "../../src/runtime/worker-pool.js";
+import { EventEmitter, once } from "node:events";
+import { spawn } from "node:child_process";
+import { retireProcessTree } from "../../src/fs/process-tree.js";
+import timerPromises from "node:timers/promises";
+import { syncBuiltinESMExports } from "node:module";
 
 it("recursive source watchers do not keep an otherwise idle host alive", async t => {
   const f = await engineFixture(t);
@@ -14,10 +20,30 @@ it("recursive source watchers do not keep an otherwise idle host alive", async t
 
   const code = `import {registerCodeMode} from ${JSON.stringify(moduleUrl)};
     let tool; registerCodeMode({registerTool(t){tool=t;},registerCommand(){},on(){}});
-    await tool.execute("idle",{code:'return await read({query:"value",evidence:true});'},undefined,undefined,{cwd:${JSON.stringify(f.root)}});`;
+    await tool.execute("idle",{code:'return await read({query:"value",evidence:true});'},undefined,undefined,{cwd:${JSON.stringify(f.root)}});
+    process.send("ready"); process.disconnect();`;
 
-  const result = await runCommand([process.execPath, "--input-type=module", "-e", code], {timeoutMs:1500});
-  assert.equal(result.exitCode, 0);
+  const child = spawn(process.execPath, ["--input-type=module", "-e", code], {stdio:["ignore","ignore","pipe","ipc"]});
+  const closed = once(child,"close");
+  const ready = once(child,"message",{signal:AbortSignal.timeout(10000)});
+  let stderr = "";
+
+  child.stderr.on("data",chunk=>{stderr += chunk.toString();});
+  closed.catch(()=>{});
+
+  try {
+    const [message] = await Promise.race([ready,closed.then(()=>{throw Error("idle host exited before ready: " + stderr);})]);
+    assert.equal(message,"ready");
+    // Startup/indexing has its own allowance. Only an initialized, idle host
+    // must exit in 1.5s, so parallel load cannot consume the idle deadline.
+    const idle = once(child,"close",{signal:AbortSignal.timeout(1500)});
+    const [code,signal] = await Promise.race([closed,idle]);
+    assert.equal(signal,null,stderr);
+    assert.equal(code,0,stderr);
+  } finally {
+    child.kill("SIGKILL");
+    await closed;
+  }
 });
 
 it("cancelling a program prevents surviving shell descendants from writing later", {skip:process.platform === "win32"}, async t => {
@@ -147,6 +173,7 @@ it("the outer program deadline retains pending shell diagnostics and finalizes i
     const row = error.supernovaResult.details.trace.find(row => row.name === "bash");
     assert.equal(row.ok, false);
     assert.match(row.error, /OUTER_TIMEOUT_DIAGNOSTIC/);
+
     return true;
   });
   assert.equal((await f.execute("return 42;")).details.result, 42);
@@ -160,12 +187,14 @@ it("explicit cancellation is not described as a timeout needing a larger limit",
   }, {cwd:f.root}), error => {
     assert.match(error.message, /aborted/);
     assert.doesNotMatch(error.message, /timed out|allow longer runs/);
+
     return true;
   });
 });
 
 it("unrelated host memory cannot fail a tiny guest or cancel its host call", async () => {
   let retained, cancelled = false;
+
   const outcome = await runGuestProgram({
     code: 'return await read("gate.txt");', config: {...limits, maxHeapMb: 32, timeoutMs: 5000},
     nova: {
@@ -173,10 +202,12 @@ it("unrelated host memory cannot fail a tiny guest or cancel its host call", asy
       call: async () => {
         retained = Buffer.alloc(96 * 1024 * 1024, 1);
         await new Promise(resolve => setTimeout(resolve, 150));
+
         return "small result";
       },
     },
   });
+
   assert.equal(retained.length, 96 * 1024 * 1024);
   assert.equal(outcome.ok, true, outcome.error);
   assert.equal(outcome.result, "small result");
@@ -188,6 +219,7 @@ it("worker-local external allocations still trip the memory guard", async () => 
     code: 'globalThis.retained = Buffer.alloc(80 * 1024 * 1024, 1); await new Promise(resolve => setTimeout(resolve, 250)); return retained.length;',
     config: {...limits, maxHeapMb: 32, timeoutMs: 5000},
   });
+
   assert.equal(outcome.ok, false);
   assert.match(outcome.error, /guest exceeded memory limit/);
   assert.match(outcome.error, /worker heap .*external/);
@@ -197,6 +229,7 @@ it("worker-local external allocations still trip the memory guard", async () => 
 it("a memory failure cancels and drains an already pending host call", async () => {
   let release, drained = false;
   const cancelled = new Promise(resolve => { release = resolve; });
+
   const outcome = await runGuestProgram({
     code: 'setTimeout(() => { globalThis.retained = Buffer.alloc(80 * 1024 * 1024, 1); }, 40); return await read("gate.txt");',
     config: {...limits, maxHeapMb: 32, timeoutMs: 5000},
@@ -210,6 +243,7 @@ it("a memory failure cancels and drains an already pending host call", async () 
       },
     },
   });
+
   assert.equal(outcome.ok, false);
   assert.match(outcome.error, /guest exceeded memory limit/);
   assert.equal(drained, true, "memory failure must wait for cooperative host cleanup");
@@ -220,6 +254,7 @@ it("synchronous guest heap growth fails without poisoning the next guest", async
     code: 'const retained = []; for (let i = 0; i < 100; i++) retained.push(new Array(100000).fill(i)); return retained.length;',
     config: {...limits, maxHeapMb: 32, timeoutMs: 5000},
   });
+
   assert.equal(outcome.ok, false);
   assert.match(outcome.error, /memory limit|out of memory/);
   const next = await runGuestProgram({code: "return 42;", config: {...limits, maxHeapMb: 32, timeoutMs: 5000}});
@@ -230,15 +265,19 @@ it("synchronous guest heap growth fails without poisoning the next guest", async
 it("an I/O safety-limit failure cancels sibling JSON reads without killing the host", async t => {
   const f = await engineFixture(t);
   const oversized = await fs.open(path.join(f.root,"oversized.txt"),"w");
+
   try { await oversized.truncate(64*1024*1024+1); } finally { await oversized.close(); }
+
   await f.write("report.json", JSON.stringify({ rows: Array(20000).fill({ value: "sibling read" }) }));
   const moduleUrl = new URL("../../index.js", import.meta.url).href;
   const runtimeUrl = new URL("../../src/runtime/runtime.js", import.meta.url).href;
+
   const program = `await write("pending.txt", "must roll back");
     return await Promise.all([
       read("oversized.txt", {complete:true}),
       ...Array.from({length:6}, () => read({path:"report.json", json:".rows[0:2]"})),
     ]);`;
+
   // An uncaught stream error can arrive after execute() has already rejected.
   // Keep that failure in a disposable process, and also prove the next call works.
   const code = `import assert from "node:assert/strict";
@@ -254,8 +293,94 @@ it("an I/O safety-limit failure cancels sibling JSON reads without killing the h
     await stopWarmGuestWorker();
     await new Promise(resolve => setTimeout(resolve, 50));
     console.log("survived sibling cancellation and eight follow-up calls");`;
+
   const result = await runCommand([process.execPath, "--input-type=module", "-e", code], {timeoutMs:15000});
   assert.equal(result.exitCode, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /survived sibling cancellation/);
   await assert.rejects(fs.stat(path.join(f.root, "pending.txt")), {code:"ENOENT"});
+});
+
+
+it("shutdown during cold startup does not resurrect an idle worker", async () => {
+  await stopWarmGuestWorker();
+  const active = acquireWorker(limits);
+
+  try {
+    await stopWarmGuestWorker();
+    await active.ready;
+    const lateWorker = stopWarmGuestWorker();
+    await lateWorker;
+    assert.equal(lateWorker, undefined, "a stopped pool must not create a delayed successor");
+    await warmGuestWorker(limits);
+    const restarted = stopWarmGuestWorker();
+    assert.ok(restarted, "an explicit new session may prewarm again");
+    await restarted;
+  } finally {
+    await killWorker(active);
+    await stopWarmGuestWorker();
+  }
+});
+
+
+function controlledRetirementTimers(t) {
+  t.mock.timers.enable({apis:["setTimeout"]});
+  // MockTimers cannot replace a previously captured timers/promises binding.
+  const timer = t.mock.method(timerPromises,"setTimeout",ms=>new Promise(resolve=>setTimeout(resolve,ms)));
+  syncBuiltinESMExports();
+  t.after(()=>{timer.mock.restore();syncBuiltinESMExports();});
+}
+
+it("closed pipes wake retirement without waiting for the fallback poll", async t => {
+  controlledRetirementTimers(t);
+  const child = new EventEmitter();
+  const job = {child,processExited:true,processClosed:false,groups:new Set(),killedGroups:new Set()};
+  let settled = false;
+  const retirement = retireProcessTree(job).then(()=>{settled=true;});
+
+  try {
+    assert.equal(settled,false,"The process must still own its open output pipes");
+    job.processClosed = true;
+    child.emit("close");
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(settled,true,"A real close notification must finish retirement without advancing the poll clock");
+    assert.equal(child.listenerCount("close"),0,"Retirement must release its close listener");
+  } finally {
+    t.mock.timers.tick(10);
+    await retirement;
+  }
+});
+
+it("closed pipes do not release ownership while a POSIX process group survives", async t => {
+  controlledRetirementTimers(t);
+  const child = new EventEmitter();
+  const job = {child,processExited:true,processClosed:true,groups:new Set(process.platform==="win32"?[]:[123456]),killedGroups:new Set()};
+  let groupGone = false,settled = false;
+  t.mock.method(process,"kill",()=>{
+    if (groupGone) throw Object.assign(new Error("group gone"),{code:"ESRCH"});
+
+    return true;
+  });
+
+  const retirement = retireProcessTree(job).then(()=>{settled=true;});
+
+  if (process.platform==="win32") {
+    await retirement;
+    assert.equal(settled,true);
+
+    return;
+  }
+
+  try {
+    t.mock.timers.tick(150);
+    await new Promise(resolve=>setImmediate(resolve));
+    child.emit("close");
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(settled,false,"Inherited output closing is not proof that all owned processes exited");
+  } finally {
+    groupGone = true;
+    t.mock.timers.tick(10);
+    await retirement;
+  }
+
+  assert.equal(job.groups.size,0);
 });

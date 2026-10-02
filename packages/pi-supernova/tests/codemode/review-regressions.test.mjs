@@ -10,21 +10,28 @@ import { createHostBridge } from "../../src/bridge/host-bridge.js";
 for (const append of [false, true]) it(`partial-read CAS rejects external changes before ${append ? "append" : "overwrite"}`, async t => {
   const f = await engineFixture(t);
   await f.write("state.txt", "old\ntail\n");
+
   const { pending, gate } = gatedExecute(f, `
     const previous = await read("state.txt", 1, 1);
     ${GUEST_GATE_POLL}
     await write({path:"state.txt",content:previous,append:${append},replace:true});
   `, record => record.name === "read" && record.ok === true);
+
+  // Observe the expected rejection before publishing go.txt: the guest may
+  // finish while the host is still awaiting that asynchronous write.
+  const rejected = assert.rejects(pending, /write conflict/);
+
   await gate;
   await fs.writeFile(path.join(f.root, "state.txt"), "external\ntail\n");
   await f.write("go.txt", "go");
-  await assert.rejects(pending, /write conflict/);
+  await rejected;
   assert.equal(await fs.readFile(path.join(f.root, "state.txt"), "utf8"), "external\ntail\n");
 });
 
 it("a fresh partial reread replaces the old full-read CAS snapshot", async t => {
   const f = await engineFixture(t);
   await f.write("state.txt", "old\ntail\n");
+
   const { pending, gate } = gatedExecute(f, `
     await read("state.txt");
     ${GUEST_GATE_POLL}
@@ -32,6 +39,7 @@ it("a fresh partial reread replaces the old full-read CAS snapshot", async t => 
     if (fresh !== "new\\n") throw Error("reread was stale");
     await write({path:"state.txt",content:fresh + "tail\\n",replace:true});
   `, record => record.name === "read" && record.ok === true);
+
   await gate;
   await fs.writeFile(path.join(f.root, "state.txt"), "new\ntail\n");
   await f.write("go.txt", "go");
@@ -43,16 +51,22 @@ it("a read window above 16 MiB still protects against a lost update", async t =>
   const f = await engineFixture(t);
   const body = "old\n" + "x".repeat(17 * 1024 * 1024);
   await f.write("large.txt", body);
+
   const { pending, gate } = gatedExecute(f, `
     const previous = await read("large.txt", 1, 1);
     ${GUEST_GATE_POLL}
     await write({path:"large.txt",content:previous,replace:true});
   `, record => record.name === "read" && record.ok === true);
+
+  const rejected = assert.rejects(pending, /write conflict/);
+
   await gate;
   const handle = await fs.open(path.join(f.root, "large.txt"), "r+");
+
   try { await handle.write("NEW", 0, "utf8"); } finally { await handle.close(); }
+
   await f.write("go.txt", "go");
-  await assert.rejects(pending, /write conflict/);
+  await rejected;
   assert.equal(await fs.readFile(path.join(f.root, "large.txt"), "utf8"), "NEW" + body.slice(3));
 });
 
@@ -70,15 +84,18 @@ it("read options never bypass a captured read override", async t => {
   await f.write("secret.txt", "must-not-be-read");
   let calls = 0;
   f.pi.registerTool({name:"read", async execute() { calls++; throw Error("override-denied"); }});
+
   for (const options of [{}, {resolve:true}, {outline:false}, {evidence:false}, {complete:true}]) {
     await assert.rejects(f.execute('return await read(' + JSON.stringify({path:"secret.txt", ...options}) + ');'), /override-denied/);
   }
+
   assert.equal(calls, 5);
 });
 
 it("complete raw reads accept extensionless filenames without adding a source mode", async t => {
   const f = await engineFixture(t);
   await f.write("LICENSE", "license\n");
+
   for (const name of ["LICENSE", "./LICENSE"]) {
     const result = await f.execute('return await read(' + JSON.stringify({path:name,complete:true}) + ');');
     assert.equal(result.details.result, "license\n");
@@ -100,6 +117,7 @@ it("a file-scoped query opens a newly staged declaration", async t => {
 it("scoping a source query does not relabel a span as a complete file", async t => {
   const f = await engineFixture(t);
   await f.write("scope.js", "export function first() { return 1; }\nexport function second() { return 2; }\n");
+
   for (const scope of [undefined, ".", "scope.js"]) {
     const result = await f.execute('return await read(' + JSON.stringify({path:scope,query:"second",resolve:true}) + ');');
     assert.equal(result.details.result.status, "found");
@@ -145,6 +163,7 @@ it("native and guest reads reject competing outline and evidence modes", async t
   await f.write("a.js", "export function foo() { return 1; }\n");
   await assert.rejects(f.execute('return await read({path:"a.js",outline:true,evidence:true});'), /only one/);
   const bridge = createHostBridge({pi:null,config:limits,getCwd:()=>f.root});
+
   try { await assert.rejects(bridge.natives.read({path:"a.js",outline:true,evidence:true}), /only one/); }
   finally { bridge.close(); }
 });
@@ -155,6 +174,7 @@ it("native and guest query evidence return the same ranked spans", async t => {
   const options = {path:"a.js",query:"foo",evidence:true};
   const guest = (await f.execute('return await read(' + JSON.stringify(options) + ');')).details.result;
   const bridge = createHostBridge({pi:null,config:limits,getCwd:()=>f.root});
+
   try {
     const native = await bridge.natives.read(options);
     assert.ok(guest.spans.length > 0);
@@ -166,6 +186,7 @@ it("native target arrays preserve the path alias when dispatching children", asy
   const f = await engineFixture(t);
   await f.write("a.txt", "raw\n");
   const bridge = createHostBridge({pi:null,config:limits,getCwd:()=>f.root});
+
   try {
     const result = await bridge.natives.read({target:["a.txt"]});
     assert.equal(result.isError, false);
@@ -200,15 +221,19 @@ it("additional: large focused disk reads retain a CAS snapshot", async t => {
   const f = await engineFixture(t);
   const body = "old\n" + "noise\n".repeat(90000) + "needle\n";
   await f.write("focus.log", body);
+
   const { pending, gate } = gatedExecute(f, `
     const view = await read("focus.log", {about:"needle"});
     if (!view.includes("needle")) throw Error("focus failed to open source");
     ${GUEST_GATE_POLL}
     await write({path:"focus.log",content:"replacement\\n",replace:true});
   `, record => record.name === "read" && record.ok === true);
+
   await gate;
   const handle = await fs.open(path.join(f.root, "focus.log"), "r+");
+
   try { await handle.write("NEW", 0, "utf8"); } finally { await handle.close(); }
+
   await f.write("go.txt", "go");
   await assert.rejects(pending, /write conflict/);
   assert.equal(await fs.readFile(path.join(f.root, "focus.log"), "utf8"), "NEW" + body.slice(3));
@@ -236,5 +261,103 @@ it("refused tool calls do not consume the host call budget", async t => {
     assert.equal((await bridge.call("read", { path: "a.txt" })).ok, true);
     assert.equal((await bridge.call("read", { path: "a.txt" })).ok, true);
     await assert.rejects(bridge.call("read", { path: "a.txt" }), /budget exceeded/);
+  } finally { bridge.close(); }
+});
+
+
+it("overlapping edit errors identify input entries and leave the file unchanged", async t => {
+  const f = await engineFixture(t);
+  const source = "const a=1;\nconst b=2;\nconst c=3;\n";
+  await f.write("statements.js", source);
+
+  const data = [
+    { oldText: "c=3", newText: "c=4" },
+    { oldText: ";\nconst b=2;", newText: ";\n\nconst b=2;" },
+    { oldText: ";\nconst c", newText: ";\n\nconst c" },
+  ];
+
+  await assert.rejects(f.tool.execute("overlap", {
+    code: 'await read("statements.js"); return await edit({path:"statements.js",edits:data});', data,
+  }, undefined, undefined, { cwd: f.root }), /edits 2 and 3 overlap at line 2/);
+  assert.equal(await fs.readFile(path.join(f.root, "statements.js"), "utf8"), source);
+});
+
+it("document filenames find their references rather than extension-only source matches", async t => {
+  const f = await engineFixture(t);
+  const names = ["INVENTORY.md", "EXAMPLES.mdx", "DESIGN.rst", "NOTES.txt"];
+  await f.write("README.md", "# References\n" + names.map(name => "See " + name).join("\n"));
+  await f.write("noise.js", 'export function classifyExtension(ext) { return ["md", "mdx", "rst", "txt"].includes(ext); }\n');
+
+  // Evidence locates references; resolve selects the actual file, not its caller.
+  for (const name of names) await f.write(name, "# Guide\nExact document content\n");
+
+  for (const name of names) {
+    const evidence = await f.execute('return await read({query:' + JSON.stringify(name) + ',evidence:true});');
+    assert.ok(evidence.details.result.spans.some(span => span.path === "README.md" && span.text.includes(name)));
+    assert.ok(evidence.details.result.spans.every(span => span.path !== "noise.js"));
+    const resolved = await f.execute('return await read({query:' + JSON.stringify(name) + ',resolve:true});');
+    assert.equal(resolved.details.result.path, name);
+    assert.equal(resolved.details.result.text, "# Guide\nExact document content\n");
+  }
+
+  const absent = await f.execute('return await read({query:"ABSENT.md",evidence:true});');
+  assert.deepEqual(absent.details.result.spans, []);
+
+  await f.write("engine.js", "export const value = 42;\n");
+  await f.write("caller.js", 'import { value } from "./engine.js";\n');
+  const source = await f.execute('return await read({query:"engine.js",resolve:true});');
+  assert.equal(source.details.result.path, "engine.js");
+  assert.equal(source.details.result.text, "export const value = 42;\n");
+});
+
+it("optional JSON fields have an actionable strict error and a lossless parent-read recovery", async t => {
+  const f = await engineFixture(t);
+  const config = { packages: ["local:one"], enabled: false, nested: { count: 0 } };
+  await f.write("settings.json", JSON.stringify(config));
+  await assert.rejects(f.execute('return await read({path:"settings.json",json:[".packages",".extensions"]});'), /optional fields.*parent object/);
+
+  const result = await f.execute(`
+    const config = await read({path:"settings.json",json:true});
+    const settled = await Promise.allSettled([read("settings.json"),read("optional-missing.txt")]);
+    return { config, extensions: config.extensions ?? [], settled };
+  `);
+
+  assert.deepEqual(result.details.result.config, config);
+  assert.deepEqual(result.details.result.extensions, []);
+  assert.deepEqual(result.details.result.settled[0], {status:"fulfilled",value:JSON.stringify(config)});
+  assert.equal(result.details.result.settled[1].status, "rejected");
+  assert.match(result.details.result.settled[1].reason.message, /no such file/);
+});
+
+it("indexed context ranges admit 40 lines but reject oversized locator metadata", async t => {
+  const f = await engineFixture(t);
+  await f.write("indexed.js", Array.from({length:45}, (_,i) => `export const line${i} = ${i};\n`).join(""));
+  let endLine = 40;
+  f.pi.registerTool({
+    name: "isearch", annotations: {readOnlyHint:true},
+    async execute() {
+      return {content:[{type:"text",text:"locator only"}], details:{code:"OK",contexts:[{path:"indexed.js",startLine:1,endLine}]}};
+    },
+  });
+  const selected = await f.execute('return await read({query:"line0",indexed:true});');
+  assert.equal(selected.details.result.status, "found");
+  assert.ok(selected.details.result.text.includes("line39"));
+  endLine = 41;
+  await assert.rejects(f.execute('return await read({query:"line0",indexed:true});'), /invalid indexed context range/);
+});
+
+it("absent ownership metadata keeps native reads on the transactional reader", async t => {
+  const f = await engineFixture(t);
+  await f.write("native.txt", "owned bytes\n");
+  const bridge = createHostBridge({pi:null,config:limits,getCwd:()=>f.root});
+  bridge.bindCallContext({
+    tools: [{name:"read"}],
+    executeTool() { throw new Error("native read was delegated without override metadata"); },
+  });
+
+  try {
+    const result = await bridge.call("read", {path:"native.txt"});
+    assert.equal(result.ok, true);
+    assert.equal(result.value, "owned bytes\n");
   } finally { bridge.close(); }
 });

@@ -54,6 +54,24 @@ function signalGroups(job, signal) {
   }
 }
 
+function waitForRetirement(job) {
+  if (job.processClosed) return delay(10);
+
+  // A child normally closes its pipes just after exit. Wake on that event rather
+  // than charging every successful command a polling interval. Keep a fallback
+  // for stuck pipes; group disappearance is still checked by the caller.
+  return new Promise(resolve => {
+    const done = () => {
+      clearTimeout(timer);
+      job.child.off("close", done);
+      resolve();
+    };
+
+    const timer = setTimeout(done, 10);
+    job.child.once("close", done);
+  });
+}
+
 // Both foreground and background commands own their POSIX groups until they
 // disappear, not merely until the leader exits or inherited output pipes close.
 // Callers update processExited/processClosed from the real child events and may
@@ -85,7 +103,7 @@ export async function retireProcessTree(job) {
     if (Date.now() >= deadline) throw new Error("owned process group or output pipes did not close" + (job.signalError ? ": " + job.signalError : ""));
 
     if (process.platform !== "win32") signalGroups(job, "SIGKILL");
-    await delay(10);
+    await waitForRetirement(job);
   }
 
   if (discoveryError) throw new Error("descendant discovery failed: " + discoveryError.message);

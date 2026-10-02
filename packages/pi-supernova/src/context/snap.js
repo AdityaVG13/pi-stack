@@ -1,5 +1,6 @@
 import {inScope,makeCandidate,contentCandidates,MAX_SEARCH_CHARS} from './snap-search.js';
 import { tokenizeQuery, stem } from "./query.js";
+import { looksLikePath } from "../shared/decode.js";
 
 export {tokenizeQuery,scorePathTopology,stem} from './query.js';
 
@@ -234,9 +235,13 @@ export async function executeSnap({ query, searchDir, root, includeHidden = fals
 
 async function rankSnapSearch({ dir, includeHidden, query, tokens, flags, pendingPaths, run, overlayText, signal, exact, diskFiles, focusFile, root, pathContext, empty }) {
   const search = await contentCandidates({ dir, includeHidden, query, tokens, flags, pendingPaths, run, overlayText, signal, exact, diskFiles, focusFile });
+
   // A declaration hit needs no prerequisite file listing or persistent index.
+  // Filename queries still need exact file candidates when references matched.
   // Bare names can name files, even when callers mention the same word.
-  const needsPaths = !search.candidates.size || (exact && ![...search.candidates.values()].some(candidate => candidate.exactDefinition));
+  const needsPaths = looksLikePath(query) || !search.candidates.size
+    || (exact && ![...search.candidates.values()].some(candidate => candidate.exactDefinition));
+
   const listing = await snapListing(needsPaths, search.truncated, diskFiles, includeHidden, dir, run, signal);
   const paths = listedSnapPaths(listing, dir, includeHidden, focusFile, pendingPaths);
   addFilenameCandidates(search, paths, { dir, focusFile, query, tokens, flags, exact });

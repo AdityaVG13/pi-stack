@@ -8,6 +8,8 @@ export function toolIsCallable(name, env) {
 
   if (env.nativeOwned(name)) return true;
 
+  if (env.modern) return env.modernAllows(name);
+
   if (env.hostSession) return env.evalAllows(name);
 
   return env.listed(name);
@@ -23,7 +25,7 @@ function hostExecutor(name, env) {
 
   if (delegated) return { exec: delegated.execute.bind(delegated), delegated };
 
-  if (env.hostSession) return { exec: undefined, delegated };
+  if (env.modern || env.hostSession) return { exec: undefined, delegated };
 
   return { exec: env.executors.get(name), delegated };
 }

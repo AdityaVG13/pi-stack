@@ -18,38 +18,51 @@ export function createTextReader(ctx, readWindow) {
   async function loadText(targetPath, params, query, signal) {
     const explicit = isNumber(params.offset) || isNumber(params.limit);
     const windowed = explicit && params.complete !== true && !isString(params.about) && !isString(query);
+
     if (!windowed) {
       // Whole reads hash the bytes already loaded. Do not read once for a window
       // and open/hash the entire file a second time just to return the same text.
       return {text:await vfs.read(targetPath,{maxBytes:TEXT_MAX_BYTES}),windowed:false};
     }
+
     const start = isNumber(params.offset) ? Math.max(1,Math.floor(params.offset)) : 1;
     const count = isNumber(params.limit) ? Math.max(0,Math.floor(params.limit)) : undefined;
     const window = await readWindow(targetPath,start,count,TEXT_MAX_BYTES,signal);
+
     if (!window.satisfied) throw new Error("read window exceeds " + TEXT_MAX_BYTES + " bytes: " + targetPath + "; request fewer lines or use a bounded parser through bash");
+
     return {text:window.text,windowed:true,windowWhole:window.whole};
   }
 
   async function maybeOutline(cwd, rel, targetPath, text, params, entry) {
     if (!isString(params.about)) return null;
-    const outline = entry && outlineFile(entry,rel,params.about,outlineOptions(params,await referenceFinder(cwd,targetPath),config));
+    // Focused text has no declarations and cannot use lexical caller hints.
+    // Do not make this file-local read wait for unrelated workspace discovery.
+    const references = entry && WorkspaceIndex.spansOf(entry).length ? await referenceFinder(cwd,targetPath) : null;
+    const outline = entry && outlineFile(entry,rel,params.about,outlineOptions(params,references,config));
+
     if (!outline) return null;
     recordOutlineOrigins(ledger,rel,outline.text);
+
     return readResult(outline.text,{path:targetPath,outline:true,expanded:outline.expanded,declarations:outline.declarations});
   }
 
   function resolveSpan(entry, sourceLine, query, params) {
     if (!params.resolve || !isString(query) || !entry) return {offset:params.offset,limit:params.limit,viewComplete:undefined};
     const span=pickSpan(WorkspaceIndex.spansOf(entry),{line:sourceLine,name:query});
+
     if (!span) return {offset:params.offset,limit:params.limit,viewComplete:undefined};
     const spanLines=span.end-span.start+1;
     const limit=isNumber(params.limit) ? Math.min(params.limit,spanLines) : spanLines;
+
     return {offset:span.start,limit,viewComplete:limit>=spanLines};
   }
 
   function textFileResult(rel,targetPath,loaded,span,sliced,firstLine,explicit) {
-    const lines=sliced.length<=LARGE_FILE_BYTES ? sourceLines(sliced) : null;
+    const lines=ledger.window!==0 && sliced.length<=LARGE_FILE_BYTES ? sourceLines(sliced) : null;
+
     if (lines) ledger.recordOrigin(rel,firstLine,lines,explicit);
+
     return readResult(sliced,{path:targetPath,firstLine,lastLine:firstLine+(lines?.length ?? contentLineInfo(sliced).count)-1,
       sourceChars:sliced.length,complete:loaded.windowed ? loaded.windowWhole : sliced===loaded.text,viewComplete:span.viewComplete});
   }
@@ -60,12 +73,16 @@ export function createTextReader(ctx, readWindow) {
     index.touch(rel);
     const entry=needsSourceIndex(params,query) ? WorkspaceIndex.fromText(targetPath,loaded.text) : null;
     const outlined=await maybeOutline(getCwd(),rel,targetPath,loaded.text,params,entry);
+
     if (outlined) return outlined;
     const span=resolveSpan(entry,sourceLine,query,params);
     const firstLine=isNumber(span.offset) ? Math.max(1,Math.floor(span.offset)) : 1;
     const sliced=loaded.windowed ? loaded.text : sliceLinesRaw(loaded.text,span.offset,span.limit);
+
     if (params.complete===true && sliced!==loaded.text) throw new Error("complete:true requires the whole file; remove offset/limit for " + rel);
+
     return textFileResult(rel,targetPath,loaded,span,sliced,firstLine,explicit);
   }
+
   return readTextFile;
 }

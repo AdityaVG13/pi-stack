@@ -66,6 +66,7 @@ function isToolArgs(value) {
 
 function detectResultHost(options, ctxOrArgs) {
   if (isTheme(options) || !isObject(ctxOrArgs) || isRenderContext(ctxOrArgs)) return "pi";
+
   return isToolArgs(ctxOrArgs) ? "omp" : "pi";
 }
 
@@ -82,6 +83,7 @@ function resultArgs(ctxOrArgs, context) {
 function piResultArgs(result, options, theme, ctxOrArgs) {
   const opts = isObject(options) ? options : {};
   const context = ensureState(contextFrom(opts, ctxOrArgs));
+
   return resultRenderModel(result, theme, context, opts, opts, detectResultHost(options, ctxOrArgs), resultArgs(ctxOrArgs, context));
 }
 
@@ -91,6 +93,7 @@ function resultRenderModel(result, theme, context, flags, options, host, args) {
 
 function oddballResultArgs(result, theme, themeOrCtx) {
   const context = ensureState(isObject(themeOrCtx) ? themeOrCtx : {});
+
   return resultRenderModel(result, theme, context, context, {}, "pi", context.args);
 }
 
@@ -101,4 +104,5 @@ function normalizeResultRenderArgs(result, options, themeOrCtx, ctxOrArgs) {
 
 	throw new Error("supernova renderResult: theme missing (expected Pi or OMP signature)");
 }
+
 export {normalizeResultRenderArgs};

@@ -16,4 +16,5 @@ function overlaySearchEntry(index, filePath, overlayText) {
     ? index.entry(filePath)
     : Buffer.byteLength(pending, "utf8") <= 512 * 1024 ? WorkspaceIndex.fromText(filePath, pending) : null;
 }
+
 export { pendingInScope, overlaySearchEntry };

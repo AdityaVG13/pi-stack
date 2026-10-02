@@ -4,9 +4,10 @@ import {traceArgs,finishRecord} from './trace.js';
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { packageHostResult } from "../output/bottleneck.js";
+import { READ_FILES } from "../shared/result.js";
 
 import { errorMessage, isString, isFunction } from "../shared/decode.js";
-import { isMutatingTool, runParallelWave, createNativeScheduler } from "../runtime/parallel.js";
+import { isMutatingTool, createNativeScheduler } from "../runtime/parallel.js";
 import { unknownToolMessage } from "./catalog.js";
 import { resolveInvokeTarget } from "./invoke.js";
 import { buildWriteDiff } from "../fs/diff.js";
@@ -39,12 +40,13 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
   let activeCtx = null;
   let activeSignal = undefined;
   let trace = [];
+  const readFiles = new Set();
   let callListener = null;
   const scheduler = createNativeScheduler();
 
-  // Advisory host event, not a tool or a transaction participant. Consumers
-  // invalidate synchronously; failures must never affect committed bytes.
-  function notifyWorkspaceChanged(paths = null) {
+  // Advisory host events, not transaction participants. Observer failures
+  // cannot fail reads or change committed bytes.
+  function notifyWorkspace(name, paths) {
     if (!isFunction(pi?.events?.emit)) return;
 
     const event = Object.freeze({
@@ -52,7 +54,18 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
       paths: paths === null ? null : Object.freeze([...new Set(paths)]),
     });
 
-    try { pi.events.emit("workspace:changed", event)?.catch?.(() => {}); } catch {}
+    try { pi.events.emit(name, event)?.catch?.(() => {}); } catch {}
+  }
+
+  function notifyWorkspaceChanged(paths = null) { notifyWorkspace("workspace:changed", paths); }
+
+  function rememberReads(raw, result) {
+    if (!result.ok || !isFunction(pi?.events?.emit)) return;
+
+    for (const file of raw?.[READ_FILES] ?? []) {
+      if (readFiles.size === 256) break;
+      readFiles.add(file);
+    }
   }
 
   hooks.terminalOwner = () => terminalOwner;
@@ -99,6 +112,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     vfs.closed = false;
     callCount = 0;
     trace = [];
+    readFiles.clear();
     // Files may change between programs (editor, git); never serve a stale run.
     vfs.invalidateObserved();
     clearPathCache();
@@ -168,6 +182,8 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
   }
 
   function assertOwnedOverride(name, args) {
+    if (name === "read" && args?.indexed === true) throw new Error("indexed source retrieval requires the Supernova-owned read adapter");
+
     if (name === "bash" && (args?.background === true || args?.action !== undefined)) throw new Error("background terminals require the Supernova-owned bash adapter, not an external override");
 
     if (name === "read" && (args?.json !== undefined || /^(agent|artifact):\/\/.*\?/i.test(String(args?.path)))) throw new Error("JSON projection requires the Supernova-owned read adapter, not an external override");
@@ -188,7 +204,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     assertSession();
 
     try {
-      const res = await target.exec(`supernova:${name}:${callId}`, args || {}, activeSignal, undefined, target.delegated
+      const res = await target.exec(`supernova:${name}:${callId}`, args || {}, activeSignal, undefined, target.delegated && tools.session
         ? { ...activeCtx, settings: tools.session.settings, toolNames: evalToolNames(), autoApprove: false }
         : activeCtx);
 
@@ -230,7 +246,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     notifyCall(record);
 
     try {
-      const target = resolveInvokeTarget(name, args, { hostTool, hostSession: tools.session, executors, natives });
+      const target = resolveInvokeTarget(name, args, { hostTool, hostSession: tools.session, modern: tools.modern, executors, natives });
 
       if (target.kind === "override") return await invokeOverride(target, name, args, record, callId);
 
@@ -243,11 +259,21 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     }
   }
 
+  // Candidate discovery uses the existing permission, trace and budget boundary.
+  // It cannot grant a read observation or invoke a mutating provider.
+  hooks.indexedSearch = async args => {
+    refreshTools();
+
+    if (!isCallable("isearch") || isMutatingTool("isearch", config, args, definitions.get("isearch"))) throw new Error("indexed read requires a callable read-only isearch; enable/promote isearch or omit indexed:true");
+
+    return invokeRaw("isearch", args);
+  };
+
   function fileMutationKey(name, args) {
     if (!["edit", "write", "apply_patch"].includes(name) || !isString(args?.path)) return;
 
     // Overrides can mutate more than their declared path: keep them global.
-    if (hostTool(name) || executors.has(name)) return;
+    if (hostTool(name) || (!tools.modern && executors.has(name))) return;
 
     return async () => {
       const target = await resolveWorkspacePath(getCwd(), args.path, name, false, true);
@@ -259,39 +285,27 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
 
   async function call(name, args, onItem) {
     if (!isString(name) || !name) throw new Error("nova.call requires a tool name");
-    const deliver = onItem ? (index, raw) => onItem(index, packageHostResult(raw, config)) : undefined;
-    const invoke = async () => packageHostResult(await invokeRaw(name, args, deliver), config);
+    const packageResult = raw => packageHostResult(raw, config, definitions.get(name)?.outputSchema !== undefined);
+
+    const deliver = onItem ? async (index, raw) => {
+      const result = packageResult(raw);
+      await onItem(index, result);
+      rememberReads(raw, result);
+    } : undefined;
+
+    const invoke = async () => {
+      const raw = await invokeRaw(name, args, deliver);
+      const result = packageResult(raw);
+      rememberReads(raw, result);
+
+      return result;
+    };
+
     const kind = isMutatingTool(name, config, args, definitions.get(name)) ? "write" : "read";
 
     return scheduler.schedule(kind, invoke, activeSignal, fileMutationKey(name, args));
   }
 
-  async function callMany(calls) {
-    if (!Array.isArray(calls)) throw new TypeError("nova.callMany requires an array");
-    const list = calls;
-
-    if (list.some(item => !isString(item?.name) || !item.name)) throw new TypeError("nova.callMany entries require a tool name");
-
-    const thunks = list.map((item) => {
-      const n = item?.name;
-      const a = item?.args;
-
-      return () => call(n, a);
-    });
-
-    const names = list.map((item) => item?.name).filter((n) => isString(n));
-    const wave = await runParallelWave(thunks, { names, calls: list, definitions: names.map(name => definitions.get(name)) }, { mode: "auto", config });
-    // Return a results array that also carries .mode/.reason, and is directly
-    // iterable so `for (const r of await nova.callMany([...]))` works.
-    const results = Array.isArray(wave.results) ? wave.results.slice() : [];
-    Object.defineProperties(results, {
-      mode: { value: wave.mode, enumerable: false },
-      reason: { value: wave.reason, enumerable: false },
-      results: { value: results, enumerable: false },
-    });
-
-    return results;
-  }
 
   return {
     executors,
@@ -300,9 +314,9 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     refreshTools,
     isCallable,
     externalNames,
-    supportsBatchRead: () => !hostTool("read") && !executors.has("read"),
+    supportsBatchRead: () => !hostTool("read") && (tools.modern || !executors.has("read")),
     // Windows command shims need shell handling; preserve the existing route there.
-    supportsNativeArgv: () => process.platform !== "win32" && !hostTool("bash") && !executors.has("bash"),
+    supportsNativeArgv: () => process.platform !== "win32" && !hostTool("bash") && (tools.modern || !executors.has("bash")),
     summarizeEdit: (target, before, after, diff) => hooks.summarizeEdit(getCwd(), target, before, after, diff),
     invalidateFiles() { vfs.invalidateObserved(); index.invalidate(); clearPathCache(); },
     describeMemory() {
@@ -348,12 +362,27 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     async commitSpeculation() {
       assertSession();
 
-      return await vfs.commit();
+      const result = await vfs.commit();
+
+      // The outer success commit follows guest completion/delivery. Checkpoint
+      // merges and failed programs must not publish provisional read credit.
+      if (vfs.getOverlayDepth() === 0 && readFiles.size) {
+        const paths = [...readFiles];
+        readFiles.clear();
+        notifyWorkspace("workspace:read", paths);
+      }
+
+      return result;
     },
-    rollbackSpeculation: () => vfs.rollback(),
+    rollbackSpeculation() {
+      const result = vfs.rollback();
+
+      if (vfs.getOverlayDepth() === 0) readFiles.clear();
+
+      return result;
+    },
     getOverlayDepth: () => vfs.getOverlayDepth(),
     call,
-    callMany,
     ledger,
   };
 }

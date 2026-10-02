@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { relativeSlash } from "./workspace.js";
+import { sameFileVersion } from "./file-io.js";
 
 export const SOURCE_REF = /((?:\/|[A-Za-z]:[\\/])?(?:[\w.@-]+[\\/])*[\w.@-]+\.(?:m?[jt]sx?|c[jt]s|py|rs|go|java|kt|rb|php|c|cc|cpp|h|hpp|cs|swift|json|ya?ml|toml))(?::|\()(\d+)/g;
 
@@ -25,6 +26,8 @@ async function readBoundedFile(real, rootPrefix, signal) {
       offset += bytesRead;
       signal?.throwIfAborted();
     }
+
+    if (!sameFileVersion(stat, await handle.stat())) return null;
 
     return buffer.subarray(0, offset).toString("utf8");
   } finally { await handle.close(); }
@@ -71,6 +74,7 @@ export async function sourceForReferences(cwd, commandCwd, output, signal, ledge
     const key = m[1] + ":" + m[2];
 
     if (seen.has(key)) continue;
+
     if (seen.size >= 4) break;
     seen.add(key);
     const block = await sourceWindow(cwd, commandCwd, m[1], Number(m[2]), signal, ledger);

@@ -38,6 +38,7 @@ export function buildEditDiff(filePath, originalText, oldText, newText) {
 
 export function buildMultiEditDiff(filePath, originalText, replacements) {
   const rendered = replacements.slice(0, MAX_DIFF_MATCHES);
+
   const parts = rendered.map(({ oldText, newText }) =>
     buildEditDiff(filePath, originalText, oldText, newText),
   );

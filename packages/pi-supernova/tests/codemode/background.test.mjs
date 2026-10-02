@@ -158,6 +158,7 @@ for (const pty of [false,true]) it(`stop and session shutdown terminate stubborn
 
 it("background validation, unknown sessions and checkpoints fail before staged files commit", async t => {
   const f = await fixture(t);
+  assert.match(f.tool.description, /poll waitMs 0\.\.30000/, "the model must see the polling range before calling");
 
   const invalid = [
     [{command:"true",background:"yes"},/background.*boolean/],
@@ -165,6 +166,9 @@ it("background validation, unknown sessions and checkpoints fail before staged f
     [{action:"poll",sessionId:"absent"},/unknown.*session/],
     [{action:"list",input:"ignored"},/does not accept/],
     [{action:"poll",sessionId:"absent",waitMs:Infinity},/waitMs/],
+    [{action:"poll",sessionId:"absent",waitMs:60000},/waitMs.*0.*30000/],
+    [{action:"poll",sessionId:"absent",waitMs:0},/unknown.*session/],
+    [{action:"poll",sessionId:"absent",waitMs:30000},/unknown.*session/],
     [{command:"true",background:true,timeoutMs:0},/positive finite/],
   ];
 
@@ -501,4 +505,46 @@ it("failed cleanup remains inspectable and shutdown can retry it", async t => {
   manager.reopen();
   assert.deepEqual(await manager.control({action:"list"},"retry"),[]);
   assert.throws(()=>process.kill(job.pid,0),{code:"ESRCH"});
+});
+
+
+it("background bash materializes a staged working directory before launch", async t => {
+  const f = await fixture(t);
+
+  const result = await f.execute('await write("new/nested/input.txt","staged"); return await bash(data);', {
+    command:process.execPath,args:["-e",'const fs=require("node:fs"); fs.writeFileSync("result.txt",fs.readFileSync("input.txt"));'],
+    cwd:"new/nested",background:true,
+  });
+
+  const ended = await until(f,result.details.result,job=>job.status!=="running");
+  assert.equal(ended.status,"exited");
+  assert.equal(ended.exitCode,0);
+  assert.equal(result.details.mutations.committed,1);
+  assert.equal(await fs.readFile(path.join(f.root,"new/nested/result.txt"),"utf8"),"staged");
+});
+
+
+it("background output boundaries never return partial Unicode characters", async t => {
+  const f = await fixture(t);
+  const job = await f.start('process.stdout.write("😀"+"x".repeat(65535));');
+
+  const full = await f.execute(`
+    let result;
+    do {result = await bash({sessionId:data.sessionId,action:"poll",waitMs:100});}
+    while (result.status === "running");
+    return {wellFormed:result.output.isWellFormed(),length:result.output.length,
+      first:result.output.slice(0,2),outputStart:result.outputStart,cursor:result.cursor,truncated:result.truncated};
+  `,job);
+
+  assert.deepEqual(full.details.result,{wellFormed:true,length:65535,first:"xx",outputStart:2,cursor:65537,truncated:true});
+  const small = await f.start('process.stdout.write("😀tail");');
+  await until(f,small,r=>r.status!=="running");
+  const partial = await f.bash({sessionId:small.sessionId,action:"poll",cursor:1});
+  assert.equal(partial.output,"tail");
+  assert.equal(partial.outputStart,2);
+  assert.equal(partial.truncated,true,"an aligned cursor must disclose the skipped partial character");
+  const aligned = await f.bash({sessionId:small.sessionId,action:"poll",cursor:2});
+  assert.equal(aligned.output,"tail");
+  assert.equal(aligned.truncated,false);
+  assert.equal((await f.bash({sessionId:small.sessionId,action:"poll",cursor:aligned.cursor})).output,"");
 });

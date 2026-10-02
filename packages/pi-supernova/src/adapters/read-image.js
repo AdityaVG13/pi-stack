@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import {assertModelImageMime} from '../shared/decode.js';
 import {validateImageBytes} from '../shared/image.js';
 import {IMAGE_MIME,IMAGE_MAX_BYTES,imageTooLarge,missingFile} from './errors.js';
+
 export function createImageReader(vfs) {
   async function readImage(rel, targetPath, mime, signal) {
     const staged = vfs.getOverlay(targetPath);
@@ -27,9 +28,10 @@ export function createImageReader(vfs) {
       const stat = await file.stat();
 
       if (!stat.isFile()) throw new Error("image read requires a regular file: " + targetPath);
+
       if (stat.size > IMAGE_MAX_BYTES) throw imageTooLarge(rel, stat.size);
       const bytes = await file.readFile({ signal });
-      await vfs.recordExpected(targetPath, stat);
+      await vfs.recordExpected(targetPath, stat, bytes);
 
       return bytes;
     } finally { await file.close(); }
@@ -47,5 +49,6 @@ export function createImageReader(vfs) {
 
     return { content: [{ type: "image", mimeType: mime, data: bytes.toString("base64") }], details: { path: targetPath } };
   }
+
   return maybeImage;
 }

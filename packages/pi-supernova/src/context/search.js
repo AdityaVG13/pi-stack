@@ -122,6 +122,7 @@ function listDirectRows(stat, searchDir, cwd, pending, matcher) {
 function mergeListStdout(stdout, cwd, pendingMerged) {
   const diskRows = String(stdout || "").split("\n").filter(Boolean)
     .map(row => relativeSlash(cwd, path.isAbsolute(row) ? row : path.resolve(cwd, row)));
+
   const rows = [...new Set([...diskRows, ...pendingMerged])];
 
   return rows.length ? rows.join("\n") + "\n" : "";

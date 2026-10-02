@@ -28,18 +28,35 @@ export default function (pi) {
       const selected=await tool.execute("omp-json-data",{code:'return [data.literal,await read("artifact://132?q=.answer")];',data:{literal:"literal `backticks` ${braces}"}},undefined,undefined,ctx);
       assert.deepEqual(selected.details.result,["literal `backticks` ${braces}","selected"]);
       const result = await tool.execute("omp-contract", { file:process.env.SUPERNOVA_HOST_PROGRAM }, undefined, undefined, ctx);
+      await assert.rejects(tool.execute("omp-location", { file: "diagnostic.js" }, undefined, undefined, ctx), /no such file.*\(line 4:10\)/);
       await assert.rejects(tool.execute("omp-failure", { code: 'throw Error("host-failure-sentinel");' }, undefined, undefined, ctx), /host-failure-sentinel/);
       const batch = await tool.execute("omp-batch",{programs:[{code:"return data;",data:false},{code:"return 42;"}]},undefined,undefined,ctx);
       assert.deepEqual(batch.details.result,[false,42]);
+
       const shared = await tool.execute("omp-shared-batch",{
         code:'data.seen++; return data;',data:{seen:0,literal:"shared λ😀\r\n"},mergeData:true,
         programs:[{data:{job:1}},{data:{job:2}}],
       },undefined,undefined,ctx);
+
       assert.equal(shared.details.ok,true);
       assert.deepEqual(shared.details.result,[{seen:1,literal:"shared λ😀\r\n",job:1},{seen:1,literal:"shared λ😀\r\n",job:2}]);
       const stopped = await tool.execute("omp-batch-stop",{programs:[{code:'return await read("pixel.png");'},{code:'throw Error("batch-stop");'},{code:"return 9;"}]},undefined,undefined,ctx);
       assert.equal(stopped.details.ok,false); assert.equal(stopped.isError,true); assert.equal(stopped.details.attempted,2);
       assert.ok(stopped.content.some(block=>block.type==="image"));
+
+      for (const parallel of [false,true]) {
+        const clipped = await tool.execute("omp-log-clipping",{parallel,programs:[
+          {code:'console.log("x".repeat(50000)); return 1;'},
+          {code:`await write("logged-omp-${parallel}.txt","committed"); return 2;`},
+        ]},undefined,undefined,ctx);
+
+        assert.equal(clipped.details.ok,true);
+        assert.equal(clipped.isError,false);
+        assert.equal(clipped.details.logTruncated,true);
+        assert.equal(clipped.details.attempted,2);
+        assert.equal(await fs.readFile(ctx.cwd+`/logged-omp-${parallel}.txt`,"utf8"),"committed");
+      }
+
       await fs.writeFile(process.env.SUPERNOVA_HOST_OUTPUT, JSON.stringify(result));
       process.exit(0);
     } catch (error) {

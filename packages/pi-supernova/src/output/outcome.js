@@ -1,5 +1,5 @@
 import {isString} from '../shared/decode.js';
-import {truncateChars,formatBoundedStringArray,isStringArray} from './format.js';
+import {truncateChars,formatBoundedStringArray,isStringArray,escapeUnpairedSurrogates} from './format.js';
 
 function result(text, details) {
   return { content: [{ type: "text", text }], details };
@@ -45,8 +45,8 @@ function splitTurnHint(outcome) {
 }
 
 function errorText(outcome, call) {
-  return `error #${call} ${outcome.wallMs}ms${outcome.returnTruncated ? " [output truncated]" : ""}${mutationText(outcome, true)}${splitTurnHint(outcome)}
-error: ${outcome.error}${logsBlock(outcome)}`;
+  return escapeUnpairedSurrogates(`error #${call} ${outcome.wallMs}ms${outcome.returnTruncated ? " [output truncated]" : ""}${mutationText(outcome, true)}${splitTurnHint(outcome)}
+error: ${outcome.error}${logsBlock(outcome)}`);
 }
 
 function successText(outcome, call) {
@@ -92,4 +92,5 @@ function throwIfFailed(outcome, visible, response) {
   Object.defineProperty(error,"supernovaResult",{value:response});
   throw error;
 }
+
 export { result, errorText, successText, fitOutput, attachReceipts, throwIfFailed };

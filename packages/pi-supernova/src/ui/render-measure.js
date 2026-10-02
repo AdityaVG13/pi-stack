@@ -102,11 +102,22 @@ function pushWrapSegment(out, current, columns, segment, size, width) {
 
 /** Wrap complete, already-sanitized result text without splitting graphemes. */
 export function wrapLine(line, width) {
+  width = Math.floor(width);
+
   if (width <= 0) return [];
   const text = String(line).replace(/\t/g, "   ");
 
   if (measureWidth(text) <= width) return [text];
   const out = [];
+
+  // Sanitized printable ASCII is one column per UTF-16 unit. Bulk slicing
+  // avoids segmenting every source character; Unicode keeps the grapheme path.
+  if (/^[\x20-\x7e]*$/.test(text)) {
+    for (let start = 0; start < text.length; start += width) out.push(text.slice(start, start + width));
+
+    return out;
+  }
+
   const current = { text: "" };
   let columns = 0;
 

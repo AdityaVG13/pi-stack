@@ -124,7 +124,7 @@ try {
 
       for(const outcome of outcomes) {
         if(outcome.status==="fulfilled")committed++;
-        else {assert.match(outcome.reason.message,/write conflict/);conflicts++;}
+        else {assert.match(outcome.reason.message,/write conflict|workspace may have changed while reading/);conflicts++;}
       }
 
       assert.equal(Number(await fs.readFile(path.join(cwd,"counter.txt"),"utf8")),committed,"successful updates were lost");

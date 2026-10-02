@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isString } from "../shared/decode.js";
-import { readResult, asReadResult, READ_VALUE, READ_BYTES, MAX_READ_VALUE_BYTES } from "../shared/result.js";
+import { readResult, asReadResult, READ_VALUE, READ_BYTES, READ_FILES, MAX_READ_VALUE_BYTES } from "../shared/result.js";
 import { extractStructuralSurface } from "../context/surface.js";
 import { executeSnap, tokenizeQuery } from "../context/snap.js";
 import { selectEvidence } from "../context/evidence.js";
@@ -16,6 +16,7 @@ import { projectJson } from "./read-json.js";
 import { createImageReader } from "./read-image.js";
 import { createTextReader } from "./read-text.js";
 import { createFocusedReader } from "./read-focus.js";
+import { indexedSource } from "./read-indexed.js";
 
 export function createRead(ctx) {
   const { getCwd, vfs, config, index, ledger, hooks, reads } = ctx;
@@ -28,6 +29,15 @@ export function createRead(ctx) {
   async function sourceRead(query, searchDir, signal, params = {}) {
     params = { ...params, resolve: params.resolve !== false };
     const cwd = getCwd();
+
+    if (params.indexed && vfs.getOverlayPaths().length === 0) {
+      const hint = await indexedSource(hooks, query, cwd, searchDir, signal);
+
+      if (hint.status !== "found") return readResult(hint, {isSnap:true});
+      const opened = await readFile(hint.path, {resolve:true,offset:hint.line,limit:hint.endLine-hint.line+1}, hint.line, relativeSlash(cwd,hint.path), undefined, signal);
+
+      return openedSource({...hint,path:relativeSlash(cwd,hint.path)}, params, opened.content[0], opened.details);
+    }
 
     const includeHidden = path.relative(cwd, searchDir).split(path.sep)
       .some(segment => segment.startsWith(".") && segment.length > 1);
@@ -111,12 +121,13 @@ export function createRead(ctx) {
       raw.isError = true;
     }
 
+    for (const file of raw[READ_FILES] ?? []) state.files.add(file);
     state.sourcePaths[index] = raw.details?.sourcePath;
     await addBatchItem(state,index,raw,onItem);
   }
 
   async function readBatch(params, signal, onItem) {
-    const state = {items:[],sourcePaths:[],errors:Array(params.path.length).fill(null),bytes:0,streamed:false};
+    const state = {items:[],sourcePaths:[],files:new Set(),errors:Array(params.path.length).fill(null),bytes:0,streamed:false};
 
     // Delivery/acknowledgement stays inside the same eight-operation scheduler
     // slot as I/O. A busy guest cannot cause unbounded host/message-queue buffering.
@@ -136,6 +147,8 @@ export function createRead(ctx) {
 
     response.isError = params._independent!==true && state.errors.some(Boolean);
 
+    if (!state.streamed) response[READ_FILES] = [...state.files];
+
     return response;
   }
 
@@ -152,19 +165,47 @@ export function createRead(ctx) {
     params = normalizeRead({ ...params, path: targetParam });
     const existing = needsProbe(params) ? await probeExistingPath(cwd, params.path, vfs) : null;
     const cls = classifyRead(params, existing);
+    const scope = await scopeForRead(params, cwd, cls, signal);
+    const staged = vfs.getOverlay(scope) !== undefined;
+    const revision = await vfs.readRevision(scope);
+
+    try {
+      const value = await readSingleUnchecked(params, cwd, cls, scope, signal);
+
+      if (!staged) await vfs.assertReadCommitted(revision);
+      const source = value.details;
+
+      // Only the native text reader supplies these fields. JSON documents,
+      // directories, outlines and empty windows are not text-open receipts.
+      if (source?.sourceChars > 0 && isString(source.path) && path.isAbsolute(source.path) && vfs.getOverlay(source.path) === undefined) value[READ_FILES] = [source.path];
+
+      return value;
+    } finally { vfs.releaseRead(revision); }
+  }
+
+  // Classify once so the observation guard follows the same path/scope as dispatch.
+  async function scopeForRead(params, cwd, cls, signal) {
+    if (cls.kind === "session") return resolveSessionResource(params.path, signal, hooks);
+
+    if (cls.kind === "snap") return cls.existing?.directory ? cls.existing.path : cls.scoped ? resolveReadPath(cwd, params.path) : cwd;
+
+    if (cls.kind === "evidence") return cls.scope ? resolveReadPath(cwd, cls.scope) : cwd;
+
+    return cls.existing?.path ?? (isString(params.path) ? resolveReadPath(cwd, params.path) : cwd);
+  }
+
+  async function readSingleUnchecked(params, cwd, cls, scope, signal) {
+    if (params.indexed && cls.kind !== "snap") throw new Error("indexed:true requires a source query");
     const relOf = hit => relativeSlash(cwd, hit.path);
-    const snapScope = (scoped, hit) => hit?.directory ? hit.path : scoped ? resolveReadPath(cwd, params.path) : cwd;
 
     const kinds = {
       session: async () => {
-        const target = await resolveSessionResource(params.path, signal, hooks);
-
         return params.resolve
-          ? openSource({ status: "found", path: params.path, line: params.offset ?? 1 }, params, signal, target)
-          : readFile(target, params, undefined, params.path, undefined, signal);
+          ? openSource({ status: "found", path: params.path, line: params.offset ?? 1 }, params, signal, scope)
+          : readFile(scope, params, undefined, params.path, undefined, signal);
       },
       evidence: () => evidence({ ...params, query: cls.query, path: cls.scope }, signal),
-      snap: () => sourceRead(cls.query, snapScope(cls.scoped, cls.existing), signal, params),
+      snap: () => sourceRead(cls.query, scope, signal, params),
       outline: () => surface({ path: params.path }, signal),
       focus: () => focusAbout({ rel: relOf(cls.existing), about: cls.about, overlay: cls.existing.overlay, targetPath: cls.existing.path, signal }),
       open: () => openSource({ status: "found", path: relOf(cls.existing), line: params.offset ?? 1 }, params, signal),
@@ -258,7 +299,8 @@ export function createRead(ctx) {
 
   async function surface(params, signal) {
       const cwd = getCwd();
-      const target = await resolveWorkspacePath(cwd, params?.path, "surface", false);
+      // Outlines are read-only, like text reads; mutations still require workspace admission.
+      const target = resolveReadPath(cwd, params?.path);
 
       if (signal?.aborted) throw new Error("aborted");
       const text = await vfs.read(target, { maxBytes: 2 * 1024 * 1024 });

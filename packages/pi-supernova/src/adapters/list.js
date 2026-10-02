@@ -75,6 +75,7 @@ export function createList(ctx) {
       const indexed = await grepIndexed(index, pattern, params, searchPath, cwd, file => vfs.getOverlay(file), vfs.getOverlayPaths());
 
       if (indexed !== null) return textResult(indexed, { exitCode: indexed ? 0 : 1, via: "index" });
+
       // Large tree: real rg keeps its own output format.
       return grepWithRg(pattern, params, searchPath, cwd, signal);
   }
@@ -82,9 +83,11 @@ export function createList(ctx) {
   async function glob(params, signal) {
     return listFiles(params, signal, "glob", getCwd());
   }
+
   async function find(params, signal) {
     return listFiles(params, signal, "find", getCwd());
   }
+
   async function ls(params, signal) {
       const cwd = getCwd();
       const dirPath = params?.path ? await resolveWorkspacePath(cwd, params.path, "ls", true) : cwd;

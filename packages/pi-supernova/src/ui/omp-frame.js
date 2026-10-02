@@ -54,10 +54,12 @@ const STATUS_PREFIX = { error: ["error", "✗ "], running: ["dim", "… "] };
 
 function statusHeader(theme, { title, description, state, icon }) {
 	const resolved = icon ?? (state === "error" ? "error" : undefined);
+
 	const fg = (key, text) => {
 		try { return isFunction(theme?.fg) ? theme.fg(key, text) : text; }
 		catch { return text; }
 	};
+
 	const prefixSpec = STATUS_PREFIX[resolved];
 	const prefix = prefixSpec ? fg(prefixSpec[0], prefixSpec[1]) : "";
 	const titleText = fg("accent", title);

@@ -424,6 +424,12 @@ it("guest errors name command-shadowing and nested-tool mistakes; unrelated erro
   const nested = await failureText(f.execute('return await supernova({code:"return 1"});'));
   assert.match(nested, /call read, edit, write or bash directly/);
 
+  // The unaliased destructuring fails earlier: bash is already a binding.
+  const namespace = await failureText(f.execute("const { bash } = supernova; return bash;"));
+  assert.match(namespace, /`bash` is a supernova command/);
+  const aliasedNamespace = await failureText(f.execute("const { bash: run } = supernova; return run;"));
+  assert.match(aliasedNamespace, /call read, edit, write or bash directly/);
+
   const withData = await failureText(f.tool.execute("red-contract", { code: "const data = 1; return data;", data: { a: 1 }, timeoutMs: 2000 }, undefined, undefined, { cwd: f.root }));
   assert.match(withData, /do not redeclare its binding/);
 
@@ -764,4 +770,135 @@ it("guest failures identify the actual source await without moving direct throws
   }
 
   await assert.rejects(f.execute('await (async () => {\n  throw Error("direct-throw");\n})();'), /direct-throw \(line 2:\d+\)/);
+});
+
+
+it("subprocess diagnostics do not trigger guest-binding advice", async t => {
+  const f = await engineFixture(t);
+  const script = 'console.error("ReferenceError: Cannot access \'read\' before initialization; supernova is not defined"); process.exit(7);';
+
+  const text = await failureText(f.tool.execute("nested-diagnostic", {
+    code: 'return await bash({command:process.execPath,args:["-e",data]});', data: script,
+  }, undefined, undefined, { cwd: f.root }));
+
+  assert.match(text, /command failed \(exit 7\)/);
+  assert.match(text, /Cannot access 'read'/);
+  assert.doesNotMatch(text, /give your variable another name|call read, edit, write or bash directly/);
+
+  const authored = await failureText(f.execute('throw new Error("supernova is not defined in the remote report");'));
+  assert.doesNotMatch(authored, /call read, edit, write or bash directly/);
+});
+
+it("wrapped guest errors point to the original source across JS line endings", async t => {
+  const f = await engineFixture(t);
+
+  for (const separator of ["\n", "\r\n", "\r", "\u2028", "\u2029"]) {
+    const code = ["// caller source", "", "async () => {", "  return await read('missing.txt');", "}"].join(separator);
+    const message = await failureText(f.execute(code));
+    assert.match(message, /no such file/);
+    assert.match(message, /\(line 4:10\)/, JSON.stringify({ separator, message }));
+  }
+
+  const single = "async () => await read('missing.txt')";
+  const message = await failureText(f.execute(single));
+  assert.match(message, new RegExp("\\(line 1:" + (single.indexOf("await") + 1) + "\\)"));
+
+  await f.write("present.txt", "kept");
+  const settled = await f.execute('return await Promise.allSettled([read("present.txt"),read("missing.txt")]);');
+  assert.equal(settled.details.result[0].value, "kept");
+  assert.match(settled.details.result[1].reason.message, /no such file/);
+  assert.equal(settled.details.result[1].reason.cause, undefined, "stack restoration must not duplicate the error in the payload");
+});
+
+
+it("session regression: owned bash JSON stays complete beyond the display cap", async t => {
+  const f = await engineFixture(t);
+
+  const result = await f.tool.execute("large-command-json", {
+    code:'const text=await bash({command:process.execPath,args:["-e",data.script]});const parsed=JSON.parse(text);await write("output.json",text);return [parsed.body.length,parsed.tail];',
+    data:{script:'process.stdout.write(JSON.stringify({body:"λ😀".repeat(50000),tail:"end-sentinel"}));'},
+  }, undefined, undefined, {cwd:f.root});
+
+  assert.deepEqual(result.details.result,[150000,"end-sentinel"]);
+  const copied = JSON.parse(await fs.readFile(path.join(f.root,"output.json"),"utf8"));
+  assert.equal(copied.body,"λ😀".repeat(50000));
+  assert.equal(copied.tail,"end-sentinel");
+});
+
+it("session regression: owned bash capture limits reject instead of corrupting computation", async t => {
+  const f = await engineFixture(t);
+  await assert.rejects(f.execute('return await bash({command:process.execPath,args:["-e","process.stdout.write(String.fromCharCode(120).repeat(2*1024*1024+1))"]});'),/bash output exceeds .*capture limit.*redirect/);
+  assert.equal((await f.execute('return await bash({command:process.execPath,args:["-e","process.stdout.write(String.fromCharCode(111,107))"]});')).details.result,"ok");
+});
+
+it("session regression: positional write options preserve append and explicit replacement", async t => {
+  const f = await engineFixture(t);
+  await f.write("state.txt","start\n");
+  const result = await f.execute('await read("state.txt");await write("state.txt","tail\\n",{append:true});await read("state.txt");await write("state.txt","replacement\\n",{replace:true});return await read("state.txt");');
+  assert.equal(result.details.result,"replacement\n");
+  assert.equal(await fs.readFile(path.join(f.root,"state.txt"),"utf8"),"replacement\n");
+  await f.execute('await write("state.txt","kept-tail\\n",{append:true});');
+  assert.equal(await fs.readFile(path.join(f.root,"state.txt"),"utf8"),"replacement\nkept-tail\n");
+
+  for (const options of ['{append:"true"}','{path:"other.txt"}','{content:"other"}','{append:true,unknown:1}','[]']) {
+    await assert.rejects(f.execute('await write("staged.txt","not committed");await write("state.txt","bad",'+options+');'),/write .*options|write .*option|write append must be a boolean/);
+    await assert.rejects(fs.stat(path.join(f.root,"staged.txt")),{code:"ENOENT"});
+    assert.equal(await fs.readFile(path.join(f.root,"state.txt"),"utf8"),"replacement\nkept-tail\n");
+  }
+});
+
+it("session regression: hyphenated JSON fields remain literal own-property selections", async t => {
+  const f = await engineFixture(t);
+  await f.write("models.json",JSON.stringify({credentials:{"openai-codex":{id:7}},"field-with-dashes":[1,2]}));
+  const result = await f.execute('return await read({path:"models.json",json:[".credentials.openai-codex.id",".field-with-dashes[1]"]});');
+  assert.deepEqual(result.details.result,[7,2]);
+  const quoted = await f.execute('return await read({path:"models.json",json:\'.credentials["openai-codex"].id\'});');
+  assert.equal(quoted.details.result,7);
+  await assert.rejects(f.execute('return await read({path:"models.json",json:".credentials.openai-codex + 1"});'),/JSON selector supports/);
+  await assert.rejects(f.execute('return await read({path:"models.json",json:".credentials.__proto__"});'),/JSON field not found/);
+});
+
+
+it("raw read text used as an edit path gets bounded guidance without echoing source", async t => {
+  const f = await engineFixture(t);
+  const source = "private-source-sentinel\n".repeat(1000)+"anchor = old\n";
+  await f.write("document.txt",source);
+
+  for (const call of ['await edit(text,"anchor = old","anchor = new");','await edit({path:text,patch:"@@ -1,1 +1,1 @@\\n-before\\n+after\\n"});']) {
+    await assert.rejects(f.execute('await write("staged.txt","must roll back");const text=await read("document.txt",{complete:true});'+call), error => {
+      assert.match(error.message,/path exceeds.*filesystem limit/);
+      assert.match(error.message,/read.*returns text/);
+      assert.match(error.message,/edit\(path|resolve:true/);
+      assert.doesNotMatch(error.message,/private-source-sentinel/);
+      assert.ok(error.message.length<1024,"Path mistakes must not dump source into model errors");
+
+      return true;
+    });
+    assert.equal(await fs.readFile(path.join(f.root,"document.txt"),"utf8"),source);
+    await assert.rejects(fs.stat(path.join(f.root,"staged.txt")),{code:"ENOENT"});
+  }
+
+  await f.execute('await edit("document.txt","anchor = old","anchor = new");');
+  assert.equal(await fs.readFile(path.join(f.root,"document.txt"),"utf8"),source.replace("anchor = old","anchor = new"));
+});
+
+
+it("multi-line edit mismatch does not invent whitespace drift or change exact-match safety", async t => {
+  const f = await engineFixture(t);
+  const source = "prefix\nconst keep = 1;\nconst actual = 2;\nrepeat\nrepeat\n";
+  await f.write("state.txt",source);
+  await assert.rejects(f.execute('await write("staged.txt","must roll back");await edit("state.txt","const keep = 1;\\nconst actual = 3;","changed");'), error => {
+    assert.match(error.message,/edit target not found/);
+    assert.match(error.message,/oldText anchor near line 2/);
+    assert.doesNotMatch(error.message,/only after trimming/);
+    assert.match(error.message,/const actual = 2/);
+
+    return true;
+  });
+  assert.equal(await fs.readFile(path.join(f.root,"state.txt"),"utf8"),source);
+  await assert.rejects(fs.stat(path.join(f.root,"staged.txt")),{code:"ENOENT"});
+  await assert.rejects(f.execute('await edit("state.txt","repeat","changed");'),/not unique/);
+  assert.equal(await fs.readFile(path.join(f.root,"state.txt"),"utf8"),source);
+  await f.execute('await edit("state.txt","const keep = 1;\\nconst actual = 2;","changed");');
+  assert.equal(await fs.readFile(path.join(f.root,"state.txt"),"utf8"),"prefix\nchanged\nrepeat\nrepeat\n");
 });

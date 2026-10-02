@@ -92,11 +92,13 @@ function rejectUriPath(trimmed, opName, allowSessionRead) {
 
 /** Reject scheme:// and scheme:/ paths. A single-letter drive (C:/) stays a filesystem path. */
 export function assertFilesystemPath(inputPath, opName, allowSessionRead = false) {
-  if (inputPath == null || !isString(inputPath) || !inputPath.trim()) {
+  if (inputPath == null || !isString(inputPath) || inputPath.length === 0) {
     throw new Error(`${opName} requires path`);
   }
 
-  return rejectUriPath(inputPath.trim(), opName, allowSessionRead);
+  if (!inputPath.isWellFormed()) throw new Error(`${opName} requires a well-formed Unicode path: unpaired UTF-16 surrogate`);
+
+  return rejectUriPath(String(inputPath), opName, allowSessionRead);
 }
 
 export async function resolveWorkspacePath(cwd, inputPath, opName, allowRoot = false, fresh = false) {

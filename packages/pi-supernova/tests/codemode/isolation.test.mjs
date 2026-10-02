@@ -2,18 +2,32 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { engineFixture } from "../helpers/engine.mjs";
+import { engineFixture, traceGate } from "../helpers/engine.mjs";
 
 it("overlapping programs never silently lose a successful same-file edit", async t => {
   const f = await engineFixture(t);
   await f.write("shared.txt", "left=old\nright=old\n");
 
-  const results = await Promise.allSettled([
-    f.execute('await edit("shared.txt", "left=old", "left=new");'),
-    f.execute('await edit("shared.txt", "right=old", "right=new");'),
-  ]);
+  await f.write("release-source.txt", "go");
+  const gates = [traceGate(row=>row.name==="edit" && row.ok),traceGate(row=>row.name==="edit" && row.ok)];
 
-  assert.ok(results.some(result => result.status === "fulfilled"));
+  // Both edits must stage against the original bytes. Publish an immutable
+  // release file atomically so the rendezvous itself cannot race a partial read.
+  const wait = `for (;;) {
+    try { if (await read("release.txt") === "go") break; }
+    catch (error) { if (!error.message.includes("no such file")) throw error; }
+    await new Promise(resolve=>setTimeout(resolve,20));
+  }`;
+
+  const pending = Promise.allSettled(["left","right"].map((side,i)=>f.tool.execute("isolated-"+side,{
+    code:`await edit("shared.txt", "${side}=old", "${side}=new"); ${wait}`,timeoutMs:10000,
+  },undefined,gates[i].onUpdate,{cwd:f.root})));
+
+  await Promise.all(gates.map(gate=>gate.promise));
+  await fs.link(path.join(f.root,"release-source.txt"),path.join(f.root,"release.txt"));
+  const results = await pending;
+
+  assert.equal(results.filter(result=>result.status==="fulfilled").length,1);
   const text = await fs.readFile(path.join(f.root, "shared.txt"), "utf8");
 
   for (const [i, result] of results.entries()) {

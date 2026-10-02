@@ -1,9 +1,15 @@
 import { fileChunks } from "./file-io.js";
+
 export {MAX_DIRECTORY_ENTRIES,formatDirectoryEntry,formatLsEntry} from './directory.js';
+
 export {textResult,resultDiff} from '../shared/result.js';
+
 import {sliceLinesRaw,lineNumberAt,formatNumberedLine,numberedPreview,lineStartIndex,lineEndIndex,lineTextRange,contentLineInfo} from './lines.js';
+
 export * from './lines.js';
+
 export {jsonStringLength,maxJsonStringPrefix} from './json-size.js';
+
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { homedir } from "node:os";
@@ -27,13 +33,13 @@ export function normalizeReadWindow(params) {
   const limit = readLineParam(params.limit, "limit");
 
   if (offset !== undefined) normalized.offset = Math.max(1, offset);
+
   if (limit !== undefined) normalized.limit = Math.max(0, limit);
 
   return normalized;
 }
 
 export function resolveReadPath(cwd, target) {
-  if (!isString(target) || !target.trim()) throw new Error("read requires path");
   const input = assertFilesystemPath(target, "read");
 
   return path.resolve(cwd, input === "~" ? homedir() : input.startsWith("~/") ? path.join(homedir(), input.slice(2)) : input);
@@ -74,7 +80,7 @@ function duplicateEditError(target, content, index, second) {
   return new Error("edit target is not unique in " + target + ": lines " + a + " and " + b + "; include more surrounding lines in oldText, or pass edits:[{oldText,newText},…]\n" + formatNumberedLine(a, lineAt(content, a)) + "\n" + formatNumberedLine(b, lineAt(content, b)));
 }
 
-/** Exact bytes at the closest guess: a byte-for-byte miss is usually indentation drift. */
+/** Show nearby exact bytes without guessing why the multi-line match failed. */
 function nearMissPreview(content, oldText) {
   const first = String(oldText).split("\n").find(line => line.trim().length > 0);
 
@@ -87,9 +93,10 @@ function nearMissPreview(content, oldText) {
   const from = lineStartIndex(content, start);
   const shown = content.slice(from, lineEndIndex(content, from, Math.min(5, line - start + 3))).replace(/\r?\n$/, "");
 
-  return "first oldText line matches line " + line + " only after trimming; exact bytes there:\n"
+  return "oldText anchor near line " + line + "; exact bytes there:\n"
     + shown.split("\n").map((text, index) => formatNumberedLine(start + index, text)).join("\n");
 }
+
 function matchReplacement(target, content, replacement) {
   if (!isString(replacement?.oldText) || replacement.oldText.length === 0) {
     throw new Error("edit requires non-empty oldText; to insert, include adjacent existing text in oldText and repeat it in newText");
@@ -103,6 +110,7 @@ function matchReplacement(target, content, replacement) {
   if (index < 0) {
     throw new Error("edit target not found in " + target + ": oldText must match the file byte-for-byte\n" + (nearMissPreview(content, oldText) ?? numberedPreview(content)));
   }
+
   const second = content.indexOf(oldText, index + 1);
 
   if (second >= 0) throw duplicateEditError(target, content, index, second);
@@ -110,23 +118,25 @@ function matchReplacement(target, content, replacement) {
   return { ...replacement, oldText, newText, index, end: index + oldText.length };
 }
 
-function assertNoOverlap(target, matches) {
+function assertNoOverlap(target, content, matches) {
   for (let i = 1; i < matches.length; i++) {
-    if (matches[i].index < matches[i - 1].end) throw new Error(`edit targets overlap in ${target}`);
+    if (matches[i].index < matches[i - 1].end) throw new Error(`edit targets overlap in ${target}: edits ${matches[i - 1].editNumber} and ${matches[i].editNumber} overlap at line ${lineNumberAt(content, matches[i].index)}; combine overlapping replacements or apply them sequentially against updated text`);
   }
 }
 
 export function applyReplacements(target, content, requestedEdits) {
   if (requestedEdits.length === 0) throw new Error("edit requires at least one replacement");
+
   const matches = requestedEdits.map((replacement, index) => {
-    try { return matchReplacement(target, content, replacement); }
+    try { return { ...matchReplacement(target, content, replacement), editNumber: index + 1 }; }
     catch (error) {
       // Name the failing entry: a multi-edit miss is otherwise a guessing game.
       throw requestedEdits.length === 1 ? error : new Error("edit " + (index + 1) + " of " + requestedEdits.length + ": " + error.message);
     }
   });
+
   matches.sort((a, b) => a.index - b.index);
-  assertNoOverlap(target, matches);
+  assertNoOverlap(target, content, matches);
   let updated = content;
 
   for (let i = matches.length - 1; i >= 0; i--) {
@@ -162,6 +172,7 @@ function withLineEnding(insert, ending) {
 
 function viewInsertText(content, startIndex, endIndex, newText) {
   const hasSuffix = endIndex < content.length;
+
   // A view replaces whole source lines. Preserve the separator before following
   // lines, but let an explicit trailing newline change a no-trailing-newline EOF.
   if (hasSuffix) return content.slice(0, startIndex) + withLineEnding(newText, suffixSeparator(content, endIndex)) + content.slice(endIndex);
@@ -193,7 +204,9 @@ export function applyViewReplace(target, content, start, end, oldText, newText) 
 }
 
 export const WRITE_DIFF_MAX_READ_BYTES = 512 * 1024;
+
 export const WRITE_APPEND_MAX_READ_BYTES = 64 * 1024 * 1024;
+
 export const QUICK_CHECK_MAX_CHARS = 2 * 1024 * 1024;
 
 async function snapshotLargeFile(vfs, target, overlay, signal) {
@@ -280,6 +293,7 @@ export function boundedEditDiff(target, original, matches) {
     const nextStart = start + shift;
 
     for (let i = 0; i < oldInfo.preview.length; i++) lines.push({ type: "remove", lineNum: start + i, newLineNum: nextStart + i, text: oldInfo.preview[i] });
+
     for (let i = 0; i < newInfo.preview.length; i++) lines.push({ type: "add", lineNum: nextStart + i, newLineNum: nextStart + i, text: newInfo.preview[i] });
 
     shift += newInfo.newlines - oldInfo.newlines;

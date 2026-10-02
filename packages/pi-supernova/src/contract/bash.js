@@ -39,11 +39,7 @@ export function normalizeBash(command, opts) {
   if (args.action !== undefined || args.sessionId !== undefined) return normalizeTerminalControl(args);
   assertBashOptions(args);
 
-  for (const key of ["background", "pty"]) {
-    if (args[key] !== undefined && args[key] !== true && args[key] !== false) throw new Error(`bash ${key} must be boolean`);
-  }
-
-  if (args.pty !== undefined && args.background !== true) throw new Error("bash pty requires background:true");
+  assertLaunchFlags(args);
 
   if (!isString(args.command) || !args.command.trim()) throw new Error("bash requires a non-empty command string");
 
@@ -53,6 +49,15 @@ export function normalizeBash(command, opts) {
   normalizeTimeout(args);
 
   return args;
+}
+
+function assertLaunchFlags(args) {
+  for (const key of ["background", "pty"]) {
+    if (args[key] !== undefined && args[key] !== true && args[key] !== false) throw new Error(`bash ${key} must be boolean`);
+  }
+
+  if (args.pty !== undefined && args.background !== true) throw new Error("bash pty requires background:true");
+
 }
 
 function normalizeTerminalControl(args) {
@@ -72,11 +77,15 @@ function normalizeTerminalControl(args) {
 
   if (args.action === "write" && (!isString(args.input) || args.input.length > 16384)) throw new Error("bash terminal input must be a string of at most 16384 characters");
 
+  assertTerminalNumbers(args);
+
+  return args;
+}
+
+function assertTerminalNumbers(args) {
   if (args.cursor !== undefined && (!Number.isSafeInteger(args.cursor) || args.cursor < 0)) throw new Error("bash terminal cursor must be a non-negative safe integer");
 
   if (args.waitMs !== undefined && (!Number.isInteger(args.waitMs) || args.waitMs < 0 || args.waitMs > 30000)) throw new Error("bash terminal waitMs must be an integer from 0 to 30000");
-
-  return args;
 }
 
 function normalizeTimeout(args) {

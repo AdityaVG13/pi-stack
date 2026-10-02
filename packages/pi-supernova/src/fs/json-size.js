@@ -37,7 +37,8 @@ export function jsonStringLength(s) {
   return n;
 }
 
-/** Largest prefix whose JSON.stringify length is <= limit. */
+/** Largest prefix whose JSON.stringify length is <= limit when limit >= 2.
+ * Below 2, returns 0 as a sentinel: even the empty quoted string cannot fit. */
 export function maxJsonStringPrefix(s, limit) {
   let used = 2;
   let i = 0;

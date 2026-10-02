@@ -222,41 +222,66 @@ function attachTruncation(result, truncated, batch, text, config, maxChars, capp
   attachSpill(result, batch, text, config, maxChars, capped);
 }
 
-export function packageHostResult(raw, config) {
-  const details = detailsOf(raw);
+/** Already materialized batches retain items; never budget them a second time. */
+function attachTypedBatch(result, batch, details) {
+  result.items = batch;
+  result.itemErrors = details.itemErrors ?? [];
 
-  if (raw && Object.hasOwn(raw, READ_VALUE)) {
-    const batch = batchFromDetails(details);
-    const result = {ok: !hostResultFailed(raw), value: raw[READ_VALUE], typed: true, cloneItems: details?.jsonMany === true, truncated: details?.outputTruncated === true};
-    attachDetails(result, details, batch);
+  if (details.sourcePaths) result.sourcePaths = details.sourcePaths;
+}
 
-    if (isString(details?.sourcePath)) result.sourcePath = details.sourcePath;
-
-    if (batch) {
-      result.items = batch;
-      result.itemErrors = details.itemErrors ?? [];
-
-      if (details.sourcePaths) result.sourcePaths = details.sourcePaths;
-    }
-
-    if (details?.streamed) result.streamed = true;
-
-    return result;
-  }
-
-  const maxChars = config.maxCallResultChars ?? 65536;
+function typedHostResult(raw, details) {
   const batch = batchFromDetails(details);
-  const text = batch ? "" : extractRawString(raw);
+  const result = {ok: !hostResultFailed(raw), value: raw[READ_VALUE], typed: true, cloneItems: details?.jsonMany === true, truncated: details?.outputTruncated === true};
+  attachDetails(result, details, batch);
+
+  if (isString(details?.sourcePath)) result.sourcePath = details.sourcePath;
+
+  if (batch) attachTypedBatch(result, batch, details);
+
+  if (details?.streamed) result.streamed = true;
+
+  return result;
+}
+
+function hasStructuredResult(raw, acceptsStructured) {
+  return acceptsStructured && !hostResultFailed(raw) && raw?.structuredContent !== undefined;
+}
+
+function displayedHostText(raw, batch, structured) {
+  return batch ? "" : structured ? json(raw.structuredContent) : extractRawString(raw);
+}
+
+function boundedStructuredValue(raw, capped) {
+  return capped.truncated ? capped.text : raw.structuredContent;
+}
+
+function boundedHostResult(raw, details, config, acceptsStructured) {
+  const maxChars = config.maxCallResultChars ?? 65536;
+  const structured = hasStructuredResult(raw, acceptsStructured);
+  const batch = structured ? undefined : batchFromDetails(details);
+  const text = displayedHostText(raw, batch, structured);
   const capped = truncateChars(text, maxChars, "host-result");
   let truncated = hostTruncated(capped, details);
   const image = hostImage(raw);
   const directoryEntries = directoryEntriesIfFit(image, details, maxChars);
-  const result = { ok: !hostResultFailed(raw), value: hostResultValue(image, directoryEntries, capped), truncated };
+  const result = { ok: !hostResultFailed(raw), value: structured ? boundedStructuredValue(raw, capped) : hostResultValue(image, directoryEntries, capped), truncated };
+
+  // Even a clipped JSON display is already materialized; read must not parse it.
+  if (structured) result.typed = true;
   attachDetails(result, details, batch);
   truncated ||= attachBatch(result, batch, details, maxChars);
   attachTruncation(result, truncated, batch, text, config, maxChars, capped);
 
   return result;
+}
+
+export function packageHostResult(raw, config, acceptsStructured = false) {
+  const details = detailsOf(raw);
+
+  return raw && Object.hasOwn(raw, READ_VALUE)
+    ? typedHostResult(raw, details)
+    : boundedHostResult(raw, details, config, acceptsStructured);
 }
 
 export {packageFinalReturn} from "./final.js";

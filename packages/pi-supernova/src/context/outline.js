@@ -54,11 +54,11 @@ function foldedLine(span) {
   return String(span.start).padStart(5) + " " + sig + (body > 0 ? " … " + body + " lines" : "");
 }
 
-function expandedBlock(span, raw, opts) {
+function expandedBlock(span, raw, opts, names) {
   const out = [];
 
   for (let l = span.start; l <= span.end; l++) out.push(String(l).padStart(5) + " " + raw[l - 1]);
-  const refs = opts.references ? opts.references(span.name, span.start) : [];
+  const refs = opts.references ? opts.references(span.name, span.start, names) : [];
 
   // Who uses this declaration: the relation a reader would otherwise grep for next.
   if (refs.length) out.push("      // used by: " + refs.slice(0, opts.maxRefs).join(", ") + (refs.length > opts.maxRefs ? " (+" + (refs.length - opts.maxRefs) + ")" : ""));
@@ -129,8 +129,9 @@ export function outlineFile(entry, relPath, about, options = {}) {
   if (spans.length === 0) return about ? focusedText(raw, lower, stems, relPath, opts) : null;
   const expanded = chooseExpanded(spans, lower, stems, raw, opts);
   const parts = outlineHeader(spans, raw, opts);
+  const names = [...expanded].map(i => spans[i].name);
 
-  for (let i = 0; i < spans.length; i++) parts.push(expanded.has(i) ? expandedBlock(spans[i], raw, opts) : foldedLine(spans[i]));
+  for (let i = 0; i < spans.length; i++) parts.push(expanded.has(i) ? expandedBlock(spans[i], raw, opts, names) : foldedLine(spans[i]));
   const label = about ? String(about).replace(/\s+/g, " ").slice(0, 120) : "";
   const title = "// " + relPath + " · " + lineCount + " lines · " + spans.length + " declarations · " + expanded.size + " expanded" + (label ? " for \"" + label + "\"" : "") + " · read(path, line, count) for a folded body";
 

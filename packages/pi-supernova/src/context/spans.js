@@ -6,6 +6,7 @@ export function pickSpan(spans, { line, name } = {}) {
   const named = needle ? spans.filter(item => item.name.toLowerCase() === needle) : [];
 
   if (named.length === 1) return named[0];
+
   if (!line) return;
 
   return spans.find(item => item.start === line)

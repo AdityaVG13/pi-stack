@@ -246,4 +246,5 @@ function pageRank(spans, graph, eta, prior, { gamma, pprIterations }) {
 
   return pi;
 }
+
 export { splitIdentifier, spanLines, buildGraph, activateEntities, propagate, pageRank };

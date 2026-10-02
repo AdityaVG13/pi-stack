@@ -36,6 +36,14 @@ function wake(job) {
   for (const notify of job.waiters) notify();
 }
 
+// Decoded streams contain complete pairs, but retention/cursor slicing may
+// land on a low surrogate. Deliver only the next complete code point.
+function completeCharacterStart(text, index) {
+  const code = text.charCodeAt(index);
+
+  return code >= 0xdc00 && code <= 0xdfff ? index + 1 : index;
+}
+
 function appendOutput(job, chunk) {
   job.total += chunk.length;
   job.output = (job.output + chunk).slice(-OUTPUT_CHARS);
@@ -45,12 +53,12 @@ function appendOutput(job, chunk) {
 function snapshot(job, cursor = 0) {
   if (cursor > job.total) throw new Error("terminal cursor is beyond available output");
   const start = job.total - job.output.length;
-  const outputStart = Math.max(start, cursor);
+  const outputStart = start + completeCharacterStart(job.output, Math.max(0, cursor - start));
 
   const result = {
     sessionId:job.id, pid:job.child.pid, status:job.status, pty:job.pty,
     exitCode:job.exitCode, signal:job.signal, outputStart, cursor:job.total,
-    truncated:cursor < start, output:job.output.slice(outputStart-start),
+    truncated:cursor < outputStart, output:job.output.slice(outputStart-start),
   };
 
   if (job.error) result.error = job.error;

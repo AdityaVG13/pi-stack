@@ -1,6 +1,7 @@
 import {isFunction} from '../shared/decode.js';
 
-const PROGRESS_FRAME_MS = 80;
+// Leave headroom for Pi's own render coalescing while providing ~31Hz live state.
+const PROGRESS_FRAME_MS = 32;
 
 /**
  * Live trace updates for the card. The first update is immediate (seeds the result slot);

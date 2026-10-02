@@ -90,3 +90,164 @@ it("evidence admits content hits beyond the topology cap and reports exact clipp
   assert.deepEqual(clipped.lines,[1,1]);
   assert.equal(clipped.nextOffset,2);
 });
+
+it("BOM bytes survive full reads, windows, edits and saved programs while JSON strips only its own leading BOM", async t => {
+  const f = await engineFixture(t);
+  const body = "\ufefffirst\r\n\ufeffsecond λ😀\nlast\n";
+  await f.write("bom.txt", body);
+  const full = await f.execute('return await read("bom.txt");');
+  assert.equal(full.details.result, body);
+  const windows = await f.execute('return await Promise.all([read("bom.txt",1,1),read("bom.txt",2,1),read("bom.txt",3,1)]);');
+  assert.deepEqual(windows.details.result, ["\ufefffirst\r\n", "\ufeffsecond λ😀\n", "last\n"]);
+  await f.execute('await edit("bom.txt","second","changed");');
+  assert.deepEqual(await fs.readFile(path.join(f.root,"bom.txt")), Buffer.from(body.replace("second","changed")));
+  await f.write("bom.json", '\ufeff{"value":false}');
+  assert.equal((await f.execute('return await read({path:"bom.json",json:".value"});')).details.result, false);
+  await f.write("double-bom.json", '\ufeff\ufeff{"value":false}');
+  await assert.rejects(f.execute('return await read({path:"double-bom.json",json:true});'), /invalid JSON/);
+  await f.write("bom-program.js", '\ufeffreturn await read("bom.txt");');
+  const saved = await f.tool.execute("bom-program", {file:"bom-program.js"}, undefined, undefined, {cwd:f.root});
+  assert.equal(saved.details.result, body.replace("second","changed"));
+});
+
+it("malformed UTF-8 windows fail without dropping corrupt bytes or committing prior edits", async t => {
+  const f = await engineFixture(t);
+  const inputs = [Buffer.from([97,255,10,98,10]), Buffer.from([97,0xe2,0x82,10,98,10])];
+
+  for (const [i,bytes] of inputs.entries()) {
+    await fs.writeFile(path.join(f.root,"bad.txt"), bytes);
+    await assert.rejects(f.execute('await write("pending-'+i+'.txt","discard"); return await read("bad.txt",1,1);'), /not valid UTF-8.*bad\.txt/);
+    await assert.rejects(fs.stat(path.join(f.root,"pending-"+i+".txt")), {code:"ENOENT"});
+    assert.deepEqual(await fs.readFile(path.join(f.root,"bad.txt")), bytes);
+  }
+});
+
+it("empty read windows retain the observed file version and never overwrite intervening changes", async t => {
+  for (const [body,options] of [["before\n",{limit:0}],["before\n",{offset:999,limit:1}],["",{offset:1,limit:1}]]) {
+    const f = await engineFixture(t);
+    await f.write("state.txt", body);
+    const code = 'await read({path:"state.txt",...'+JSON.stringify(options)+'}); '+GUEST_GATE_POLL+' await write({path:"state.txt",content:"lost external update",replace:true});';
+    const {pending,gate} = gatedExecute(f, code, row => row.name === "read" && row.ok === true);
+    await gate;
+    await f.write("state.txt", "external change\n");
+    await f.write("go.txt", "go");
+    await assert.rejects(pending, /write conflict/);
+    assert.equal(await fs.readFile(path.join(f.root,"state.txt"),"utf8"), "external change\n");
+  }
+});
+
+
+it("owned writes and edits reject unpaired surrogates instead of silently replacing bytes", async t => {
+  const f = await engineFixture(t);
+  const original = "\ufefforiginal 😀 λ\r\n";
+  const malformed = ["\ud800", "\udc00", "prefix 😀".slice(0, 8), "valid 😀 then \ud800 tail"];
+  await f.write("unicode.txt", original);
+
+  for (const content of malformed) {
+    assert.equal(content.isWellFormed(), false);
+    await assert.rejects(f.execute('await write("pending.txt", "discard"); await write({path:"unicode.txt",content:' + JSON.stringify(content) + ',replace:true});'), /well-formed|surrogate/i);
+    assert.deepEqual(await fs.readFile(path.join(f.root, "unicode.txt")), Buffer.from(original));
+    await assert.rejects(fs.stat(path.join(f.root, "pending.txt")), { code: "ENOENT" });
+  }
+
+  await assert.rejects(f.execute('await write({path:"unicode.txt",content:"\\udc00",append:true});'), /well-formed|surrogate/i);
+  await assert.rejects(f.execute('await edit("unicode.txt", "\\ud83d", "X");'), /well-formed|surrogate/i);
+  assert.deepEqual(await fs.readFile(path.join(f.root, "unicode.txt")), Buffer.from(original));
+  await f.write("patch.txt", "before\n");
+  const patch = "@@ -1 +1 @@\n-before\n+\ud800\n";
+  await assert.rejects(f.execute('await edit({path:"patch.txt",patch:' + JSON.stringify(patch) + '});'), /well-formed|surrogate/i);
+  assert.equal(await fs.readFile(path.join(f.root, "patch.txt"), "utf8"), "before\n");
+  const valid = "\ufeffcombining e\u0301 and 😀\r\n";
+  const result = await f.execute('await write("unicode.txt", ' + JSON.stringify(valid) + '); return await read("unicode.txt");');
+  assert.equal(result.details.result, valid);
+  assert.deepEqual(await fs.readFile(path.join(f.root, "unicode.txt")), Buffer.from(valid));
+});
+
+it("edit line coordinates count newline boundaries without confusing UTF-16 offsets", async () => {
+  const { lineNumberAt } = await import("../../src/fs/lines.js");
+  const { applyReplacements, boundedEditDiff } = await import("../../src/fs/text-ops.js");
+  const values = ["", "\n", "\r\n", "\ufeff😀 first\r\nλ second\nend", "x\n".repeat(256), "\n".repeat(512), "x".repeat(2048)];
+
+  for (const text of values) {
+    for (let index = 0; index <= text.length; index++) {
+      const expected = text.slice(0, index).split("\n").length;
+      assert.equal(lineNumberAt(text, index), expected, "UTF-16 offset " + index);
+    }
+  }
+
+  const original = "\ufeff😀 first\r\nsecond\nlast";
+
+  const { updated, matches } = applyReplacements("text.txt", original, [
+    { oldText: "\r\nsecond", newText: "\r\ninserted\nchanged" },
+    { oldText: "last", newText: "tail" },
+  ]);
+
+  const diff = boundedEditDiff("text.txt", original, matches);
+  assert.equal(updated, "\ufeff😀 first\r\ninserted\nchanged\ntail");
+  assert.deepEqual(diff.lines.filter(row => row.type === "remove").map(row => row.lineNum), [1, 2, 3]);
+  assert.deepEqual(diff.lines.filter(row => row.type === "add").map(row => row.newLineNum), [1, 2, 3, 4]);
+});
+
+
+it("file paths preserve literal whitespace instead of addressing a different entry", async t => {
+  const f = await engineFixture(t);
+  await f.write("report.txt", "plain");
+  await f.write(" report.txt ", "spaced");
+  assert.equal((await f.execute('return await read({path:" report.txt "});')).details.result, "spaced");
+  await f.execute('await write({path:" report.txt ",content:"updated",replace:true}); await edit(" report.txt ","updated","edited"); await write("new.txt ","new");');
+  assert.equal(await fs.readFile(path.join(f.root, " report.txt "), "utf8"), "edited");
+  assert.equal(await fs.readFile(path.join(f.root, "report.txt"), "utf8"), "plain");
+  assert.equal(await fs.readFile(path.join(f.root, "new.txt "), "utf8"), "new");
+  await assert.rejects(fs.stat(path.join(f.root, "new.txt")), { code: "ENOENT" });
+  await f.write(" ", "one space");
+  assert.equal((await f.execute('return await read({path:" "});')).details.result, "one space");
+  await f.execute('await edit(" ","one space","edited space"); await write("  ","two spaces");');
+  assert.equal(await fs.readFile(path.join(f.root, " "), "utf8"), "edited space");
+  assert.equal(await fs.readFile(path.join(f.root, "  "), "utf8"), "two spaces");
+  assert.deepEqual((await f.execute('return await read([" ","  "]);')).details.result, ["edited space", "two spaces"]);
+  await f.execute('const view = await read({path:" ",resolve:true}); await edit(view,"edited space","via view");');
+  assert.equal(await fs.readFile(path.join(f.root, " "), "utf8"), "via view");
+  await f.write("   ", 'return "space program";');
+  const spaces = await f.tool.execute("space-program", { file: "   " }, undefined, undefined, { cwd: f.root });
+  assert.equal(spaces.details.result, "space program");
+  await assert.rejects(f.execute('return await read({path:""});'), /requires path/);
+  await f.write("script.js", 'return "plain";');
+  await f.write(" script.js ", 'return "spaced";');
+  const saved = await f.tool.execute("spaced-program", { file: " script.js " }, undefined, undefined, { cwd: f.root });
+  assert.equal(saved.details.result, "spaced");
+});
+
+it("malformed Unicode paths never alias a replacement-character filename", async t => {
+  const f = await engineFixture(t);
+  const actual = "bad\ufffd.txt";
+  const malformed = JSON.stringify("bad\ud800.txt");
+  await f.write(actual, "preserved");
+
+  const programs = [
+    'return await read({path:' + malformed + '});',
+    'await write({path:' + malformed + ',content:"wrong file",replace:true});',
+    'await edit(' + malformed + ',"preserved","wrong file");',
+  ];
+
+  for (const code of programs) {
+    await assert.rejects(f.execute(code), /well-formed|surrogate/i);
+    assert.equal(await fs.readFile(path.join(f.root, actual), "utf8"), "preserved");
+  }
+
+  assert.equal((await f.execute('return await read({path:' + JSON.stringify(actual) + '});')).details.result, "preserved");
+  await f.write("bad�.js", 'await write("ran.txt", "wrong program");');
+  await assert.rejects(f.tool.execute("malformed-program", { file: "bad\ud800.js" }, undefined, undefined, { cwd: f.root }), /well-formed|surrogate/i);
+  await assert.rejects(fs.stat(path.join(f.root, "ran.txt")), { code: "ENOENT" });
+});
+
+
+it("large edit previews preserve shifted coordinates and mixed line endings", async t => {
+  const f = await engineFixture(t);
+  const padding = "padding for a large edit preview\r\n".repeat(18000);
+  const original = padding + "first target\r\nkeep 😀\nsecond target\r\nend\r";
+  await f.write("large.txt", original);
+  const result = await f.execute('return await edit({path:"large.txt",edits:[{oldText:"first target",newText:"first changed\\ninserted"},{oldText:"second target",newText:"second changed"}]});');
+  assert.equal(await fs.readFile(path.join(f.root, "large.txt"), "utf8"), original.replace("first target", "first changed\ninserted").replace("second target", "second changed"));
+  const receipt = result.details.result;
+  assert.match(receipt, /18001 first changed\n18002 inserted\n18003 keep 😀\n18004 second changed\n18005 end\r/);
+});

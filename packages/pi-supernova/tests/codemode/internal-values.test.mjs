@@ -29,6 +29,7 @@ it("directory values remain arrays regardless of spelling, size or batching", as
   const f = await engineFixture(t);
   const dir=path.join(f.root,"many-files"); await fs.mkdir(dir);
   const names=Array.from({length:800},(_,i)=>"entry-"+String(i).padStart(4,"0")+"-"+"x".repeat(72)+".txt");
+
   for(let start=0;start<names.length;start+=64) await Promise.all(names.slice(start,start+64).map(name=>fs.writeFile(path.join(dir,name),"x")));
   const result=await f.execute('const single=await read("many-files"); const concurrent=await Promise.all([read("many-files"),read("./many-files/")]); const batch=await read(["many-files","./many-files/"]); return [single,...concurrent,...batch].map(entries=>({array:Array.isArray(entries),count:entries.filter(entry=>entry.startsWith("entry-")).length}));');
   assert.deepEqual(result.details.result,Array.from({length:5},()=>({array:true,count:800})));
@@ -84,6 +85,7 @@ it("final presentation obeys its cap even for thousands of string entries", () =
 
 it("large JSON selector batches keep independently mutable values in both delivery modes", async t => {
   const f=await engineFixture(t);
+
   for (const size of [2,50000]) {
     await f.write("aliases.json",JSON.stringify({nested:{text:"x".repeat(size)}}));
     const result=await f.execute('const reads=await read(["aliases.json","aliases.json"],{json:[".nested",".nested"]}); reads[0][0].text="changed"; return reads.map(parts=>parts.map(part=>part.text.length));');
@@ -118,13 +120,17 @@ it("native read delivery backpressure holds at most eight I/O slots and drains o
   const bridge=createHostBridge({pi:null,config:packageDefaults(),getCwd:()=>f.root});
   const gate=Promise.withResolvers(),eight=Promise.withResolvers();
   let started=0,active=0,peak=0;
+
   const pending=bridge.natives.read({path:Array(24).fill("payload.txt")},undefined,async (_index,raw) => {
     assert.equal(raw.content[0].text.length,50000);
     started++; active++; peak=Math.max(peak,active);
+
     if(started===8) eight.resolve();
     await gate.promise; active--;
   });
+
   const timer=setTimeout(()=>eight.reject(new Error("stream delivery did not fill its eight slots")),5000);
+
   try {
     await eight.promise;
     await new Promise(resolve=>setTimeout(resolve,20));
@@ -162,6 +168,7 @@ it("64 large reads, blocked acknowledgements and expanded returns leave a constr
   const code=String.raw`await write("derived.txt","retained"); return await Promise.all(Array.from({length:64},async()=>{const text=await read("large.txt"); return [text.length,text.slice(-3)];}));`;
   const blocked=String.raw`await write("cancelled.txt","must roll back"); const jobs=Array.from({length:64},()=>read("large.txt")); await Promise.race(jobs); while(true) {}`;
   const expansion=String.raw`const values=Array(100000).fill("x".repeat(10000)); console.log({values}); return {values};`;
+
   const program=`import assert from "node:assert/strict";
     import {registerCodeMode} from ${JSON.stringify(new URL("../../index.js",import.meta.url).href)};
     import {stopWarmGuestWorker} from ${JSON.stringify(new URL("../../src/runtime/runtime.js",import.meta.url).href)};
@@ -178,18 +185,41 @@ it("64 large reads, blocked acknowledgements and expanded returns leave a constr
     await stopWarmGuestWorker();
     await new Promise(resolve=>setTimeout(resolve,50));
     console.log("streamed, cancelled, bounded, and survived");`;
+
   const child=await promisify(execFile)(process.execPath,["--max-old-space-size=128","--input-type=module","-e",program],{timeout:20000,maxBuffer:1024*1024});
   assert.match(child.stdout,/streamed, cancelled, bounded, and survived/);
   assert.equal(await fs.readFile(path.join(f.root,"derived.txt"),"utf8"),"retained");
   await assert.rejects(fs.stat(path.join(f.root,"cancelled.txt")),{code:"ENOENT"});
 });
 
-it("staged line windows enforce the same UTF-8 byte ceiling as disk windows", async () => {
-  const {createWindowReader}=await import("../../src/fs/read-window.js");
-  const readWindow=createWindowReader({getOverlay:()=>"λλλλ\nnext\n"});
-  const exact=await readWindow("staged.txt",1,1,9);
-  assert.equal(exact.satisfied,true);
-  assert.equal(exact.text,"λλλλ\n");
-  assert.equal((await readWindow("staged.txt",1,1,8)).satisfied,false);
-  assert.equal((await readWindow("staged.txt",2,1,8)).text,"next\n");
+it("disk and staged line windows enforce the exact UTF-8 byte ceiling at EOF and newline boundaries", async t => {
+  const f = await engineFixture(t);
+  const {createWindowReader} = await import("../../src/fs/read-window.js");
+  const {CausalVfs} = await import("../../src/fs/vfs.js");
+  const target = path.join(f.root,"window.txt");
+
+  for (const text of ["λλλλ\nnext\n","λλλλ\n"]) {
+    await f.write("window.txt",text);
+
+    for (const vfs of [{getOverlay:() => text},new CausalVfs()]) {
+      const readWindow = createWindowReader(vfs);
+      const exact = await readWindow(target,1,1,9);
+      assert.equal(exact.satisfied,true);
+      assert.equal(exact.text,"λλλλ\n");
+      assert.equal((await readWindow(target,1,1,8)).satisfied,false);
+      assert.equal((await readWindow(target,1,undefined,Buffer.byteLength(text)-1)).satisfied,false);
+      assert.equal((await readWindow(target,2,1,8)).text,text === "λλλλ\n" ? "" : "next\n");
+    }
+  }
+});
+
+
+it("JSON selector batches cannot bypass aggregate string storage limits or commit staged work", async t => {
+  const f = await engineFixture(t);
+  await f.write("report.json",JSON.stringify({rows:Array(600).fill("x".repeat(1024))}));
+  await assert.rejects(f.execute('await write("must-rollback.txt","staged"); return await read({path:"report.json",json:Array(64).fill(".rows")});'),/JSON selection failed.*remaining storage budget/);
+  await assert.rejects(fs.stat(path.join(f.root,"must-rollback.txt")),{code:"ENOENT"});
+  const recovered = await f.execute('const rows=await read({path:"report.json",json:".rows"});await write("accepted.txt",rows[599]);return [rows.length,rows[0].length,rows[599].length];');
+  assert.deepEqual(recovered.details.result,[600,1024,1024]);
+  assert.equal(await fs.readFile(path.join(f.root,"accepted.txt"),"utf8"),"x".repeat(1024));
 });

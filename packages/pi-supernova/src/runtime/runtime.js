@@ -1,5 +1,7 @@
 import {acquireWorker,killWorker} from './worker-pool.js';
+
 export {warmGuestWorker,stopWarmGuestWorker} from './worker-pool.js';
+
 import {admitGuest,prepareProgram,normalizeGuestLocation} from './program.js';
 
 import { readProgramFile } from "./program-file.js";
@@ -18,7 +20,8 @@ const GUEST_COMMANDS = new Set(["read", "edit", "write", "bash"]);
 // shadow it (redeclaration or TDZ); `supernova` is the tool, not a guest
 // function; `data` can only collide when the call supplied it. Anything
 // else gets no hint.
-function guestMistakeHint(message) {
+function guestMistakeHint(message, kind) {
+  if (kind !== "ReferenceError" && kind !== "SyntaxError") return "";
   const name = /Identifier '([^']+)' has already been declared/.exec(message)?.[1] ?? /Cannot access '([^']+)' before initialization/.exec(message)?.[1];
 
   if (GUEST_COMMANDS.has(name)) return "; `" + name + "` is a supernova command: give your variable another name (e.g. const text = await " + name + "(...))";
@@ -31,6 +34,7 @@ function guestMistakeHint(message) {
 }
 
 const ABORT_MESSAGE = "supernova aborted";
+
 const TIMEOUT_MESSAGE = "supernova timed out: increase the outer timeoutMs (and any shorter bash timeoutMs), or split the program; sleeps count toward the deadline";
 
 const MEMORY_SLACK = 1.5;
@@ -42,7 +46,9 @@ export function formatMemoryAttribution({ limitMb, heapBytes, externalBytes, ms,
   const parts = tracked
     ? [["vfs cache", tracked.vfsCacheBytes], ["index entries", tracked.indexBytes], ["overlays", tracked.overlayBytes]]
     : [];
+
   const where = op ? ` during ${op} (${calls} host calls)` : ` (${calls} host calls)`;
+
   const seen = parts.length
     ? `; supernova-tracked host bytes (not charged to guest): ${parts.map(([name, bytes]) => `${name} ${toMb(Number(bytes) || 0).toFixed(1)}MB`).join(", ")} in ${tracked.overlayFiles ?? 0} overlay files`
     : "";
@@ -54,11 +60,6 @@ let runSeq = 0;
 
 const RPC_METHODS = {
   call: (nova, args, onItem) => nova.call(args[0], args[1], onItem),
-  callMany: async (nova, args) => {
-    const wave = await nova.callMany(args[0]);
-
-    return Array.isArray(wave) ? { results: [...wave], mode: wave.mode, reason: wave.reason } : wave;
-  },
   speculateBegin: (nova) => nova.speculateBegin(),
   speculateCommit: (nova) => nova.speculateCommit(),
   speculateRollback: (nova) => nova.speculateRollback(),
@@ -149,6 +150,7 @@ class GuestRun {
 
     try {
       this.handle.worker.postMessage({ ...message, runId: this.runId });
+
       return true;
     } catch (err) {
       try {
@@ -156,6 +158,7 @@ class GuestRun {
       } catch (error) {
         this.onError(error);
       }
+
       return false;
     }
   }
@@ -163,8 +166,10 @@ class GuestRun {
   deliverReadItem(id, index, value) {
     if (!this.accepting) return Promise.reject(new Error("aborted"));
     const key = id + ":" + index;
+
     return new Promise((resolve,reject) => {
       this.deliveries.set(key,{resolve,reject});
+
       if (!this.postResult({op:"rpc:item",id,index,value})) {
         this.deliveries.delete(key);
         reject(new Error("read result not transferable"));
@@ -175,20 +180,24 @@ class GuestRun {
   onReadAck(msg) {
     const key = msg.id + ":" + msg.index;
     const delivery = this.deliveries.get(key);
+
     if (!delivery) return;
     this.deliveries.delete(key);
+
     if (msg.error) delivery.reject(new Error(msg.error));
     else delivery.resolve();
   }
 
   async drainPending(outcome) {
     if (this.pending.size || !outcome.ok) this.cancelHost();
+
     if (!this.pending.size) return;
     let timer;
 
     try {
       await Promise.race([Promise.allSettled(this.pending), new Promise(resolve => { timer = setTimeout(resolve, 250); })]);
     } finally { clearTimeout(timer); }
+
     if (this.pending.size && outcome.ok) this.hostError ??= "program completed with a host call still running";
   }
 
@@ -201,11 +210,14 @@ class GuestRun {
     this.handle?.worker.off("exit", this.onExit);
     void killWorker(this.handle);
     await this.drainPending(outcome);
+
     if (this.finished) return;
+
     if (this.abortOutcome) {
       const diagnostic = this.hostError && this.hostError !== "aborted" ? "\n" + this.hostError : "";
       outcome = this.fail(this.abortOutcome.error + diagnostic);
     }
+
     this.finish(outcome.ok && this.hostError ? this.fail(this.hostError) : outcome);
   }
 
@@ -223,11 +235,13 @@ class GuestRun {
     const method = Object.hasOwn(RPC_METHODS, msg.method) && RPC_METHODS[msg.method];
     this.rpcCount++;
     this.lastRpcMethod = isString(msg.method) ? msg.method : null;
+
     const work = Promise.resolve().then(() => {
       if (!method) throw new Error("unknown nova method: " + msg.method);
 
       const onItem = msg.streamRead && msg.method === "call" && msg.args?.[0] === "read"
         ? (index,value) => this.deliverReadItem(msg.id,index,value) : undefined;
+
       return method(this.nova, msg.args, onItem);
     });
 
@@ -245,8 +259,10 @@ class GuestRun {
     // A completed guest cannot submit more work while attachments are decoded.
     // The outer timer stays armed; no commit occurs before validation completes.
     this.accepting = false;
+
     try {
       const packed = msg.output ?? packageFinalReturn(msg.value, this.logs, this.config);
+
       if (packed.images?.length) await validateReturnedImages(packed.images,this.inputController.signal);
       void this.complete({ ok: true, result: packed.returnValue, resultText: packed.returnText,
         returnTruncated: packed.returnTruncated, images: packed.images, undefinedReturn: msg.undefinedReturn === true,
@@ -257,18 +273,25 @@ class GuestRun {
   }
 
   guestError(msg) {
-    const location = normalizeGuestLocation(this.prepared.body, msg.location);
+    const location = normalizeGuestLocation(this.code, msg.location, this.prepared);
     const where = location ? " (line " + location.line + ":" + location.col + ")" : "";
-    void this.complete(this.fail(msg.message + where + guestMistakeHint(msg.message)));
+
+    // Native errors may include source lines and carets. Annotate the headline,
+    // never the end of that diagnostic payload.
+    const message = msg.message.replace(/(\r\n|[\n\r\u2028\u2029]|$)/, where + "$1");
+    void this.complete(this.fail(message + guestMistakeHint(msg.message, msg.errorKind)));
   }
 
   onMemory(msg) {
     const { heapUsed, external } = msg;
+
     if (![heapUsed, external].every(bytes => Number.isFinite(bytes) && bytes >= 0)) return;
+
     if (heapUsed + external <= (this.config.maxHeapMb ?? 512) * MEMORY_SLACK * 1048576) return;
     let tracked = null;
 
     try { tracked = isFunction(this.nova?.describeMemory) ? this.nova.describeMemory() : null; } catch {}
+
     // Use the same cancellation/drain path as other failures, not an early
     // finish that can return while a host command is still mutating files.
     void this.complete(this.fail(formatMemoryAttribution({
@@ -296,8 +319,14 @@ class GuestRun {
 
   async loadCode() {
     if (this.file !== undefined) this.code = await readProgramFile(this.file, this.cwd, this.config.maxCodeChars ?? 48000, this.inputController.signal);
+
     if (this.finished) return false;
-    if (!this.code.trim()) { this.finish(this.fail("code must be a non-empty string; no commands ran")); return false; }
+
+    if (!this.code.trim()) {
+      this.finish(this.fail("code must be a non-empty string; no commands ran"));
+
+      return false;
+    }
 
     try { this.prepared = prepareProgram(this.code); }
     catch (error) {
@@ -306,6 +335,7 @@ class GuestRun {
         : " Fix " + this.file + " and re-run.";
 
       this.finish(this.fail("JavaScript syntax error" + (this.file === undefined ? "" : " in " + this.file) + ": " + error.message + "; no commands ran." + guidance + errorContext(this.code, error)));
+
       return false;
     }
 
@@ -313,18 +343,41 @@ class GuestRun {
   }
 
   async attachWorker() {
-    if (this.wall() >= this.timeoutMs) { this.abort(true); return false; }
+    if (this.wall() >= this.timeoutMs) {
+      this.abort(true);
+
+      return false;
+    }
+
     this.handle = acquireWorker(this.config);
     await this.handle.ready;
-    if (this.finished || this.signal?.aborted) { this.abort(); return false; }
+
+    if (this.finished || this.signal?.aborted) {
+      this.abort();
+
+      return false;
+    }
+
     let available = isFunction(this.nova.names) ? await this.nova.names() : [];
 
     if (!Array.isArray(available)) available = [];
-    if (this.finished || this.signal?.aborted) { this.abort(); return false; }
+
+    if (this.finished || this.signal?.aborted) {
+      this.abort();
+
+      return false;
+    }
+
     this.handle.worker.on("message", this.onMessage);
     this.handle.worker.on("error", this.onError);
     this.handle.worker.on("exit", this.onExit);
-    if (this.wall() >= this.timeoutMs) { this.abort(true); return false; }
+
+    if (this.wall() >= this.timeoutMs) {
+      this.abort(true);
+
+      return false;
+    }
+
     this.available = available;
 
     return true;
@@ -341,7 +394,9 @@ class GuestRun {
   async boot() {
     try {
       if (this.signal?.aborted) return this.abort();
+
       if (!await this.loadCode()) return;
+
       if (!await this.attachWorker()) return;
       this.postRun();
     } catch (err) {
@@ -366,6 +421,7 @@ export async function runGuestProgram({ code, file, cwd = process.cwd(), data, n
   const fail = (error) => ({ ok: false, error: truncateChars(String(error), config.maxReturnChars ?? 32000, "error").text, logs: [], logTruncated: false, wallMs: 0 });
 
   if (admitted.error) return fail(admitted.error);
+
   if (signal?.aborted) return fail(ABORT_MESSAGE);
 
   return new GuestRun({
