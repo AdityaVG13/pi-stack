@@ -92,6 +92,51 @@ function makeStageEntry(logicalPath, target, content, parent, stat) {
   return { logicalPath, target, content, temporary: path.join(parent, token + ".new"), backup: path.join(parent, token + ".bak"), existed: !!stat, observed: stat, replaced: false };
 }
 
+// Windows readers and antivirus can briefly deny replacement. Bound retries and
+// renew the destination/ownership guard after waiting; never replay a stale CAS.
+async function renameWithSharingRetry(from, to, validate) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.rename(from, to);
+
+      return;
+    }
+    catch (error) {
+      if (process.platform !== "win32" || !["EPERM", "EBUSY"].includes(error.code) || attempt >= 2) throw error;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await validate();
+  }
+}
+
+async function assertPublishedContent(entry) {
+  const expected = textSignature(entry.content);
+  const stat = await fs.stat(entry.target);
+
+  // Recovery must not destroy changes made after our publication. Check
+  // cheap type/size differences before hashing a possibly replaced file.
+  if (!stat.isFile() || stat.size !== expected.size || !sameSignature(await fileSignature(entry.target, undefined, stat), expected)) {
+    throw new Error("destination changed after publication; left unchanged");
+  }
+}
+
+async function assertStageReady(vfs, entry) {
+  vfs.assertCurrent?.();
+  vfs.signal?.throwIfAborted();
+  let current;
+
+  try { current = await fs.stat(entry.target); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+
+  if (!current || !sameFileVersion(entry.observed, current)) throw new Error("write conflict: file changed during commit staging: " + entry.logicalPath + "; read it again before retrying");
+
+  // Windows metadata can alias a rewrite while staging releases its handles.
+  if (process.platform === "win32") await assertExpectedSignature(vfs, entry.logicalPath, entry.target, current);
+  vfs.assertCurrent?.();
+  vfs.signal?.throwIfAborted();
+}
+
 async function recoverReplaced(staged) {
   const recoveryErrors = [];
 
@@ -99,16 +144,9 @@ async function recoverReplaced(staged) {
     if (!entry.replaced) continue;
 
     try {
-      const expected = textSignature(entry.content);
-      const stat = await fs.stat(entry.target);
+      await assertPublishedContent(entry);
 
-      // Recovery must not destroy changes made after our publication. Check
-      // cheap type/size differences before hashing a possibly replaced file.
-      if (!stat.isFile() || stat.size !== expected.size || !sameSignature(await fileSignature(entry.target, undefined, stat), expected)) {
-        throw new Error("destination changed after publication; left unchanged");
-      }
-
-      if (entry.existed) await fs.rename(entry.backup, entry.target);
+      if (entry.existed) await renameWithSharingRetry(entry.backup, entry.target, () => assertPublishedContent(entry));
       else await fs.unlink(entry.target);
     } catch (err) {
       // Keep the backup if recovery fails; never delete the remaining original.
@@ -143,21 +181,14 @@ async function assertExpectedSignature(vfs, logicalPath, target, stat) {
 
 async function installStaged(vfs, staged) {
   for (const entry of staged) {
-    if (entry.existed) {
-      let current;
-
-      try { current = await fs.stat(entry.target); }
-      catch (error) { if (error.code !== "ENOENT") throw error; }
-
-      if (!current || !sameFileVersion(entry.observed, current)) throw new Error("write conflict: file changed during commit staging: " + entry.logicalPath + "; read it again before retrying");
-    }
+    if (entry.existed) await assertStageReady(vfs, entry);
 
     // Staging, version checks and earlier publications await I/O. Recheck
     // ownership immediately before each disk effect; failCommit handles recovery.
     vfs.assertCurrent?.();
     vfs.signal?.throwIfAborted();
 
-    if (entry.existed) await fs.rename(entry.temporary, entry.target);
+    if (entry.existed) await renameWithSharingRetry(entry.temporary, entry.target, () => assertStageReady(vfs, entry));
     else {
       // Let the filesystem enforce absence, including case/Unicode aliases.
       // A preflight stat followed by rename would still clobber a racing file.

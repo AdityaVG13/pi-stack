@@ -70,8 +70,10 @@ export function createWindowReader(vfs) {
 
     const file = await openReadFile(target);
 
+    let stat, result, wholeBytes;
+
     try {
-      const stat = await file.stat();
+      stat = await file.stat();
 
       if (!stat.isFile()) throw new Error("read requires a regular file: " + target);
 
@@ -80,20 +82,22 @@ export function createWindowReader(vfs) {
         : await scanWindow(file, stat, startLine, lineCount, maxBytes, signal);
 
       if (scan.startByte === undefined) {
-        await vfs.recordExpected(target, stat);
-
-        return { text: "", satisfied: true, whole: stat.size === 0 };
+        result = { text: "", satisfied: true, whole: stat.size === 0 };
+      } else {
+        if (scan.collected > maxBytes) return { text: "", satisfied: false, whole: false };
+        const bytes = Buffer.concat(scan.parts, scan.collected);
+        const end = scan.startByte + scan.collected;
+        const eof = end >= stat.size;
+        const text = eof ? decodeUtf8Strict(bytes, target) : decodeUtf8Window(bytes, target);
+        const whole = startLine === 1 && scan.startByte === 0 && eof;
+        wholeBytes = whole ? bytes : undefined;
+        result = { text, satisfied: end >= scan.endByte || eof, whole };
       }
-
-      if (scan.collected > maxBytes) return { text: "", satisfied: false, whole: false };
-      const bytes = Buffer.concat(scan.parts, scan.collected);
-      const end = scan.startByte + scan.collected;
-      const eof = end >= stat.size;
-      const text = eof ? decodeUtf8Strict(bytes, target) : decodeUtf8Window(bytes, target);
-      const whole = startLine === 1 && scan.startByte === 0 && eof;
-      await vfs.recordExpected(target, stat, whole ? bytes : undefined);
-
-      return { text, satisfied: end >= scan.endByte || eof, whole };
     } finally { await file.close(); }
+
+    // An open read handle can prevent Windows from restoring a rollback backup.
+    await vfs.recordExpected(target, stat, wholeBytes);
+
+    return result;
   };
 }

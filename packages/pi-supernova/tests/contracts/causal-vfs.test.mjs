@@ -6,6 +6,7 @@ import path from "node:path";
 import { CausalVfs } from "../../src/fs/vfs.js";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { syncBuiltinESMExports } from "node:module";
 
 async function scratch() {
   return fs.mkdtemp(path.join(os.tmpdir(), "supernova-vfs-"));
@@ -158,3 +159,153 @@ it("loaded complete bytes retain CAS safety without accepting prefixes or stale 
   await vfs.write(file,"fresh write");
   assert.equal(await fs.readFile(file,"utf8"),"fresh write");
 });
+
+it("Windows loaded-byte baselines reject stale content even when version metadata aliases", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  const file = path.join(await scratch(), "aliased-metadata.bin"), oldBytes = Buffer.from("old"), newBytes = Buffer.from("new");
+  await fs.writeFile(file, oldBytes);
+  await fs.writeFile(file, newBytes);
+  // Equal Windows timestamps cannot distinguish these same-size snapshots.
+  const observed = await fs.stat(file);
+  Object.defineProperty(process, "platform", { ...descriptor, value: "win32" });
+
+  try {
+    const vfs = new CausalVfs();
+    await assert.rejects(vfs.recordExpected(file, observed, oldBytes), /file changed while reading/);
+    assert.deepEqual(await fs.readFile(file), newBytes);
+    await vfs.recordExpected(file, observed, newBytes);
+    await fs.writeFile(file, "external");
+    await assert.rejects(vfs.write(file, "lost update"), /write conflict/);
+    assert.equal(await fs.readFile(file, "utf8"), "external");
+    await vfs.recordExpected(file, await fs.stat(file), Buffer.from("external"));
+    await vfs.write(file, "committed");
+    assert.equal(await fs.readFile(file, "utf8"), "committed");
+  } finally { Object.defineProperty(process, "platform", descriptor); }
+});
+
+it("Windows publication checks content even when staged version metadata aliases", async t => {
+  const root = await fs.realpath(await scratch()), file = path.join(root, "raced.txt");
+  await fs.writeFile(file, "old value");
+  const observed = await fs.stat(file), stat = fs.stat, copyFile = fs.copyFile;
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  const vfs = new CausalVfs();
+  await vfs.read(file);
+  vfs.begin();
+  await vfs.write(file, "our value");
+  let raced = false;
+
+  const copyMock = t.mock.method(fs, "copyFile", async (...args) => {
+    await copyFile(...args);
+
+    if (args[0] === file) { await fs.writeFile(file, "external!"); raced = true; }
+  });
+
+  const statMock = t.mock.method(fs, "stat", async (...args) => {
+    const current = await stat(...args);
+
+    if (args[0] === file) { current.mtimeMs = observed.mtimeMs; current.ctimeMs = observed.ctimeMs; }
+
+    return current;
+  });
+
+  Object.defineProperty(process, "platform", { ...descriptor, value: "win32" });
+  syncBuiltinESMExports();
+
+  try {
+    await assert.rejects(vfs.commit(), /write conflict/);
+    assert.equal(raced, true);
+    assert.equal(await fs.readFile(file, "utf8"), "external!");
+    assert.deepEqual(await fs.readdir(root), ["raced.txt"]);
+  } finally {
+    copyMock.mock.restore();
+    statMock.mock.restore();
+    syncBuiltinESMExports();
+    Object.defineProperty(process, "platform", descriptor);
+  }
+});
+
+for (const outcome of ["released", "external", "persistent", "cancelled"]) {
+  it(`Windows sharing retry ${outcome} preserves publication safety`, { timeout: 1000 }, async t => {
+    const root = await fs.realpath(await scratch()), file = path.join(root, "shared.txt");
+    await fs.writeFile(file, "old value");
+    const vfs = new CausalVfs(), controller = new AbortController();
+    vfs.signal = controller.signal;
+    await vfs.read(file);
+    vfs.begin();
+    await vfs.write(file, "our value");
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform"), rename = fs.rename;
+    let blocked = false;
+
+    const mock = t.mock.method(fs, "rename", async (...args) => {
+      if (args[1] === file && (!blocked || outcome === "persistent")) {
+        blocked = true;
+
+        if (outcome === "external") await fs.writeFile(file, "external!");
+
+        if (outcome === "cancelled") controller.abort(new Error("cancelled sharing retry"));
+        throw Object.assign(new Error("sharing lock sentinel"), { code: "EPERM" });
+      }
+
+      return rename(...args);
+    });
+
+    Object.defineProperty(process, "platform", { ...descriptor, value: "win32" });
+    syncBuiltinESMExports();
+
+    try {
+      if (outcome === "released") await vfs.commit();
+      else await assert.rejects(vfs.commit(), outcome === "external" ? /write conflict/ : outcome === "cancelled" ? /cancelled sharing retry/ : /sharing lock sentinel/);
+      assert.equal(await fs.readFile(file, "utf8"), outcome === "released" ? "our value" : outcome === "external" ? "external!" : "old value");
+      assert.deepEqual(await fs.readdir(root), ["shared.txt"]);
+    } finally {
+      mock.mock.restore();
+      syncBuiltinESMExports();
+      Object.defineProperty(process, "platform", descriptor);
+    }
+  });
+}
+
+for (const outcome of ["released", "external"]) {
+  it(`Windows rollback sharing ${outcome} revalidates published bytes`, async t => {
+    const root = await fs.realpath(await scratch()), first = path.join(root, "first.txt"), tail = path.join(root, "tail.txt");
+    await fs.writeFile(first, "original");
+    await fs.writeFile(tail, "tail original");
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform"), rename = fs.rename;
+    let blocked = false;
+
+    const mock = t.mock.method(fs, "rename", async (from, to) => {
+      if (to === tail) throw new Error("later publication failed");
+
+      if (to === first && from.endsWith(".bak") && !blocked) {
+        blocked = true;
+
+        if (outcome === "external") await fs.writeFile(first, "external");
+        throw Object.assign(new Error("rollback sharing lock"), { code: "EPERM" });
+      }
+
+      return rename(from, to);
+    });
+
+    Object.defineProperty(process, "platform", { ...descriptor, value: "win32" });
+    syncBuiltinESMExports();
+
+    try {
+      const vfs = new CausalVfs();
+      await assert.rejects(vfs.flush(new Map([[first, "published"], [tail, "changed"]])), outcome === "external" ? /destination changed after publication/ : /later publication failed/);
+      assert.equal(await fs.readFile(first, "utf8"), outcome === "external" ? "external" : "original");
+      assert.equal(await fs.readFile(tail, "utf8"), "tail original");
+      const names = await fs.readdir(root);
+
+      if (outcome === "released") assert.deepEqual(names.sort(), ["first.txt", "tail.txt"]);
+      else {
+        const backup = names.find(name => name.endsWith(".bak"));
+        assert.ok(backup, "retain the original when recovery would destroy external bytes");
+        assert.equal(await fs.readFile(path.join(root, backup), "utf8"), "original");
+      }
+    } finally {
+      mock.mock.restore();
+      syncBuiltinESMExports();
+      Object.defineProperty(process, "platform", descriptor);
+    }
+  });
+}

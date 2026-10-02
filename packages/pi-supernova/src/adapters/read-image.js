@@ -24,17 +24,21 @@ export function createImageReader(vfs) {
       throw error;
     }
 
+    let stat, bytes;
+
     try {
-      const stat = await file.stat();
+      stat = await file.stat();
 
       if (!stat.isFile()) throw new Error("image read requires a regular file: " + targetPath);
 
       if (stat.size > IMAGE_MAX_BYTES) throw imageTooLarge(rel, stat.size);
-      const bytes = await file.readFile({ signal });
-      await vfs.recordExpected(targetPath, stat, bytes);
-
-      return bytes;
+      bytes = await file.readFile({ signal });
     } finally { await file.close(); }
+
+    // Recovery must be able to replace the destination before we await it.
+    await vfs.recordExpected(targetPath, stat, bytes);
+
+    return bytes;
   }
 
   async function maybeImage(rel, targetPath, signal) {

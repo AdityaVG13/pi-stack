@@ -15,7 +15,14 @@ export function createEdit(ctx) {
   const { getCwd, vfs, index, ledger } = ctx;
 
   async function editTargetPath(cwd, inputPath, command) {
-    try { return await resolveWorkspacePath(cwd, inputPath, command, false); }
+    try {
+      // Windows can report ENOENT for an oversized component instead of ENAMETOOLONG.
+      if (process.platform === "win32" && isString(inputPath) && inputPath.split(/[\\/]/).some(part => part.length > 255)) {
+        throw Object.assign(new Error("path component exceeds the filesystem limit"), { code: "ENAMETOOLONG" });
+      }
+
+      return await resolveWorkspacePath(cwd, inputPath, command, false);
+    }
     catch (error) {
       if (error?.code !== "ENAMETOOLONG") throw error;
 

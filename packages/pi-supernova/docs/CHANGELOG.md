@@ -4,6 +4,13 @@
 
 ### Changed
 
+- Window and image reads close their file handles before waiting for transaction
+  recovery, allowing Windows to restore backups. Bounded Windows sharing-violation
+  retries revalidate publication and recovery targets before replacing them.
+  Windows loaded-byte baselines
+  and final publication also verify content when timestamps alias a rewrite.
+  Overlong Windows edit paths receive the same bounded recovery guidance as
+  Unix paths. Scanner exceptions are documented in [UBS.md](UBS.md).
 - Missing optional TypeBox no longer changes the public JSON schema or its
   serialized standing-definition cost. Explicit nested program-entry validation
   remains unchanged; clean-install token gates use the same schema as hosts.

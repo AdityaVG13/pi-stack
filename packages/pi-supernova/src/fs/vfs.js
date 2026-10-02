@@ -1,4 +1,4 @@
-import {textSignature,sameFileVersion,fileSignature,tooLargeRead,overlayOrThrow,assertReadableFile,readLimitedBytes,remapReadError} from './file-io.js';
+import {textSignature,sameSignature,sameFileVersion,fileSignature,tooLargeRead,overlayOrThrow,assertReadableFile,readLimitedBytes,remapReadError} from './file-io.js';
 import {canonicalNewPath,resolveCommitTarget,assertExpectedSignature,collectMissingAncestors,makeStageEntry,stageReplacement,installStaged,failCommit,cleanupStaged} from './commit.js';
 
 export {resolveCommitTarget} from './commit.js';
@@ -166,7 +166,8 @@ export class CausalVfs {
       return;
     }
 
-    // Loaded bytes may replace the second disk pass only for a whole file.
+    // Windows timestamps can alias same-size rewrites, so loaded bytes still
+    // require a content check there. Other hosts can reuse a whole-file read.
     if (bytes !== undefined && (!Buffer.isBuffer(bytes) || bytes.length !== observed.size)) throw new Error("file changed while reading: " + target + "; expected complete bytes");
     this.signal?.throwIfAborted();
 
@@ -177,7 +178,7 @@ export class CausalVfs {
     let job = this.pendingSignatures.get(target);
 
     if (!job || !sameFileVersion(job.observed, observed)) {
-      job = { observed, promise: bytes === undefined
+      job = { observed, promise: bytes === undefined || process.platform === "win32"
         ? fileSignature(target, this.signal, observed)
         : Promise.resolve(textSignature(bytes)) };
       this.pendingSignatures.set(target, job);
@@ -185,6 +186,8 @@ export class CausalVfs {
 
     try {
       const signature = await job.promise;
+
+      if (bytes !== undefined && process.platform === "win32" && !sameSignature(signature, textSignature(bytes))) throw new Error("file changed while reading: " + target);
       await this.assertReadCommitted(revision);
 
       // Each window may finish at a different time. Its own post-read version

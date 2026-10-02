@@ -283,24 +283,27 @@ test("existing destinations changed during staging conflict even with restored s
   await f.write("raced.txt","old value");
   const directory = await fs.realpath(f.root), target = path.join(directory,"raced.txt");
   await fs.utimes(target,1000,1000);
-  const writeFile = fs.writeFile;
+  const copyFile = fs.copyFile;
   let raced = false, failure;
 
-  const mock = t.mock.method(fs,"writeFile",async function(file,contents,options) {
-    const result = await writeFile.call(this,file,contents,options);
+  const mock = t.mock.method(fs,"copyFile",async function(source,destination,options) {
+    const result = await copyFile.call(this,source,destination,options);
 
-    if (!raced && options?.flag === "wx" && path.dirname(String(file)) === directory) {
+    // Inject after the backup releases its source handle, not during a Windows copy lock.
+    if (!raced && source === target && path.dirname(String(destination)) === directory) {
       raced = true;
-      await writeFile(target,"external!","utf8");
+      await fs.writeFile(target,"external!","utf8");
       await fs.utimes(target,1000,1000);
     }
 
     return result;
   });
 
+  syncBuiltinESMExports();
+
   try { await f.execute('await write("raced.txt","our value");'); }
   catch (error) { failure = error; }
-  finally { mock.mock.restore(); }
+  finally { mock.mock.restore(); syncBuiltinESMExports(); }
 
   assert.equal(raced,true,"exercise the window after initial conflict validation");
   assert.equal(await fs.readFile(target,"utf8"),"external!");
@@ -422,6 +425,72 @@ test("reads cannot publish data from an in-flight commit that later rolls back",
   }
 });
 
+
+for (const kind of ["window", "image"]) {
+  test(`${kind} read handles close before rollback waits`, async t => {
+    const f = await engineFixture(t);
+    const root = await fs.realpath(f.root), first = path.join(root, kind === "image" ? "first.png" : "first.txt"), tail = path.join(root, "tail.txt");
+    const original = kind === "image" ? Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=", "base64") : Buffer.from("original\n");
+    await fs.writeFile(first, original);
+    await fs.writeFile(tail, "tail original");
+    const open = fs.open, rename = fs.rename, handles = new Set();
+
+    const openMock = t.mock.method(fs, "open", async (...args) => {
+      const file = await open(...args);
+
+      if (String(args[0]) === first) {
+        handles.add(file);
+        const close = file.close.bind(file);
+        file.close = async () => { await close(); handles.delete(file); };
+      }
+
+      return file;
+    });
+
+    let entered, release, checked;
+    const installed = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; }), validated = new Promise(resolve => { checked = resolve; });
+
+    const renameMock = t.mock.method(fs, "rename", async (from, to) => {
+      if (to === tail) { entered(); await gate; throw new Error("rollback sentinel"); }
+
+      // Windows cannot replace a destination still held open by a reader.
+      if (to === first && handles.size) throw Object.assign(new Error("open destination blocks recovery"), { code: "EPERM" });
+
+      return rename(from, to);
+    });
+
+    syncBuiltinESMExports();
+    const reader = new CausalVfs(), validate = reader.assertReadCommitted.bind(reader);
+    reader.assertReadCommitted = revision => {
+      checked();
+
+      return validate(revision);
+    };
+
+    const committing = new CausalVfs().flush(new Map([[first, "uncommitted\n"], [tail, "changed"]])).catch(error => error);
+    let reading;
+
+    try {
+      await installed;
+      const read = kind === "window" ? (await import("../../src/fs/read-window.js")).createWindowReader(reader) : (await import("../../src/adapters/read-image.js")).createImageReader(reader);
+      reading = (kind === "window" ? read(first, 1, 1, 10000) : read("first.png", first)).then(value => ({ value }), error => ({ error }));
+      await Promise.race([validated, reading.then(result => { throw result.error ?? new Error("read bypassed commit validation"); })]);
+      release();
+      assert.match((await committing).message, /rollback sentinel/);
+      assert.match((await reading).error?.message ?? "", /changed.*read/i);
+      assert.deepEqual(await fs.readFile(first), original);
+      assert.equal(await fs.readFile(tail, "utf8"), "tail original");
+      assert.deepEqual((await fs.readdir(root)).sort(), [path.basename(first), "tail.txt"]);
+    } finally {
+      release();
+      await committing;
+      await reading;
+      openMock.mock.restore();
+      renameMock.mock.restore();
+      syncBuiltinESMExports();
+    }
+  });
+}
 
 test("a read waiting for another commit can be cancelled without releasing that writer", async t => {
   const f = await engineFixture(t);
