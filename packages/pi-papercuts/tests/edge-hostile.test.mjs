@@ -1,4 +1,4 @@
-import { isObject } from "../decode.js";
+import { isObject } from "../lib/decode.js";
 /**
  * Hostile edge-case regressions discovered in pre-0.1.0 audit.
  * These assert desired safe behavior and are regressions for store/tool harden.
@@ -8,9 +8,9 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 import registerPapercuts from "../index.js";
-import * as store from "../store.js";
+import * as store from "../lib/store.js";
 
 function tmpRepo() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "papercuts-hostile-"));
@@ -19,9 +19,16 @@ function tmpRepo() {
   return dir;
 }
 
+const shutdowns = [];
+
+afterEach(async () => {
+  for (const close of shutdowns.splice(0)) await close();
+});
+
 function captureTool() {
   let tool;
-  registerPapercuts({ registerTool: (t) => { tool = t; } });
+  registerPapercuts({ registerTool: (t) => { tool = t; },
+    on: (event, handler) => { if (event === "session_shutdown") shutdowns.push(handler); } });
   assert.ok(tool);
 
   return tool;

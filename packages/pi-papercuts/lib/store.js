@@ -5,7 +5,7 @@ import { isString, isObject, isFunction } from "./decode.js";
  * Faithful reimplementation of treygoff24/papercuts (MIT) as a pure Node module so the
  * pi package needs no Rust toolchain. Same on-disk contract: `.papercuts.jsonl` at the
  * git root, `pc_` + 12-hex content-addressed IDs, resolve events linked by cut id,
- * first-wins dedupe, tear-healing reads. Prune archives history before rewriting the log.
+ * first-wins dedupe, tolerant reads. Prune archives history before rewriting the log.
  */
 
 import * as fs from "node:fs";
@@ -17,7 +17,7 @@ import { createHash, randomUUID } from "node:crypto";
 export const SEVERITIES = ["minor", "major", "blocker"];
 
 /** Highest severity first in sort (blocker=0 … minor=2). Derived from SEVERITIES only. */
-const SEVERITY_RANK = Object.fromEntries([...SEVERITIES].reverse().map((s, i) => [s, i]));
+const SEVERITY_RANK = new Map([...SEVERITIES].reverse().map((s, i) => [s, i]));
 
 const MAX_TEXT_BYTES = 10_000;
 
@@ -56,9 +56,12 @@ export function resolveLogPath({ file, cwd, env } = {}) {
 /** Legal wire event kinds only. Anything else is torn at the read boundary. */
 const EVENT_KINDS = ["cut", "resolve"];
 
+// Legacy records may omit fields; present values consumed by list/UI must be text.
+const TEXT_FIELDS = { cut: ["ts", "agent", "text", "severity"], resolve: ["ts", "agent"] };
+
 /**
  * Parse one JSONL line into a ParsedEvent or reject.
- * Empty/whitespace lines are empty (not torn). Bad JSON, kind, ID or tags → not ok.
+ * Empty/whitespace lines are empty (not torn). Bad JSON, kind, ID, tags or text fields fail.
  * fold() only accepts events that passed this parser.
  */
 export function parseEvent(line) {
@@ -85,10 +88,14 @@ export function parseEvent(line) {
 
   if (parsed.tags !== undefined && (!Array.isArray(parsed.tags) || !parsed.tags.every(isString))) return { ok: false, reason: "invalid_tags" };
 
+  for (const field of TEXT_FIELDS[parsed.kind]) {
+    if (parsed[field] !== undefined && !isString(parsed[field])) return { ok: false, reason: "invalid_" + field };
+  }
+
   return { ok: true, event: parsed };
 }
 
-/** Read + parse the log. Malformed / illegal-kind lines are skipped (tear-healed), never fatal. */
+/** Reads skip malformed records without rewriting raw lines; I/O failures still throw. */
 export function readEvents(filePath) {
   // Inspect the opened descriptor, not a preflight pathname that can change.
   // Nonblocking open prevents a FIFO from stalling the host before fstat.
@@ -98,7 +105,7 @@ export function readEvents(filePath) {
     fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
 
     if (!fs.fstatSync(fd).isFile()) throw Object.assign(new Error("papercuts log path is not a regular file: " + filePath), { code: "usage" });
-    raw = fs.readFileSync(fd, "utf-8");
+    raw = fs.readFileSync(fd);
   } catch (error) {
     if (error.code === "ENOENT") {
       const link = fs.lstatSync(filePath, { throwIfNoEntry: false });
@@ -115,8 +122,20 @@ export function readEvents(filePath) {
 
   const events = [];
   let tornLines = 0;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
 
-  for (const line of raw.split("\n")) {
+  // Decode each record strictly: replacement decoding can turn corrupt bytes into
+  // apparently healthy JSON, and one bad record must not hide its valid neighbors.
+  for (let start = 0; start < raw.length;) {
+    const newline = raw.indexOf(10, start);
+    const end = newline === -1 ? raw.length : newline;
+    const bytes = raw.subarray(start, end);
+    start = end + 1;
+    let line;
+
+    try { line = decoder.decode(bytes); }
+    catch { tornLines++; continue; }
+
     const result = parseEvent(line);
 
     if (!result.ok) {
@@ -306,19 +325,29 @@ export function appendEvents(filePath, events) {
 /** severity-first (blocker > major > minor), then newest first. */
 export function sortItems(items) {
   return [...items].sort((a, b) => {
-    const sev = (SEVERITY_RANK[a.severity] ?? 99) - (SEVERITY_RANK[b.severity] ?? 99);
+    const sev = (SEVERITY_RANK.get(a.severity) ?? 99) - (SEVERITY_RANK.get(b.severity) ?? 99);
 
     if (sev !== 0) return sev;
 
-    return b.ts < a.ts ? -1 : b.ts > a.ts ? 1 : 0;
+    // RFC3339 offsets and optional fractions need chronological, not lexical order.
+    const aText = a.ts ?? "", bText = b.ts ?? "";
+    const aTime = Date.parse(aText), bTime = Date.parse(bText);
+    const aDated = Number.isFinite(aTime), bDated = Number.isFinite(bTime);
+
+    if (aDated && bDated) return bTime - aTime;
+
+    if (aDated !== bDated) return aDated ? -1 : 1;
+
+    // Preserve opaque legacy values; missing timestamps remain last.
+    return bText < aText ? -1 : bText > aText ? 1 : 0;
   });
 }
 
 /**
  * Compact the log: archive every event belonging to a resolved cut into
  * `<log>.archive.jsonl` (append-only history preserved), atomically rewrite
- * the main log with only open-cut events. Torn lines are dropped (same
- * self-heal semantics as read). Returns counts + the archive path.
+ * the main log with only open-cut events. Unlike reads, this removes torn
+ * raw lines from disk. Returns counts + the archive path.
  */
 export function prune(filePath, { archivePath } = {}) {
   const target = archivePath ??
@@ -351,7 +380,8 @@ function pruneUnlocked(filePath, archivePath) {
     fs.writeFileSync(tmp, keep.length > 0 ? keep.map((e) => JSON.stringify(e)).join("\n") + "\n" : "", { encoding: "utf8", flag: "wx", mode });
     const fd = fs.openSync(tmp, "r");
 
-    try { fs.fsyncSync(fd); }
+    // Creation applies umask; restore the existing log's basic permission bits.
+    try { fs.fchmodSync(fd, mode); fs.fsyncSync(fd); }
     finally { fs.closeSync(fd); }
 
     fs.renameSync(tmp, filePath);
@@ -371,24 +401,28 @@ export function now() {
 }
 
 export function truncateText(text) {
-  const buf = Buffer.from(text, "utf-8");
-
-  return buf.length <= MAX_TEXT_BYTES ? text : clampBuffer(buf, MAX_TEXT_BYTES);
+  return truncateBytes(text, MAX_TEXT_BYTES);
 }
 
-/** Cap a string to maxBytes UTF-8 without splitting multi-byte characters. */
+/** Cap UTF-8 byte length without splitting pairs or repairing lone surrogates. */
 export function truncateBytes(text, maxBytes) {
-  const buf = Buffer.from(String(text), "utf-8");
+  const value = String(text);
 
-  return buf.length <= maxBytes ? String(text) : clampBuffer(buf, maxBytes);
-}
+  if (Buffer.byteLength(value, "utf-8") <= maxBytes) return value;
+  let bytes = 0, end = 0;
 
-function clampBuffer(buf, maxBytes) {
-  let end = maxBytes;
+  // Slice the original UTF-16: a Buffer round-trip would replace lone surrogates,
+  // collapsing distinct retained text/tags before their content-addressed ID.
+  for (const char of value) {
+    const point = char.codePointAt(0);
+    const width = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
 
-  while (end > 0 && (buf[end] & 0xc0) === 0x80) end -= 1;
+    if (bytes + width > maxBytes) break;
+    bytes += width;
+    end += char.length;
+  }
 
-  return buf.subarray(0, end).toString("utf-8");
+  return value.slice(0, end);
 }
 
 /**

@@ -1,6 +1,6 @@
 {
   "name": "pi-papercuts",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Agent complaint box for Pi/OMP: file friction into an append-only .papercuts.jsonl, then keep working.",
   "type": "module",
   "author": "AdityaVG13",
@@ -25,20 +25,13 @@
   "exports": "./index.js",
   "files": [
     "index.js",
-    "store.js",
-    "decode.js",
-    "contract.js",
-    "params.js",
-    "actions.js",
-    "render.js",
-    "worker-client.js",
-    "worker.js",
+    "lib/",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test tests/*.test.mjs",
     "prepublishOnly": "npm test && node ../../scripts/preflight.mjs"
   },
   "pi": {

@@ -1,9 +1,9 @@
-import { isObject } from "../decode.js";
+import { isObject } from "../lib/decode.js";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 import registerPapercuts from "../index.js";
 
 function tmpRepo() {
@@ -13,9 +13,18 @@ function tmpRepo() {
   return dir;
 }
 
+const shutdowns = [];
+
+afterEach(async () => {
+  for (const close of shutdowns.splice(0)) await close();
+});
+
 function captureTool() {
   let tool;
-  const pi = { registerTool: (t) => { tool = t; } };
+
+  const pi = { registerTool: (t) => { tool = t; },
+    on: (event, handler) => { if (event === "session_shutdown") shutdowns.push(handler); } };
+
   registerPapercuts(pi);
   assert.ok(tool, "papercuts tool should register");
 
@@ -150,6 +159,19 @@ test("add then list then resolve round-trips through the git-root log", async ()
   assert.equal(openAfter.data.count, 1);
   const allAfter = dataOf(await tool.execute("6", { action: "list", status: "resolved" }, undefined, ctx));
   assert.equal(allAfter.data.count, 1);
+});
+
+test("custom log basenames cannot fabricate repository paths", async () => {
+  const tool = captureTool(), repo = tmpRepo(), cwd = path.join(repo, "nested");
+  fs.mkdirSync(cwd);
+  const file = path.join(repo, "team.papercuts.jsonl");
+  const added = await tool.execute("custom-repo", { action: "add", text: "custom backlog", file }, undefined, undefined, { cwd });
+  assert.equal(added.isError, false);
+  assert.equal(added.structuredContent.data.record.repo, cwd, "custom files retain the execution-directory fallback, not a filename-derived phantom repo");
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).repo, cwd);
+  const discovered = await tool.execute("discovered-repo", { action: "add", text: "discovered backlog" }, undefined, undefined, { cwd });
+  assert.equal(discovered.isError, false);
+  assert.equal(discovered.structuredContent.data.record.repo, repo, "the standard git-root log still records the discovered root");
 });
 
 test("add without text returns a usage error envelope", async () => {
@@ -483,9 +505,110 @@ test("review regression: Markdown lists retain the programmatic envelope", async
   assert.equal(result.isError, false);
 });
 
+test("list TUI more-line counts the full backlog, including limit truncation", () => {
+  const tool = captureTool();
+  const items = Array.from({ length: 3 }, (_, i) => ({
+    id: `pc_00000000000${i}`,
+    severity: "minor",
+    text: `cut ${i}`,
+  }));
+  const result = {
+    content: [],
+    details: { ok: true, data: { items, count: 3, total: 8, truncated: true } },
+  };
+  const args = { action: "list", limit: 3 };
+  const compact = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }));
+  assert.match(compact, /8 open papercuts/);
+  assert.match(compact, /… 5 more/);
+  const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, { args, expanded: true }));
+  assert.match(expanded, /8 open papercuts/);
+  assert.match(expanded, /… 5 more/);
+});
+
+test("expanded list reveals the complete cut instead of retaining the compact preview", async () => {
+  const tool = captureTool(), repo = tmpRepo(), ctx = { cwd: repo };
+  const ending = "prevent this by retaining the trailing failure reason";
+  const body = "x".repeat(130) + " \u001b[31m" + ending + "\u001b[0m";
+  const added = await tool.execute("full-list-add", { action: "add", text: body }, undefined, undefined, ctx);
+  assert.equal(added.isError, false);
+  const args = { action: "list" };
+  const result = await tool.execute("full-list", args, undefined, undefined, ctx);
+  assert.equal(result.isError, false);
+  const compact = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }), 240);
+  assert.equal(compact.includes(ending), false, "collapsed rows remain previews");
+  const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, { args, expanded: true }), 240);
+  assert.ok(expanded.includes(ending), "expanding must reveal the reason after the 120-character preview");
+  assert.equal(expanded.includes("\u001b"), false, "full text remains sanitized for terminal display");
+  assert.equal(result.structuredContent.data.items[0].text, body, "display must not modify stored text");
+});
+
+test("expanded lists expose stored tags and the active log path", async () => {
+  const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, "review.jsonl");
+  const ctx = { cwd: repo };
+  const tags = ["tooling", "ui\u001b[31m"];
+  const added = await tool.execute("metadata-add", { action: "add", text: "review this tagged cut", tags, file }, undefined, undefined, ctx);
+  assert.equal(added.isError, false);
+  const args = { action: "list", file };
+  const result = await tool.execute("metadata-list", args, undefined, undefined, ctx);
+  assert.equal(result.isError, false);
+  const compact = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }));
+  assert.doesNotMatch(compact, /tags:|file:/, "compact output stays a preview");
+  const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, { args, expanded: true }), 240);
+  assert.match(expanded, /tags: tooling, ui/);
+  assert.ok(expanded.includes(`file: ${file}`), "review must identify the backlog being displayed");
+  assert.equal(expanded.includes("\u001b"), false, "stored metadata remains sanitized");
+  assert.deepEqual(result.structuredContent.data.items[0].tags, tags, "presentation must not alter stored tags");
+});
+
+test("add human line stays one line so the JSON envelope remains on line 2", async () => {
+  const tool = captureTool(), repo = tmpRepo();
+  const body = "first line\n- injected\n{not json}";
+  const result = await tool.execute("nl-add", { action: "add", text: body }, undefined, undefined, { cwd: repo });
+  const text = result.content[0].text;
+  const lines = text.split("\n");
+  assert.equal(lines[0].includes("\n"), false);
+  assert.match(lines[0], /^filed pc_[0-9a-f]{12} · minor · first line - injected \{not json\}$/);
+  assert.doesNotMatch(text, /^- injected/m);
+  const payload = JSON.parse(lines.slice(1).join("\n"));
+  assert.equal(payload.ok, true);
+  assert.equal(payload.data.record.text, body);
+  assert.equal(result.structuredContent.data.record.text, body);
+});
+
+test("markdown list digest keeps one flattened line per cut", async () => {
+  const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, ".papercuts.jsonl");
+  fs.writeFileSync(file, [
+    JSON.stringify({ kind: "cut", id: "pc_aaaaaaaaaaaa", text: "Valid cut", agent: "pi", severity: "major" }),
+    JSON.stringify({ kind: "cut", id: "pc_bbbbbbbbbbbb", severity: "constructor" }),
+    JSON.stringify({ kind: "cut", id: "pc_cccccccccccc", text: "line1\n- injected\nline2", agent: "pi", severity: "minor" }),
+  ].join("\n") + "\n");
+  const result = await tool.execute("md-lines", { action: "list", format: "md", status: "all", file }, undefined, undefined, { cwd: repo });
+  const text = result.content[0].text;
+  const itemLines = text.split("\n").filter((line) => line.startsWith("- "));
+  assert.equal(itemLines.length, 3, text);
+  assert.equal(text.includes("undefined"), false, text);
+  assert.doesNotMatch(text, /^- injected/m);
+  assert.match(text, /line1 - injected line2/);
+  assert.match(text, /^- \[constructor\] pc_bbbbbbbbbbbb$/m);
+});
+
+test("list tag filter uses the same trim and byte cap as add", async () => {
+  const tool = captureTool(), repo = tmpRepo(), ctx = { cwd: repo };
+  const long = "x".repeat(80);
+  const added = dataOf(await tool.execute("tag-add", { action: "add", text: "tagged cut", tags: ["  tooling  ", long] }, undefined, undefined, ctx));
+  assert.equal(added.ok, true);
+  assert.deepEqual(added.data.record.tags, ["tooling", "x".repeat(64)]);
+  const padded = dataOf(await tool.execute("tag-pad", { action: "list", tag: "  tooling  " }, undefined, undefined, ctx));
+  assert.equal(padded.ok, true, padded.error?.message);
+  assert.equal(padded.data.count, 1, "listing the tag as filed must find the cut");
+  assert.equal(padded.data.items[0].text, "tagged cut");
+  const overlong = dataOf(await tool.execute("tag-long", { action: "list", tag: long }, undefined, undefined, ctx));
+  assert.equal(overlong.data.count, 1, "listing the untruncated tag must still match the stored cap");
+});
+
 test("review regression: relative overrides use the active execution directory", async () => {
   const tool = captureTool(), repo = tmpRepo(), name = "relative-" + path.basename(repo) + ".jsonl";
-  const store = await import("../store.js");
+  const store = await import("../lib/store.js");
   assert.equal(store.resolveLogPath({ file: name, cwd: repo, env: {} }), path.join(repo, name));
   const result = await tool.execute("relative-add", { action: "add", text: "correct project", file: name }, undefined, undefined, { cwd: repo });
   assert.equal(result.details.meta.file, path.join(repo, name));
@@ -565,9 +688,9 @@ test("review regression: the public schema requires an action and describes prun
 });
 
 test("review regression: resolve cannot append an orphan after concurrent prune", async t => {
-  const { createActionExecutor } = await import("../worker-client.js");
+  const { createActionExecutor } = await import("../lib/worker-client.js");
   const { pathToFileURL } = await import("node:url");
-  const testStore = await import("../store.js");
+  const testStore = await import("../lib/store.js");
   const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, ".papercuts.jsonl"), ctx = { cwd: repo };
   const added = await tool.execute("race-add", { action: "add", text: "keep resolutions linked" }, undefined, undefined, ctx);
   const id = added.details.data.record.id, fixture = path.join(repo, "race-worker.mjs"), probe = path.join(repo, "race-probe.txt");
@@ -575,8 +698,8 @@ test("review regression: resolve cannot append an orphan after concurrent prune"
   fs.writeFileSync(fixture, `
     import fs from 'node:fs';
     import {syncBuiltinESMExports} from 'node:module';
-    import * as store from ${JSON.stringify(new URL("../store.js", import.meta.url).href)};
-    import ${JSON.stringify(new URL("../actions.js", import.meta.url).href)};
+    import * as store from ${JSON.stringify(new URL("../lib/store.js", import.meta.url).href)};
+    import ${JSON.stringify(new URL("../lib/actions.js", import.meta.url).href)};
     const read = fs.readFileSync;
     let interrupted = false;
     fs.readFileSync = function (...args) {
@@ -595,7 +718,7 @@ test("review regression: resolve cannot append an orphan after concurrent prune"
       return bytes;
     };
     syncBuiltinESMExports();
-    await import(${JSON.stringify(new URL("../worker.js", import.meta.url).href)});
+    await import(${JSON.stringify(new URL("../lib/worker.js", import.meta.url).href)});
   `);
   const executor = createActionExecutor(pathToFileURL(fixture));
   t.after(() => executor.close());
@@ -660,7 +783,7 @@ test("stable tool rows retain layout while updates, expansion, resize and themes
 
 test("add dedupe considers cuts, not orphan resolves with the same ID", async t => {
   const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, ".papercuts.jsonl");
-  const { cutId } = await import("../store.js");
+  const { cutId } = await import("../lib/store.js");
   const ts = "2026-01-01T00:00:00.000Z", text = "orphan does not dedupe";
   const previous = process.env.PAPERCUTS_NOW;
   process.env.PAPERCUTS_NOW = ts;
@@ -680,13 +803,13 @@ test("add dedupe considers cuts, not orphan resolves with the same ID", async t 
 
 test("self-rendered frame retains layout and matches the default box through state changes", async () => {
   const { Box } = await import("@earendil-works/pi-tui");
-  const { renderPapercutsCall, renderPapercutsResult } = await import("../render.js");
+  const { renderPapercutsCall, renderPapercutsResult } = await import("../lib/render.js");
   const tool = captureTool();
   assert.equal(tool.renderShell, "self");
   let tint = "\u001b[31m";
   const theme = { ...plainTheme, fg: (_color, text) => tint + text + "\u001b[0m", bg: (color, text) => (color === "toolPendingBg" ? "\u001b[44m" : color === "toolErrorBg" ? "\u001b[41m" : "\u001b[42m") + text + "\u001b[0m" };
   const args = { action: "list" }, context = { state: {}, args, expanded: false, isPartial: true, isError: false };
-  let result, call, tail, retained;
+  let result, call, tail, retained, compactLines, expandedLines;
 
   const expected = width => {
     const box = new Box(1, 1, text => theme.bg(context.isPartial ? "toolPendingBg" : context.isError ? "toolErrorBg" : "toolSuccessBg", text));
@@ -697,12 +820,14 @@ test("self-rendered frame retains layout and matches the default box through sta
     return box.render(width);
   };
 
-  for (const phase of ["pending", "partial", "complete", "same", "expanded", "theme", "error", "resize"]) {
+  for (const phase of ["pending", "partial", "complete", "same", "expanded", "collapse", "reexpand", "theme", "error", "resize"]) {
     if (phase === "partial") result = { content: [], details: { ok: true, data: { total: 8, items: Array.from({ length: 8 }, (_, i) => ({ id: `pc_00000000000${i}`, severity: "minor", text: "reason 中文 😀 " + i })) } } };
 
     if (phase === "complete") context.isPartial = false;
 
-    if (phase === "expanded") context.expanded = true;
+    if (phase === "expanded" || phase === "reexpand") context.expanded = true;
+
+    if (phase === "collapse") context.expanded = false;
 
     if (phase === "theme") { tint = "\u001b[36m"; call.invalidate(); }
 
@@ -717,6 +842,14 @@ test("self-rendered frame retains layout and matches the default box through sta
     assert.deepEqual([...lines, ...(tail?.render(width) ?? [])], expected(width), phase);
 
     if (phase === "same") { assert.equal(call, previous); assert.equal(lines, retained, "stable outer frame must retain its layout"); }
+
+    if (phase === "same") compactLines = lines;
+
+    if (phase === "expanded") expandedLines = lines;
+
+    if (phase === "collapse") assert.equal(lines, compactLines, "compact layout survives expansion");
+
+    if (phase === "reexpand") assert.equal(lines, expandedLines, "expanded layout survives collapse");
 
     retained = lines;
   }
@@ -759,7 +892,7 @@ test("durable actions leave the UI thread and preserve request environment snaps
 
 
 test("worker shutdown drains accepted writes, rejects new work and can restart", async t => {
-  const { createActionExecutor } = await import("../worker-client.js");
+  const { createActionExecutor } = await import("../lib/worker-client.js");
   const executor = createActionExecutor(), repo = tmpRepo(), file = path.join(repo, "drain.jsonl");
   t.after(() => executor.close());
   const parsed = text => parsePapercutsParams({ action: "add", text, file }).value;
@@ -782,7 +915,7 @@ test("worker shutdown drains accepted writes, rejects new work and can restart",
 });
 
 test("worker failures never fabricate receipts or automatically replay a write", async t => {
-  const { createActionExecutor } = await import("../worker-client.js");
+  const { createActionExecutor } = await import("../lib/worker-client.js");
   const { pathToFileURL } = await import("node:url");
   const repo = tmpRepo(), file = path.join(repo, "crash.jsonl"), fixture = path.join(repo, "crash-worker.mjs");
   fs.writeFileSync(fixture, "throw new Error('startup failed');");
@@ -793,7 +926,7 @@ test("worker failures never fabricate receipts or automatically replay a write",
   assert.equal(fs.existsSync(file), false);
   fs.writeFileSync(fixture, `
     import {parentPort} from 'node:worker_threads';
-    import {ACTIONS} from ${JSON.stringify(new URL("../actions.js", import.meta.url).href)};
+    import {ACTIONS} from ${JSON.stringify(new URL("../lib/actions.js", import.meta.url).href)};
     parentPort.on('message', ({params,cwd}) => { ACTIONS[params.action](params,{cwd}); process.exit(9); });
   `);
   await assert.rejects(executor.run(parsePapercutsParams({ action: "add", text: "written but no receipt", file }).value, repo), /before returning a receipt/);
@@ -801,7 +934,7 @@ test("worker failures never fabricate receipts or automatically replay a write",
   const lines = fs.readFileSync(file, "utf8").trim().split("\n");
   assert.equal(lines.length, 1);
   assert.equal(JSON.parse(lines[0]).text, "written but no receipt");
-  fs.writeFileSync(fixture, `await import(${JSON.stringify(new URL("../worker.js", import.meta.url).href)});`);
+  fs.writeFileSync(fixture, `await import(${JSON.stringify(new URL("../lib/worker.js", import.meta.url).href)});`);
   const listed = await executor.run(parsePapercutsParams({ action: "list", file }).value, repo);
   assert.equal(listed.structuredContent.data.count, 1);
   await assert.rejects(executor.run({ action: "add", text: () => {} }, repo), /clone/);
@@ -874,4 +1007,288 @@ test("final review: all raw display paths strip C0/C1 controls and ANSI", () => 
     assert.match(view, /# Header\n/);
     assert.equal(result.content[0].text, "# Header\n" + dirty, "only presentation is sanitized");
   }
+
+  const receipt = { details: { ok: true, data: { changed: false, record: { id: dirty, severity: dirty, text: "stored", tags: [] } } } };
+
+  for (const expanded of [false, true]) {
+    const view = rendered(tool.renderResult(receipt, { expanded }, plainTheme, { args: { action: "add" } }));
+    assert.equal(unsafe(view), false, "stored receipt fields are untrusted display text too");
+  }
+
+  assert.equal(receipt.details.data.record.severity, dirty, "display sanitation must not alter the stored receipt");
+});
+
+
+test("call renderer fallback cannot swallow the Papercuts error result", () => {
+  const tool = captureTool();
+  const theme = { ...plainTheme, bg: (_color, text) => text };
+
+  for (const warmed of [false, true]) {
+    const context = { state: {}, expanded: false, args: { action: "add", text: "partial arguments" }, isError: true };
+
+    if (warmed) tool.renderCall(context.args, theme, context);
+    // A JSON-valid partial argument can fail display coercion before validation.
+    context.args.severity = { toString: 0 };
+    assert.throws(() => tool.renderCall(context.args, theme, context));
+    const failure = { content: [], details: { ok: false, error: { message: "severity must be minor|major|blocker" } } };
+    const shown = tool.renderResult(failure, { expanded: false }, theme, context);
+    assert.match(rendered(shown), /severity must be minor/);
+  }
+});
+
+
+test("independent registrations do not shut down each other's executor", async t => {
+  const register = () => {
+    const instance = {};
+    registerPapercuts({ registerTool: tool => { instance.tool = tool; }, on: (event, handler) => { if (event === "session_shutdown") instance.close = handler; } });
+
+    return instance;
+  };
+
+  const a = register(), b = register(), repo = tmpRepo();
+  t.after(() => Promise.all([a.close(), b.close()]));
+  const first = await a.tool.execute("a", { action: "add", text: "session A", file: path.join(repo, "a.jsonl") });
+  assert.equal(first.isError, false);
+  const closing = a.close();
+  const other = await b.tool.execute("b", { action: "add", text: "session B", file: path.join(repo, "b.jsonl") });
+  await closing;
+  assert.equal(other.isError, false, "closing A must not reject B's accepted work as busy");
+  assert.equal(other.details.data.record.text, "session B");
+});
+
+test("result-render failure clears old Papercuts output and permits recovery", () => {
+  const tool = captureTool(), theme = { ...plainTheme, bg: (_color, text) => text };
+
+  const context = { state: {}, args: { action: "add" }, expanded: true };
+
+  const original = { content: [{ type: "text", text: "safe fallback" }], details: { ok: true, data: { changed: true,
+    record: { id: "pc_000000000001", severity: "minor", text: "old receipt", tags: ["ui"] } } } };
+
+  const frame = tool.renderCall(context.args, theme, context);
+  tool.renderResult(original, { expanded: true }, theme, context);
+  assert.match(rendered(frame), /old receipt/);
+  const malformed = structuredClone(original);
+  malformed.details.data.record.tags = "legacy malformed tags";
+  assert.throws(() => tool.renderResult(malformed, { expanded: true }, theme, context));
+  assert.doesNotMatch(rendered(frame), /old receipt/, "the host fallback must not be accompanied by stale successful output");
+  tool.renderResult(original, { expanded: true }, theme, context);
+  assert.match(rendered(frame), /old receipt/, "clearing a failed render must update the text cache too");
+});
+
+
+test("byte caps preserve lone surrogates instead of merging distinct papercuts", async () => {
+  const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, "surrogate-caps.jsonl");
+  const previous = process.env.PAPERCUTS_NOW;
+  process.env.PAPERCUTS_NOW = "2026-01-01T00:00:00.000Z";
+
+  try {
+    const ids = [];
+
+    for (const prefix of ["\uD800", "\uDC00", "\uFFFD"]) {
+      const result = await tool.execute("surrogate-cap", {
+        action: "add", file, agent: "test", text: prefix + "x".repeat(10_000),
+        tags: [prefix + "t".repeat(64)], evidence: prefix + "e".repeat(4096),
+      });
+
+      assert.equal(result.isError, false);
+      assert.equal(result.structuredContent.data.changed, true, "different retained text must not dedupe");
+      const record = result.structuredContent.data.record;
+
+      assert.equal(record.text, prefix + "x".repeat(9997));
+      assert.deepEqual(record.tags, [prefix + "t".repeat(61)]);
+      assert.equal(record.evidence.note, prefix + "e".repeat(4093));
+      ids.push(record.id);
+    }
+
+    assert.equal(new Set(ids).size, 3);
+    const records = fs.readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.deepEqual(records.map(record => record.text[0]), ["\uD800", "\uDC00", "\uFFFD"]);
+  } finally {
+    if (previous === undefined) delete process.env.PAPERCUTS_NOW;
+    else process.env.PAPERCUTS_NOW = previous;
+  }
+});
+
+
+test("duplicate adds return the winning stored record, not unsaved evidence", async () => {
+  const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, "duplicates.jsonl");
+  const previous = process.env.PAPERCUTS_NOW;
+  process.env.PAPERCUTS_NOW = "2026-01-01T00:00:00.000Z";
+
+  try {
+    const args = { action: "add", file, agent: "test", text: "one identity", tags: ["ui", "worker"], evidence: "original evidence" };
+    const first = await tool.execute("first", args);
+    assert.equal(first.isError, false);
+    const stored = fs.readFileSync(file, "utf8");
+    const duplicate = await tool.execute("duplicate", { ...args, tags: ["worker", "ui"], evidence: "not written" });
+    assert.equal(duplicate.isError, false);
+    assert.equal(duplicate.structuredContent.data.changed, false);
+    assert.equal(fs.readFileSync(file, "utf8"), stored);
+    assert.deepEqual(duplicate.structuredContent.data.record, JSON.parse(stored));
+    assert.deepEqual(duplicate.details.data.record, first.details.data.record);
+  } finally {
+    if (previous === undefined) delete process.env.PAPERCUTS_NOW;
+    else process.env.PAPERCUTS_NOW = previous;
+  }
+});
+
+test("unknown stored severities cannot outrank blockers in limited lists", async () => {
+  const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, "severity.jsonl");
+
+  const records = ["constructor", "__proto__", ["blocker"], null].map((severity, i) => ({
+    kind: "cut", id: "legacy-" + i, text: "legacy cut", severity, ts: "2026-02-01T00:00:00.000Z", tags: [],
+  }));
+
+  records.push({ kind: "cut", id: "pc_000000000001", text: "must be first", severity: "blocker", ts: "2026-01-01T00:00:00.000Z", tags: [] });
+  fs.writeFileSync(file, records.map(record => JSON.stringify(record)).join("\n") + "\n");
+  const before = fs.readFileSync(file, "utf8");
+  const listed = await tool.execute("list", { action: "list", limit: 1, file });
+  assert.equal(listed.isError, false);
+  assert.deepEqual(listed.structuredContent.data.items.map(item => item.id), ["pc_000000000001"]);
+  assert.equal(fs.readFileSync(file, "utf8"), before, "legacy records remain preserved");
+});
+
+
+test("malformed scalar records are diagnosed and skipped until explicit pruning", async () => {
+  const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, "legacy.jsonl");
+  const valid = { kind: "cut", id: "pc_aaaaaaaaaaaa", ts: "2026-01-01T00:00:00.000Z", text: "Valid cut", agent: "pi", severity: "major", tags: [] };
+  const sparse = { kind: "cut", id: "pc_bbbbbbbbbbbb", severity: "constructor", extra: { toString: null, payload: [1, 2] } };
+  const poison = { toString: null, valueOf: null };
+  let serial = 0;
+
+  const malformed = ["ts", "agent", "text", "severity"].flatMap(field =>
+    [poison, [], 17, null].map(value => ({ ...valid, id: "pc_" + (++serial).toString(16).padStart(12, "0"), [field]: value })),
+  );
+
+  malformed.push({ kind: "resolve", id: valid.id, ts: poison }, { kind: "resolve", id: valid.id, agent: poison });
+  const raw = [valid, sparse, ...malformed].map(record => JSON.stringify(record)).join("\n") + "\n";
+  fs.writeFileSync(file, raw);
+  const run = params => tool.execute("legacy", { ...params, file }, undefined, undefined, { cwd: repo });
+  const diagnosis = dataOf(await run({ action: "doctor" }));
+  assert.equal(diagnosis.ok, true);
+  assert.equal(diagnosis.data.healthy, false);
+  assert.equal(diagnosis.data.checked_lines, 2);
+  const listed = await run({ action: "list", status: "all" });
+  assert.equal(listed.isError, false);
+  assert.deepEqual(dataOf(listed).data.items.map(item => [item.id, item.status]), [[valid.id, "open"], [sparse.id, "open"]]);
+  assert.deepEqual(dataOf(listed).data.items[1].extra, sparse.extra);
+  const preview = tool.renderResult(listed, { expanded: true }, plainTheme, { args: { action: "list" }, expanded: true });
+  assert.match(rendered(preview), /Valid cut/);
+  const markdown = await run({ action: "list", format: "md" });
+  assert.equal(markdown.isError, false);
+  assert.match(markdown.content[0].text, /Valid cut/);
+  assert.equal(fs.readFileSync(file, "utf8"), raw, "reads must leave malformed lines untouched");
+  assert.equal(dataOf(await run({ action: "resolve", ids: [valid.id] })).ok, true);
+  const pruned = dataOf(await run({ action: "prune" }));
+  assert.equal(pruned.ok, true);
+  assert.equal(pruned.data.tornDropped, malformed.length);
+  assert.equal(pruned.data.archivedEvents, 2);
+  assert.equal(pruned.data.open, 1);
+  assert.equal(fs.readFileSync(file, "utf8"), JSON.stringify(sparse) + "\n");
+  const after = dataOf(await run({ action: "doctor" }));
+  assert.equal(after.data.healthy, true);
+  assert.equal(after.data.checked_lines, 1);
+});
+
+test("invalid UTF-8 records are torn, not silently repaired into healthy cuts", async () => {
+  const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, "invalid-utf8.jsonl");
+  const valid = { kind: "cut", id: "pc_aaaaaaaaaaaa", text: "Literal replacement \uFFFD and emoji 😀", severity: "major" };
+
+  const invalid = Buffer.concat([
+    Buffer.from('{"kind":"cut","id":"pc_bbbbbbbbbbbb","text":"bad '),
+    Buffer.from([0xff]),
+    Buffer.from(' byte"}\n'),
+  ]);
+
+  const following = { kind: "cut", id: "pc_cccccccccccc", text: "Valid neighbor after corrupt bytes", severity: "minor" };
+  const raw = Buffer.concat([Buffer.from(JSON.stringify(valid) + "\n"), invalid, Buffer.from(JSON.stringify(following))]);
+  fs.writeFileSync(file, raw);
+  const run = params => tool.execute("invalid-utf8", { ...params, file }, undefined, undefined, { cwd: repo });
+  const diagnosis = dataOf(await run({ action: "doctor" }));
+  assert.equal(diagnosis.data.healthy, false, "invalid UTF-8 is not a valid JSONL record");
+  assert.equal(diagnosis.data.checked_lines, 2);
+  const listed = dataOf(await run({ action: "list" }));
+  assert.deepEqual(listed.data.items.map(item => [item.id, item.text]), [[valid.id, valid.text], [following.id, following.text]]);
+  assert.deepEqual(fs.readFileSync(file), raw, "reads must preserve the malformed bytes");
+  const pruned = dataOf(await run({ action: "prune" }));
+  assert.equal(pruned.data.tornDropped, 1);
+  assert.equal(pruned.data.open, 2);
+  assert.equal(fs.readFileSync(file, "utf8"), [valid, following].map(record => JSON.stringify(record)).join("\n") + "\n");
+});
+
+test("sparse legacy timestamps cannot hide newer cuts in limited lists", async () => {
+  const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, "sparse-time.jsonl");
+
+  const records = [
+    { kind: "cut", id: "pc_aaaaaaaaaaaa", severity: "major", ts: "2026-01-01T00:00:00.000Z", text: "oldest" },
+    { kind: "cut", id: "pc_bbbbbbbbbbbb", severity: "major", text: "undated legacy cut" },
+    { kind: "cut", id: "pc_cccccccccccc", severity: "major", ts: "2026-02-01T00:00:00.000Z", text: "newest" },
+  ];
+
+  fs.writeFileSync(file, records.map(record => JSON.stringify(record)).join("\n") + "\n");
+  const before = fs.readFileSync(file, "utf8");
+  const limited = await tool.execute("sparse-time-limit", { action: "list", file, limit: 1 });
+  assert.equal(limited.isError, false);
+  assert.equal(limited.structuredContent.data.total, 3, "sparse legacy cuts remain readable");
+  assert.deepEqual(limited.structuredContent.data.items.map(item => item.id), [records[2].id]);
+  const all = await tool.execute("sparse-time-all", { action: "list", file });
+  assert.deepEqual(all.structuredContent.data.items.map(item => item.id), [records[2].id, records[0].id, records[1].id]);
+  assert.equal(fs.readFileSync(file, "utf8"), before, "ordering must not rewrite legacy records");
+});
+
+test("limited lists order RFC3339 timestamps by instant rather than spelling", async () => {
+  const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, "timestamp-formats.jsonl");
+
+  const records = [
+    { kind: "cut", id: "pc_aaaaaaaaaaaa", severity: "major", ts: "2026-01-01T00:00:00Z", text: "whole second" },
+    { kind: "cut", id: "pc_bbbbbbbbbbbb", severity: "major", ts: "2026-01-01T00:00:00.500Z", text: "half a second newer" },
+    { kind: "cut", id: "pc_cccccccccccc", severity: "major", ts: "2026-01-01T01:00:00+02:00", text: "one hour older in UTC" },
+    { kind: "cut", id: "pc_dddddddddddd", severity: "major", text: "undated legacy cut" },
+  ];
+
+  fs.writeFileSync(file, records.map(record => JSON.stringify(record)).join("\n") + "\n");
+  const before = fs.readFileSync(file, "utf8");
+  const limited = await tool.execute("timestamp-limit", { action: "list", file, limit: 1 });
+  assert.equal(limited.isError, false);
+  assert.deepEqual(limited.structuredContent.data.items.map(item => item.id), [records[1].id]);
+  const all = await tool.execute("timestamp-all", { action: "list", file });
+  assert.deepEqual(all.structuredContent.data.items.map(item => item.id), [records[1].id, records[0].id, records[2].id, records[3].id]);
+  assert.equal(fs.readFileSync(file, "utf8"), before);
+});
+
+test("prune of a torn-only log does not claim nothing to prune", async () => {
+  const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, ".papercuts.jsonl");
+  fs.writeFileSync(file, "{\"bad\"\n");
+  const doctor = dataOf(await tool.execute("torn-doctor", { action: "doctor" }, undefined, undefined, { cwd: repo }));
+  assert.equal(doctor.data.healthy, false);
+  const pruned = await tool.execute("torn-prune", { action: "prune" }, undefined, undefined, { cwd: repo });
+  const payload = dataOf(pruned);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.data.tornDropped, 1);
+  assert.equal(payload.data.archivedEvents, 0);
+  const human = pruned.content[0].text.split("\n")[0];
+  assert.match(human, /torn/i);
+  assert.doesNotMatch(human, /nothing to prune/);
+  assert.equal(fs.readFileSync(file, "utf8"), "");
+});
+
+test("prune TUI shows the receipt instead of a generic success", async () => {
+  const tool = captureTool(), repo = tmpRepo(), ctx = { cwd: repo };
+  const args = { action: "prune" };
+  const view = result => rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }));
+  const added = dataOf(await tool.execute("prune-tui-add", { action: "add", text: "archive me" }, undefined, undefined, ctx));
+  await tool.execute("prune-tui-resolve", { action: "resolve", ids: [added.data.record.id] }, undefined, undefined, ctx);
+  const pruned = await tool.execute("prune-tui", args, undefined, undefined, ctx);
+  const compact = view(pruned);
+  assert.match(compact, /Pruned 1 resolved papercut/);
+  assert.doesNotMatch(compact, /action complete/);
+  const expanded = rendered(tool.renderResult(pruned, { expanded: true }, plainTheme, { args, expanded: true }));
+  assert.match(expanded, /archive:/);
+  const tornRepo = tmpRepo();
+  fs.writeFileSync(path.join(tornRepo, ".papercuts.jsonl"), "{\"bad\"\n");
+  const torn = view(await tool.execute("prune-tui-torn", args, undefined, undefined, { cwd: tornRepo }));
+  assert.match(torn, /torn/i);
+  assert.doesNotMatch(torn, /action complete|Nothing to prune/);
+  const idle = view(await tool.execute("prune-tui-idle", args, undefined, undefined, { cwd: tmpRepo() }));
+  assert.match(idle, /Nothing to prune/);
 });

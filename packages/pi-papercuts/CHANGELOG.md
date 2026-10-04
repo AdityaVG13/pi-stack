@@ -1,14 +1,28 @@
 # Changelog
 
-## Unreleased (version retained at 0.3.3)
+## 0.4.0
 
-- Split registration, contracts, validation, actions and rendering into focused modules; expose structured Pi results and explicit error receipts.
-- Retain TUI text and frame layout caches, sanitize terminal controls, and preserve Unicode preview boundaries.
-- Run storage actions in a lazy serial worker, snapshot caller overrides and drain accepted writes during shutdown without replaying lost receipts.
-- Coordinate add, resolve and prune through canonical-path locks and durable appends; refuse unsafe log targets and heal torn tails.
-- Index only requested common-width prefixes for bulk resolution while preserving order, deduplication and ambiguity.
-- Reject malformed wire values and stored IDs/tags before they can poison valid operations; resolve relative paths against the active execution directory.
-- Add local real-host paint, execution and responsiveness profiling with equivalence artifacts.
+### Changed
+
+- Split registration, contracts, validation, actions, and rendering into `lib/` modules with tests under `tests/`; expose structured Pi results and explicit error receipts.
+- Run storage actions in a lazy registration-owned serial worker, snapshot caller overrides, and drain accepted writes during shutdown without replaying lost receipts.
+- Coordinate add, resolve, and prune through canonical-path locks and durable appends; refuse unsafe log targets and separate unterminated tails from new events.
+- Hash new IDs from a JSON tuple that preserves tag boundaries and lone surrogates; retain the `pc_` + 12-hex format and support existing logged IDs.
+- Index only requested common-width prefixes for bulk resolution while preserving order, deduplication, and ambiguity.
+
+### Fixed
+
+- Return the actual stored record for duplicate adds and handle unknown legacy severity strings without prototype-key collisions.
+- Diagnose and skip invalid stored IDs, tags, and optional scalar fields instead of letting them crash listing or rendering; retain sparse legacy records and opaque extra metadata.
+- Preserve the working log's basic permissions when pruning under a tighter umask.
+- Resolve relative paths against the active execution directory and validate wire values before storage.
+- Retain TUI text/layout caches, sanitize display-only terminal controls, preserve Unicode preview boundaries, and recover from renderer failures without stale success output.
+
+### Upgrade notes
+
+- Inspect `doctor` findings before explicit pruning: malformed raw lines remain on disk during reads, but `prune` removes them.
+- All concurrent writers/pruners must use this locking protocol. Older versions and external appenders are not coordinated. Log/archive targets ending in `.lock` are reserved; inspect leftover lock ownership before manual removal.
+- Fully restart Pi/OMP after updating. Post-dispatch cancellation does not interrupt a write or imply rollback; a lost worker receipt must not be blindly replayed.
 
 ## 0.3.3
 
@@ -29,7 +43,7 @@
 
 ## 0.2.0
 
-- Flatten the tool parameters schema from a root Type.Union to one Type.Object with an action enum. Root-level unions serialize to `properties: {}` for Anthropic models — no field typing, so array params (tags, ids) coerced to strings and calls failed. Per-action strictness still lives in parsePapercutsParams (parse, don't validate).
+- Flatten the tool parameters schema from a root Type.Union to one Type.Object with an action enum. Root-level unions serialize to `properties: {}` for Anthropic models -- no field typing, so array params (tags, ids) coerced to strings and calls failed. Per-action strictness still lives in parsePapercutsParams (parse, don't validate).
 
 
 ## 0.1.2

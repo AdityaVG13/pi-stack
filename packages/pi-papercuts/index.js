@@ -1,13 +1,13 @@
-import { isObject } from "./decode.js";
-import { PapercutsParams, CONTRACT_VERSION, textResult, errorEnvelope } from "./contract.js";
-import { parsePapercutsParams } from "./params.js";
-import { ACTIONS } from "./actions.js";
-import { actionExecutor } from "./worker-client.js";
-import { renderPapercutsFrameCall, renderPapercutsFrameResult } from "./render.js";
+import { isObject } from "./lib/decode.js";
+import { PapercutsParams, CONTRACT_VERSION, textResult, errorEnvelope } from "./lib/contract.js";
+import { parsePapercutsParams } from "./lib/params.js";
+import { ACTIONS } from "./lib/actions.js";
+import { createActionExecutor } from "./lib/worker-client.js";
+import { renderPapercutsFrameCall, renderPapercutsFrameResult } from "./lib/render.js";
 
-export { SEVERITIES, SCHEMA_TARGETS } from "./contract.js";
+export { SEVERITIES, SCHEMA_TARGETS } from "./lib/contract.js";
 
-export { parsePapercutsParams } from "./params.js";
+export { parsePapercutsParams } from "./lib/params.js";
 
 function executionError(error) {
   const message = error instanceof Error ? error.message : String(error);
@@ -26,7 +26,7 @@ function errorCode(error) {
   return error.code === "usage" || error.code === "busy" ? error.code : "internal";
 }
 
-async function execute(_id, params, _signal, onUpdate, ctx) {
+async function execute(executor, _id, params, _signal, onUpdate, ctx) {
   // Current Pi passes onUpdate then ctx; older SDK hosts pass ctx fourth.
   const context = ctx ?? (onUpdate && isObject(onUpdate) ? onUpdate : undefined);
 
@@ -37,14 +37,15 @@ async function execute(_id, params, _signal, onUpdate, ctx) {
 
     if (parsed.value.action === "schema") return ACTIONS.schema(parsed.value);
 
-    return await actionExecutor.run(parsed.value, context?.cwd ?? process.cwd(), _signal);
+    return await executor.run(parsed.value, context?.cwd ?? process.cwd(), _signal);
   } catch (error) {
     return executionError(error);
   }
 }
 
 export default function registerPapercuts(pi) {
-  pi.on?.("session_shutdown", () => actionExecutor.close());
+  const executor = createActionExecutor();
+  pi.on?.("session_shutdown", () => executor.close());
   pi.registerTool({
     name: "papercuts",
     label: "Papercuts",
@@ -88,6 +89,6 @@ export default function registerPapercuts(pi) {
     renderShell: "self",
     renderCall: renderPapercutsFrameCall,
     renderResult: renderPapercutsFrameResult,
-    execute,
+    execute: execute.bind(null, executor),
   });
 }

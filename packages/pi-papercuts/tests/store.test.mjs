@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import * as store from "../store.js";
+import * as store from "../lib/store.js";
 import { spawnSync } from "node:child_process";
 
 function tmp() {
@@ -329,7 +329,7 @@ test("review regression: relative environment paths follow the supplied cwd", ()
 test("review regression: FIFO readers fail without blocking", { skip: process.platform === "win32" }, () => {
   const fifo = path.join(tmp(), "blocked.jsonl");
   assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
-  const source = new URL("../store.js", import.meta.url).href;
+  const source = new URL("../lib/store.js", import.meta.url).href;
   const script = `import {readEvents} from ${JSON.stringify(source)};try{readEvents(${JSON.stringify(fifo)});console.log('accepted')}catch(error){console.log(JSON.stringify({code:error.code}))}`;
   const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { timeout: 2000, killSignal: "SIGKILL", encoding: "utf8" });
   assert.equal(child.status, 0, child.error?.message ?? child.stderr);
@@ -355,4 +355,23 @@ test("bulk prefixes preserve query order, ambiguity and longer legacy IDs", () =
     { prefix: a.id, ids: [a.id, a.id] }, { prefix: a.id, ids: [a.id, a.id] },
   ]);
   assert.deepEqual(store.matchIds([a, b, longer], ["pc_abcd", b.id]).found, [b]);
+});
+
+
+test("prune preserves permissions under a tighter umask", { skip: process.platform === "win32" }, () => {
+  const file = path.join(tmp(), "permissions.jsonl");
+  const resolved = { kind: "cut", id: "pc_aaaaaaaaaaaa", text: "Resolved" };
+  const resolution = { kind: "resolve", id: resolved.id };
+  const open = { kind: "cut", id: "pc_bbbbbbbbbbbb", text: "Still open" };
+  store.appendEvents(file, [resolved, resolution, open]);
+  fs.chmodSync(file, 0o660);
+  const previous = process.umask(0o077);
+  let receipt;
+
+  try { receipt = store.prune(file); }
+  finally { process.umask(previous); }
+
+  assert.equal(fs.statSync(file).mode & 0o777, 0o660);
+  assert.deepEqual(store.readEvents(file).events, [open]);
+  assert.deepEqual(store.readEvents(receipt.archiveFile).events, [resolved, resolution]);
 });

@@ -1,6 +1,6 @@
 import { Worker } from "node:worker_threads";
 
-// A lazy, session-shared worker keeps synchronous parsing and durable fsync off
+// A lazy, registration-owned worker keeps synchronous parsing and durable fsync off
 // the UI thread. Nothing is started at extension registration or for schema.
 export function createActionExecutor(url = new URL("./worker.js", import.meta.url)) {
   let current, nextId = 0;
@@ -79,5 +79,3 @@ export function createActionExecutor(url = new URL("./worker.js", import.meta.ur
 
   return { run, close };
 }
-
-export const actionExecutor = createActionExecutor();

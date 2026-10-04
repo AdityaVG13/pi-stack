@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import * as store from "./store.js";
 import { SEVERITIES, CONTRACT_VERSION, envelope, errorEnvelope, textResult } from "./contract.js";
 
@@ -37,9 +38,10 @@ function doAdd(params, ctx) {
   if (params.evidence) record.evidence = params.evidence;
 
   return store.updateEvents(file, (events) => {
-    const duplicate = events.some((item) => item.kind === "cut" && item.id === record.id);
-    const end = record.text.codePointAt(71) > 0xffff ? 71 : 72;
-    const snippet = record.text.length > 72 ? `${record.text.slice(0, end)}…` : record.text;
+    const duplicate = events.find((item) => item.kind === "cut" && item.id === record.id);
+    const flat = mdDigestField(record.text);
+    const end = flat.codePointAt(71) > 0xffff ? 71 : 72;
+    const snippet = flat.length > 72 ? `${flat.slice(0, end)}…` : flat;
 
     const human = duplicate
       ? `papercut already filed · ${record.id} · ${record.severity}`
@@ -47,7 +49,7 @@ function doAdd(params, ctx) {
 
     return {
       events: duplicate ? [] : [record],
-      result: textResult(envelope({ changed: !duplicate, record }, { file, agent_source: agentSource }), human),
+      result: textResult(envelope({ changed: !duplicate, record: duplicate ?? record }, { file, agent_source: agentSource }), human),
     };
   });
 }
@@ -66,7 +68,9 @@ function doList(params, ctx) {
     const lines = [`# Papercuts (${status}) — ${total} item${total === 1 ? "" : "s"}`, ""];
 
     for (const item of shown) {
-      lines.push(`- [${item.severity}] ${item.id} (${item.agent}) ${item.text}`);
+      const agent = mdDigestField(item.agent);
+      const text = mdDigestField(item.text);
+      lines.push(`- [${mdDigestField(item.severity)}] ${mdDigestField(item.id)}${agent ? ` (${agent})` : ""}${text ? ` ${text}` : ""}`);
     }
 
     if (truncated) lines.push(`\n… ${total - shown.length} more (raise limit).`);
@@ -123,7 +127,9 @@ function doPrune(params, ctx) {
 
   const line = receipt.archivedEvents > 0
     ? `pruned ${receipt.archived} resolved papercut(s) to ${receipt.archiveFile} · ${receipt.open} open remain`
-    : `nothing to prune · ${receipt.open} open`;
+    : receipt.tornDropped > 0
+      ? `dropped ${receipt.tornDropped} torn line(s) · ${receipt.open} open`
+      : `nothing to prune · ${receipt.open} open`;
 
   return textResult(envelope(receipt, { file }), line);
 }
@@ -135,7 +141,7 @@ function doDoctor(params, ctx) {
   const resolves = events.filter((e) => e.kind === "resolve").length;
   const findings = [];
 
-  if (tornLines) findings.push(`${tornLines} torn/unparseable line(s) skipped (self-healed on read)`);
+  if (tornLines) findings.push(`${tornLines} torn/unparseable line(s) skipped; raw lines remain until explicit prune`);
   const openCount = items.filter((i) => i.status === "open").length;
   const healthy = tornLines === 0;
 
@@ -184,16 +190,21 @@ function doSchema(params) {
 export const ACTIONS = { add: doAdd, list: doList, resolve: doResolve, prune: doPrune, doctor: doDoctor, schema: doSchema };
 
 function repoPath(file) {
-  return file.endsWith(".papercuts.jsonl")
-    ? file.slice(0, -".papercuts.jsonl".length).replace(/[\\/]$/, "") || null
-    : null;
+  return path.basename(file) === ".papercuts.jsonl" ? path.dirname(file) : null;
+}
 
+function mdDigestField(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
 function listMatches(item, params) {
   if (params.status !== "all" && item.status !== params.status) return false;
 
-  if (params.tag && !(item.tags ?? []).includes(params.tag)) return false;
+  if (params.tag) {
+    const tag = store.normalizeTags([params.tag])[0];
+
+    if (!tag || !(item.tags ?? []).includes(tag)) return false;
+  }
 
   if (params.agent && item.agent !== params.agent) return false;
 

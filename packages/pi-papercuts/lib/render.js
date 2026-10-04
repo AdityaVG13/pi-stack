@@ -110,7 +110,7 @@ function addResult({ data, payload, expanded, theme }) {
   if (!data.record) return defaultResult({ payload, expanded, theme });
   const verb = data.changed ? "✓ Filed" : "• Already filed";
   const color = data.changed ? "success" : "muted";
-  const text = theme.fg(color, `${verb} ${data.record.id} · ${data.record.severity}`);
+  const text = theme.fg(color, `${verb} ${cleanDisplayText(data.record.id)} · ${cleanDisplayText(data.record.severity)}`);
 
   return expanded ? text + expandedRecord(data.record, payload, theme) : text;
 }
@@ -121,14 +121,24 @@ function listHeading(data, context, theme) {
   return theme.fg("muted", `${data.total} ${status} papercut${data.total === 1 ? "" : "s"}`);
 }
 
-function listResult({ data, result, expanded, context, theme }) {
+function listResult({ data, payload, result, expanded, context, theme }) {
   if (!Array.isArray(data.items)) return theme.fg("toolOutput", displayText(resultText(result)));
   let text = listHeading(data, context, theme);
   const shown = expanded ? data.items : data.items.slice(0, 5);
 
-  for (const item of shown) text += `\n  ${theme.fg("accent", cleanDisplayText(item.id))} ${theme.fg("dim", `[${cleanDisplayText(item.severity)}]`)} ${theme.fg("toolOutput", clippedDisplayText(item.text, 120))}`;
+  for (const item of shown) {
+    const body = expanded ? cleanDisplayText(item.text) : clippedDisplayText(item.text, 120);
+    text += `\n  ${theme.fg("accent", cleanDisplayText(item.id))} ${theme.fg("dim", `[${cleanDisplayText(item.severity)}]`)} ${theme.fg("toolOutput", body)}`;
 
-  if (!expanded && data.items.length > shown.length) text += `\n  ${theme.fg("dim", `… ${data.items.length - shown.length} more`)}`;
+    if (expanded && item.tags?.length) text += `\n    ${theme.fg("dim", `tags: ${item.tags.map(cleanDisplayText).join(", ")}`)}`;
+  }
+
+  if (expanded && payload.meta?.file) text += `\n  ${theme.fg("dim", `file: ${cleanDisplayText(payload.meta.file)}`)}`;
+
+  const total = Number.isInteger(data.total) ? data.total : data.items.length;
+  const hidden = total - shown.length;
+
+  if (hidden > 0) text += `\n  ${theme.fg("dim", `… ${hidden} more`)}`;
 
   return text;
 }
@@ -146,6 +156,27 @@ function resolveResult({ data, theme }) {
   if (already.length) text += `\n  ${theme.fg("dim", `already resolved: ${already.map(cleanDisplayText).join(", ")}`)}`;
 
   return text;
+}
+
+function pruneResult({ data, expanded, theme }) {
+  const archived = Number.isInteger(data.archived) ? data.archived : 0;
+  const torn = Number.isInteger(data.tornDropped) ? data.tornDropped : 0;
+  const open = Number.isInteger(data.open) ? data.open : 0;
+
+  if (archived > 0) {
+    let text = theme.fg("success", `✓ Pruned ${archived} resolved papercut${archived === 1 ? "" : "s"}`);
+    text += `\n  ${theme.fg("dim", `${open} open remain`)}`;
+
+    if (expanded && data.archiveFile) text += `\n  ${theme.fg("dim", `archive: ${cleanDisplayText(data.archiveFile)}`)}`;
+
+    return text;
+  }
+
+  if (torn > 0) {
+    return theme.fg("warning", `! Dropped ${torn} torn line${torn === 1 ? "" : "s"}`) + `\n  ${theme.fg("dim", `${open} open`)}`;
+  }
+
+  return theme.fg("muted", `• Nothing to prune · ${open} open`);
 }
 
 function doctorResult({ data, theme }) {
@@ -171,7 +202,7 @@ function defaultResult({ payload, expanded, theme }) {
   return expanded ? theme.fg("dim", JSON.stringify(payload, null, 2)) : theme.fg("success", "✓ Papercuts action complete");
 }
 
-const RESULT_RENDERERS = new Map([["add", addResult], ["list", listResult], ["resolve", resolveResult], ["doctor", doctorResult], ["schema", schemaResult]]);
+const RESULT_RENDERERS = new Map([["add", addResult], ["list", listResult], ["resolve", resolveResult], ["prune", pruneResult], ["doctor", doctorResult], ["schema", schemaResult]]);
 
 export function renderPapercutsResult(result, { expanded }, theme, context) {
   const payload = result?.details;
@@ -193,32 +224,44 @@ function resultAction(context) {
 const FRAME = Symbol("papercuts.frame");
 
 // The self-rendered shell retains the default Box's padding/background, but does
-// not clear its children on every result wrapper. Pi still owns click expansion.
+// not clear its children on every result wrapper. Two frames preserve both
+// expansion layouts; Pi still owns click/keyboard expansion and invalidation.
 export function renderPapercutsFrameCall(args, theme, context) {
   if (!context?.state) return renderPapercutsCall(args, theme, context);
-  let frame = context.state[FRAME];
+  const frames = context.state[FRAME] ??= new Map();
+  const expanded = Boolean(context.expanded);
+  let frame = frames.get(expanded);
 
   if (!frame) {
     frame = { box: new Box(1, 1), empty: new Text("", 0, 0) };
-    context.state[FRAME] = frame;
+    frames.set(expanded, frame);
   }
 
+  // Pi falls back if renderCall throws; then this private box is not mounted.
+  frame.ready = false;
   const previous = frame.call;
   frame.call = renderPapercutsCall(args, theme, { ...context, lastComponent: previous });
 
   if (!previous) frame.box.addChild(frame.call);
   const color = context.isPartial ? "toolPendingBg" : context.isError ? "toolErrorBg" : "toolSuccessBg";
   frame.box.setBgFn(text => theme.bg(color, text));
+  frame.ready = true;
 
   return frame.box;
 }
 
 export function renderPapercutsFrameResult(result, options, theme, context) {
-  const frame = context?.state?.[FRAME];
+  const frame = context?.state?.[FRAME]?.get(Boolean(context.expanded));
 
-  if (!frame) return renderPapercutsResult(result, options, theme, context);
+  if (!frame?.ready) return renderPapercutsResult(result, options, theme, context);
   const previous = frame.result;
-  frame.result = renderPapercutsResult(result, options, theme, { ...context, lastComponent: previous });
+
+  try { frame.result = renderPapercutsResult(result, options, theme, { ...context, lastComponent: previous }); }
+  catch (error) {
+    // The host will render its fallback after this box. Never retain an old receipt.
+    if (previous) textComponent("", { lastComponent: previous });
+    throw error;
+  }
 
   if (!previous) frame.box.addChild(frame.result);
 
