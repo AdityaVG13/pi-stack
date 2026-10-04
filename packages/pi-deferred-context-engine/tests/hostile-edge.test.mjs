@@ -7,13 +7,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { loadConfig, mergeConfig } from "../config.js";
-import { createDeferredController } from "../engine.js";
-import { formatSkillIndex, optimizeSystemPrompt, readSkill } from "../context.js";
+import { loadConfig, mergeConfig } from "../lib/config.js";
+import { createDeferredController } from "../lib/engine.js";
+import { formatSkillIndex, optimizeSystemPrompt, readSkill } from "../lib/context.js";
 
 function mockPi(toolNames) {
   const tools = toolNames.map((name) => ({ name, description: name }));
   let active = toolNames.slice();
+
   return {
     getAllTools: () => tools,
     getActiveTools: () => [...active],
@@ -25,6 +26,7 @@ function mockPi(toolNames) {
 
 test("fixed: enabled:false must restore previously deferred tools to active", () => {
   const pi = mockPi(["read", "weather", "search_tools"]);
+
   const cfg = {
     enabled: true,
     deferByDefault: true,
@@ -33,6 +35,7 @@ test("fixed: enabled:false must restore previously deferred tools to active", ()
     deferredNames: [],
     deferredPrefixes: [],
   };
+
   const controller = createDeferredController(pi, cfg);
   controller.synchronize({ resetPromotions: true });
   assert.ok(!pi.getActiveTools().includes("weather"), "weather deferred while enabled");
@@ -63,15 +66,19 @@ test("fixed: /deferred reload to enabled:false leaves stripped active set", asyn
   );
   const previous = process.env.PI_DEFERRED_TOOLS_CONFIG;
   process.env.PI_DEFERRED_TOOLS_CONFIG = configPath;
+
   try {
     const { default: extension } = await import(`../index.js?hostile-disable=${Date.now()}`);
+
     const tools = [
       { name: "read", description: "Read", parameters: {} },
       { name: "weather", description: "Weather", parameters: {} },
     ];
+
     let active = tools.map((t) => t.name);
     const handlers = new Map();
     const commands = new Map();
+
     const pi = {
       getAllTools: () => tools,
       getActiveTools: () => [...active],
@@ -85,6 +92,7 @@ test("fixed: /deferred reload to enabled:false leaves stripped active set", asyn
       registerCommand: (name, command) => commands.set(name, command),
       on: (name, handler) => handlers.set(name, handler),
     };
+
     extension(pi);
     await handlers.get("session_start")();
     assert.ok(!active.includes("weather"));
@@ -110,6 +118,7 @@ test("fixed: non-object JSON config is accepted without schema guard", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deferred-hostile-array-"));
   const configPath = path.join(directory, "arr.json");
   fs.writeFileSync(configPath, JSON.stringify([{ enabled: false }]), "utf8");
+
   try {
     assert.throws(
       () => loadConfig(configPath, { strict: true }),
@@ -127,7 +136,9 @@ test("fixed: setActiveTools throw escapes synchronize", () => {
     { name: "search_tools", description: "S" },
     { name: "weather", description: "W" },
   ];
+
   let active = tools.map((t) => t.name);
+
   const pi = {
     getAllTools: () => tools,
     getActiveTools: () => [...active],
@@ -135,6 +146,7 @@ test("fixed: setActiveTools throw escapes synchronize", () => {
       throw new Error("host refused setActiveTools");
     },
   };
+
   const controller = createDeferredController(pi, {
     enabled: true,
     deferByDefault: true,
@@ -143,6 +155,7 @@ test("fixed: setActiveTools throw escapes synchronize", () => {
     deferredNames: [],
     deferredPrefixes: [],
   });
+
   // Prefer: synchronize should not throw; degrade gracefully.
   assert.doesNotThrow(() => controller.synchronize({ resetPromotions: true }));
 });
@@ -152,13 +165,14 @@ test("document: skill strip is exact-match (CRLF does not strip)", () => {
   const exact = formatSkillIndex(skills);
   const crlf = "base" + exact.replace(/\n/g, "\r\n") + "\nend";
   const optimized = optimizeSystemPrompt(crlf, { skills }, { deferSkills: true });
-  // Current behavior: strip fails on CRLF — residual risk for Windows hosts.
+  // Current behavior: strip fails on CRLF -- residual risk for Windows hosts.
   assert.match(optimized.systemPrompt, /available_skills/, "documents current exact-match limitation");
   assert.equal(optimized.stats.deferredSkillChars, 0);
 });
 
 test("document: replaceAlwaysActive [] soft-locks to spine only", () => {
   const defaults = loadConfig(path.join(os.tmpdir(), `pi-deferred-missing-${Date.now()}.json`));
+
   const cfg = mergeConfig(defaults, {
     replaceAlwaysActive: true,
     replaceNeverDefer: true,
@@ -166,6 +180,7 @@ test("document: replaceAlwaysActive [] soft-locks to spine only", () => {
     neverDefer: [],
     deferByDefault: true,
   });
+
   const pi = mockPi(["read", "bash", "search_tools", "weather"]);
   const controller = createDeferredController(pi, cfg);
   controller.synchronize({ resetPromotions: true });
@@ -181,6 +196,7 @@ test("document: readSkill follows symlinks (skill paths are trusted)", () => {
   fs.writeFileSync(outside, "SECRET", "utf8");
   const link = path.join(directory, "SKILL.md");
   fs.symlinkSync(outside, link);
+
   try {
     assert.equal(readSkill({ name: "escape", filePath: link }, 1024), "SECRET");
   } finally {
@@ -191,6 +207,7 @@ test("document: readSkill follows symlinks (skill paths are trusted)", () => {
 
 test("document: blocked tools are NOT recoverable via promote (harder than empty-pin soft-lock)", () => {
   const defaults = loadConfig(path.join(os.tmpdir(), `pi-deferred-missing-${Date.now()}.json`));
+
   const cfg = mergeConfig(defaults, {
     replaceAlwaysActive: true,
     alwaysActive: ["read"],
@@ -198,6 +215,7 @@ test("document: blocked tools are NOT recoverable via promote (harder than empty
     blockedTools: ["weather"],
     blockedPrefixes: [],
   });
+
   const pi = mockPi(["read", "search_tools", "weather"]);
   const controller = createDeferredController(pi, cfg);
   controller.synchronize({ resetPromotions: true });

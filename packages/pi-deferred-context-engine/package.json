@@ -1,6 +1,6 @@
 {
   "name": "pi-deferred-context-engine",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Run-scoped deferred tools, skills, blocked deny-list, and duplicate prompt context for Pi/OMP.",
   "type": "module",
   "author": "AdityaVG13",
@@ -27,21 +27,14 @@
   "exports": "./index.js",
   "files": [
     "index.js",
-    "decode.js",
-    "engine.js",
-    "config.js",
-    "context.js",
-    "catalog.js",
-    "perf.js",
-    "config.default.json",
+    "lib/",
     "config.example.json",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md",
-    "compact.js"
+    "CHANGELOG.md"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test tests/*.test.mjs",
     "prepublishOnly": "npm test && node ../../scripts/preflight.mjs"
   },
   "pi": {
@@ -56,10 +49,14 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
       "optional": true
     },
     "typebox": {
@@ -67,6 +64,7 @@
     }
   },
   "devDependencies": {
+    "@earendil-works/pi-tui": "^1.0.0",
     "typebox": "^1.0.0"
   },
   "publishConfig": {

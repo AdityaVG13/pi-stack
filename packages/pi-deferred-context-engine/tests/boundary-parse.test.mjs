@@ -12,7 +12,7 @@ import {
   mergeConfig,
   parsePromotionLifetime,
   parseUserConfig,
-} from "../config.js";
+} from "../lib/config.js";
 import {
   parseDeferredCommand,
   parseSearchToolsParams,
@@ -42,6 +42,7 @@ test("parseUserConfig strips unknown keys (non-strict) and refuses them (strict)
 
 test("parseUserConfig + mergeConfig never reintroduce open user keys", () => {
   const defaults = loadConfig(path.join(os.tmpdir(), `pi-deferred-missing-bp-${Date.now()}.json`));
+
   const parsed = parseUserConfig({
     enabled: true,
     alwaysActive: ["x"],
@@ -51,12 +52,15 @@ test("parseUserConfig + mergeConfig never reintroduce open user keys", () => {
     __proto__: null,
     extraRuntime: "nope",
   });
+
   assert.equal(parsed.ok, true);
   const merged = mergeConfig(defaults, parsed.value);
   assert.equal(Object.prototype.hasOwnProperty.call(merged, "extraRuntime"), false);
+
   for (const key of Object.keys(merged)) {
     assert.ok(KNOWN_CONFIG_KEYS.includes(key), "unexpected runtime key: " + key);
   }
+
   assert.deepEqual(merged.alwaysActive, ["x"]);
 });
 
@@ -70,6 +74,7 @@ test("parsePromotionLifetime is run|session only", () => {
 
 test("strict loadConfig rejects unknown keys and bad promotionLifetime", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deferred-bp-"));
+
   try {
     const unknownPath = path.join(directory, "unknown.json");
     fs.writeFileSync(unknownPath, JSON.stringify({ enabled: true, notAKey: 1 }), "utf8");
@@ -161,6 +166,7 @@ test("parseDeferredCommand is closed status|audit|apply|reload|config|blocked|un
 
 test("joint: non-strict loadConfig falls back on non-object JSON; strict refuses", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deferred-bp-arr-"));
+
   try {
     const arrPath = path.join(directory, "arr.json");
     fs.writeFileSync(arrPath, JSON.stringify([{ enabled: false }]), "utf8");
@@ -177,5 +183,23 @@ test("joint: non-strict loadConfig falls back on non-object JSON; strict refuses
     assert.throws(() => loadConfig(numPath, { strict: true }), /Invalid deferred-tools config|JSON object/);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test("strict nested compaction settings reject unknown keys without changing permissive loading", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dce-config-nested-"));
+  const file = path.join(directory, "config.json");
+
+  for (const key of ["enabld", "keepFul", "constructor", "__proto__"]) {
+    const raw = { compactSchemas: { enabled: true, [key]: true } };
+    const parsed = parseUserConfig(raw, { strict: true });
+    assert.equal(parsed.ok, false, key);
+    assert.match(parsed.error, /compactSchemas/);
+    assert.ok(parsed.error.includes(key));
+    assert.deepEqual(parseUserConfig(raw).value.compactSchemas, { enabled: true });
+    fs.writeFileSync(file, JSON.stringify(raw));
+    assert.throws(() => loadConfig(file, { strict: true }), /compactSchemas/);
+    assert.equal(loadConfig(file).compactSchemas.enabled, true);
   }
 });

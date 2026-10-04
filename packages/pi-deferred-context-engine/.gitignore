@@ -5,3 +5,4 @@ node_modules/
 .tokenzero/
 .fszero/
 .graphzero/
+package-lock.json
