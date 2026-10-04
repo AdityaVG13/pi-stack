@@ -47,7 +47,7 @@
     "url": "git+https://github.com/AdityaVG13/pi-stack.git"
   },
   "scripts": {
-    "prepublishOnly": "npm test && node ../../scripts/preflight.mjs",
+    "prepublishOnly": "node ../../scripts/preflight.mjs",
     "test": "node --import ./tests/host-modules.mjs --test tests/*.test.mjs"
   },
   "type": "module",

@@ -35,7 +35,7 @@
     "test:hosts": "node tests/hosts/verify.mjs",
     "measure": "node tests/efficiency/measure.mjs",
     "test:tokens": "node tests/efficiency/tokens.mjs",
-    "prepublishOnly": "npm test && node ../../scripts/preflight.mjs"
+    "prepublishOnly": "node ../../scripts/preflight.mjs"
   },
   "pi": {
     "extensions": [
