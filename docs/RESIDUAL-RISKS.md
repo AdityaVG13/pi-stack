@@ -1,27 +1,28 @@
 # Residual risks
 
-Honest limits of the **published** pi-stack packages. Not a security audit of Pi.
+Honest limits of the published pi-stack packages. Not a security audit of Pi.
 Extensions run with full agent privileges.
 
 Current versions this file was written against:
 
 | Package | Version | Job |
 |---------|---------|-----|
-| [pi-papercuts](../packages/pi-papercuts) | 0.3.3 | Agent-filed friction log |
-| [pi-deferred-context-engine](../packages/pi-deferred-context-engine) | 0.4.3 | Defer tools/skills; promote for one run |
-| [pi-supernova](../packages/pi-supernova) | 0.10.1 | One CodeMode tool: `read` / `edit` / `write` / `bash` |
-| [pi-rotator](../packages/pi-rotator) | 0.2.1 | Multi-account rotation per provider family |
-| [pi-lakers-theme](../packages/pi-lakers-theme) | 0.1.0 | Pi theme |
-| [pi-cliffcompaction](../packages/pi-cliffcompaction) | 0.1.0 | Mechanical autocompaction (no LLM summary) |
+| [pi-papercuts](../packages/pi-papercuts) | 0.4.0 | Agent-filed friction log |
+| [pi-deferred-context-engine](../packages/pi-deferred-context-engine) | 0.5.0 | Defer tools/skills; promote for one run |
+| [pi-supernova](../packages/pi-supernova) | 0.11.0 | One CodeMode tool: `read` / `edit` / `write` / `bash` |
+| [pi-rotator](../packages/pi-rotator) | 0.3.0 | Standalone account management and rotation, including Cursor |
+| [pi-cliffcompaction](../packages/pi-cliffcompaction) | 0.2.0 | Mechanical autocompaction (no LLM summary) |
+| [pi-model-sync](../packages/pi-model-sync) | 0.1.0 | `/model-sync` live provider catalogs into `models.json` |
+| [pi-lakers-theme](../packages/pi-lakers-theme) | 0.2.0 | Pi theme |
 
-`pi-cxx` is in the tree and **not published**. Do not treat it as an install surface.
+`pi-indexer` and `pi-agent-cache` stay in the tree and are not published. Do not treat them as npm install surfaces.
 
 ## Scope
 
 | In | Not in |
 |----|--------|
 | Standalone npm packages | A private harness under some other path |
-| Defer / promote / CodeMode / rotation / mechanical compact | LLM auto-routing over MCP |
+| Defer / promote / CodeMode / rotation / mechanical compact / catalog sync | LLM auto-routing over MCP |
 | Agent-filed friction log | Automatic tool-failure sensors |
 | Size caps on papercuts evidence | Secret vault / redaction pipeline |
 | Workspace-bounded supernova writes | A security sandbox for untrusted code |
@@ -33,7 +34,7 @@ Current versions this file was written against:
 | `pi install npm:<name>` | that package only | Preferred |
 | `omp install npm:<name>` | that package only | Same, on OMP (theme is Pi-only) |
 | `pi install ./packages/<name>` | one package from a clone | Same as npm for that package |
-| `pi install git:github.com/AdityaVG13/pi-stack` | **root** `pi.extensions` only: supernova, papercuts, DCE | Does **not** load rotator, lakers, or cliffcompaction |
+| `pi install git:github.com/AdityaVG13/pi-stack` | **root** `pi.extensions` only: supernova, papercuts, DCE | Does **not** load rotator, lakers, cliffcompaction, or model-sync |
 
 Pi cannot install monorepo subpaths over git alone ([pi#4530](https://github.com/earendil-works/pi/issues/4530)). Use npm or a path.
 
@@ -59,10 +60,10 @@ Install DCE **last** among tool-owning packages so it sees tools other extension
 | `enabled: false` | **No deferral** -- restores the full registered tool set. Loader tools still register (package not unloaded) |
 | `promotionLifetime: "run"` (default) | Promotions cleared on `agent_settled` |
 | `promotionLifetime: "session"` | Promotions stick until reload / reset |
-| `replaceAlwaysActive: true` + empty list | Soft-lock: only hard spine `search_tools`. Pin stock tools yourself |
+| `replaceAlwaysActive: true` + empty list | Soft-lock: only hard spine `search_tools`. Pin desired core tools yourself |
 | `blockedTools` / `blockedPrefixes` non-empty | **Hard deny** -- not searchable, promote refused. Escape: `/deferred unblock` or config edit. `search_tools` cannot be blocked |
 
-Hard spine is always `search_tools` only. Admin tools (`list_capabilities`, `promote_tools`, `demote_tools`) are deferred by default -- use `search_tools`.
+Hard spine is always `search_tools` only. Package defaults ship empty `alwaysActive` / `neverDefer`; only `search_tools` is forced. Admin tools (`list_capabilities`, `promote_tools`, `demote_tools`) are deferred by default -- use `search_tools`.
 
 ### pi-papercuts
 
@@ -80,9 +81,9 @@ Log path must be a **regular file** (or not exist yet). Directories, FIFOs, and 
 
 Full contract: [packages/pi-supernova/README.md](../packages/pi-supernova/README.md#security-and-host-boundary).
 
-- One CodeMode invocation per call. Independent work belongs **inside** that program (`Promise.all`), not as three parallel `supernova` tool calls.
+- One CodeMode invocation per call. Independent work belongs in that program (`Promise.all` / `Promise.allSettled`) or in independent `programs` entries, not as three parallel `supernova` tool calls.
 - `write` / `edit` refuse paths outside the workspace (including `/tmp`). Use a workspace path or a separately authorized `bash` command.
-- Foreground `bash` nonzero exits **throw**. Later statements in the same program do not run unless you `catch`.
+- Foreground `bash` nonzero exits **throw**. Later statements in the same program do not run unless you `catch`. Successful edit/write steps already returned stay saved; independent programs continue after ordinary errors. There is no program-wide filesystem rollback unless you use an explicit checkpoint.
 - `Promise.all` of reads fails the whole batch if one path is missing. Optional reads: `Promise.allSettled`.
 - JSON reads: put the selector in `json` (`json: true` or `json: ".field"`). A leftover `selector` key folds when `json` is absent, `true`, or `"."`.
 - Guest bindings are `read`, `write`, `edit`, `bash`. There is no `supernova` object in guest scope.
@@ -90,10 +91,13 @@ Full contract: [packages/pi-supernova/README.md](../packages/pi-supernova/README
 
 ### pi-rotator
 
-- Two routers fight over `setModel`. Rotator enters **standby** rather than splitting state. See [LAYERING.md](../packages/pi-rotator/LAYERING.md).
-- Cursor (and other transport-owned families) rotate only through pi-multi-account transport. Standalone clone path is pi-ai builtins.
-- Pi 0.87.x rejects cloned aliases that still carry `streamSimple` without `api`. **0.2.1** drops that method. Stay on 0.2.1+ if you clone builtin families (opencode-go, zai, deepseek, ...).
-- Exhaustion continuation needs Pi 0.87+.
+Full contract: [README.md](../packages/pi-rotator/README.md).
+
+- The standalone target is **Pi + pi-rotator only**, with no pi-multi-account installed or enabled. Pi's native provider APIs own builtin authentication and streaming; Rotator ships its own Cursor transport and independent Qwen/Ollama Cloud key methods.
+- pi-multi-account references are migration and optional legacy-coexistence support, not a runtime dependency. Existing configured owners are preserved until explicit `/rotator cutover`; close other sessions sharing the agent directory first. See [LAYERING.md](../packages/pi-rotator/LAYERING.md).
+- Two routers still fight over `setModel`. Rotator enters **standby** rather than splitting state.
+- Native standalone mode uses the provider API introduced in Pi AI 0.99 and requires Node **22.19+**. Current packed SDK checks target Pi **1.0.0**; the wildcard host-peer range does not certify every Pi version.
+- Isolated fresh/upgrade SDK, transport and real TUI shutdown checks pass without loading pi-multi-account. Live provider/OAuth flows, upstream Cursor HTTP/2, entitlement and remote cache sharing remain unverified. Isolated shutdown timing does not establish the cause of an earlier live multi-extension delay.
 
 ### pi-cliffcompaction
 
@@ -107,13 +111,22 @@ Full contract: [packages/pi-cliffcompaction/README.md](../packages/pi-cliffcompa
 - Does **not** claim the paper's SWE-bench / Terminal-Bench / KernelBench scores.
 - Pi cannot keep a hole in the provider transcript; the task head is folded into the summary string.
 
+### pi-model-sync
+
+Full contract: [packages/pi-model-sync/README.md](../packages/pi-model-sync/README.md).
+
+- Pi only. OMP already has `@oh-my-pi/pi-catalog`.
+- Writes missing models to `models.json`. `--dry-run` reports without writing.
+- Legacy extensions with explicit model lists keep those lists and are reported skipped. Mixed-discovery families (Copilot, Fireworks) are skipped rather than stamping one guessed `api` onto new ids.
+- Does not replace Pi's own curated catalog refresh. It adds live lists from configured providers, including custom gateways.
+
 ### pi-lakers-theme
 
 Theme only. Pi, not OMP. No tools, no session behavior.
 
 ## Ranked footguns
 
-1. **Empty DCE `replaceAlwaysActive`** -- only `search_tools` left active. Recovery: fix config, `/deferred reload`, or restart.
+1. **`replaceAlwaysActive: true` with an empty `alwaysActive` list** -- only `search_tools` left pinned. Shipped defaults are already empty pins. Recovery if you overwrote pins: fix config, `/deferred reload`, or restart.
 2. **Over-broad DCE blocks** -- agent cannot self-recover via promote. Recovery: `/deferred unblock`. Blocking `grep` does not stop `bash`+`rg`.
 3. **Dueling routers** -- rotator stands by; turns do not rotate. Uninstall the other router or disable rotator.
 4. **Second compaction extension** -- race on `session_before_compact`. Load one.
@@ -121,16 +134,16 @@ Theme only. Pi, not OMP. No tools, no session behavior.
 6. **Papercuts is habit** -- empty log is not a clean bill of health.
 7. **Secrets in papercuts** -- no redaction; mistakes persist in append-only history.
 8. **Non-git cwd** -- papercuts go to `~/.papercuts/log.jsonl` unless `PAPERCUTS_FILE` is set (CI hazard).
-9. **Root git install** -- you did not install rotator / cliffcompaction / lakers. Add those from npm.
+9. **Root git install** -- you did not install rotator / cliffcompaction / lakers / model-sync. Add those from npm.
 10. **`/reload` after JS package edits** -- can keep old modules. Fully restart Pi/OMP.
 
 ## What we will not claim or build here
 
 - Auto-filing papercuts on every tool failure
 - Secret detection / vault integration
-- Windows CI matrix (Node `path` / `os.homedir`; rotator tests include a known Win32 `fileURLToPath` issue on `codex.test.mjs` that is not this stack's ship gate)
+- Windows CI matrix (Node `path` / `os.homedir` do not by themselves establish portability)
 - Perfect skill-index strip against arbitrary third-party rewriters
-- Multi-process flock on the papercuts log (fold first-wins; rare duplicate lines OK)
+- Coordination with older papercuts versions or external log appenders (0.4.0 locks only same-protocol writers)
 - Paper benchmark scores for CliffCompaction
 - That supernova inner `bash`/`edit` are visible to every third-party permission extension
 
@@ -145,6 +158,7 @@ cd packages/pi-supernova && npm test
 cd packages/pi-rotator && npm test
 cd packages/pi-lakers-theme && npm test
 cd packages/pi-cliffcompaction && npm test
+cd packages/pi-model-sync && npm test
 ```
 
 Release: `node scripts/release-check.mjs` (when cutting a release).
@@ -155,5 +169,6 @@ Live smoke after install (full restart, not only `/reload`):
 /deferred status
 /rotator status
 /cliff status
+/model-sync --dry-run
 papercuts({ action: "doctor" })
 ```
