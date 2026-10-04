@@ -38,7 +38,7 @@ Pi only for now. OMP theme support is unverified, so there is no `omp` manifest 
 
 Unofficial tribute. Not affiliated with the NBA or the Lakers.
 
-## Develop
+## Tests
 
 ```bash
 npm test
