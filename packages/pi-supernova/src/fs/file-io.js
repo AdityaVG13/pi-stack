@@ -12,8 +12,8 @@ function sameFileVersion(a, b) {
 
 // FileHandle streams with an already-aborted signal can emit a second, unhandled
 // error even after for-await rejects (Node and Bun). Own the bounded reads instead.
-async function* fileChunks(file, signal, maxBytes = Infinity) {
-  const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes));
+async function* fileChunks(file, signal, maxBytes = Infinity, chunkBytes = 64 * 1024) {
+  const buffer = Buffer.allocUnsafe(Math.min(chunkBytes, maxBytes));
   let remaining = maxBytes;
 
   while (remaining > 0) {
@@ -38,13 +38,20 @@ async function fileSignature(target, signal, observed) {
 
     if (observed && !sameFileVersion(observed, actual)) throw new Error("file changed while reading: " + target);
     const hash = createHash("sha256");
+    let size = 0;
 
-    for await (const chunk of fileChunks(file, signal)) hash.update(chunk);
+    const chunkBytes = Math.min(256 * 1024, Math.max(64 * 1024, actual.size));
+
+    for await (const chunk of fileChunks(file, signal, Infinity, chunkBytes)) {
+      hash.update(chunk);
+      size += chunk.length;
+    }
+
     const after = await file.stat();
 
     if (!after.isFile() || !sameFileVersion(actual, after)) throw new Error("file changed while signing: " + target);
 
-    return { size: actual.size, sha256: hash.digest("hex") };
+    return { size, sha256: hash.digest("hex") };
   } finally {
     await file.close();
   }
@@ -73,17 +80,31 @@ function assertReadableFile(stat, target) {
 
 async function readLimitedBytes(file, stat, maxBytes, label, signal, overflow = () => tooLargeRead(label, maxBytes)) {
   if (stat.size > maxBytes) throw overflow();
-  const chunks = [];
+  signal?.throwIfAborted();
+  // Reserve from stat, but read through EOF: files can grow, shrink or report zero size.
+  const buffer = Buffer.allocUnsafe(stat.size + 1);
   let size = 0;
 
-  for await (const chunk of fileChunks(file, signal, maxBytes + 1)) {
+  while (size < buffer.length) {
+    const { bytesRead } = await file.read(buffer, size, buffer.length - size, null);
+    signal?.throwIfAborted();
+
+    if (!bytesRead) return buffer.subarray(0, size);
+    size += bytesRead;
+
+    if (size > maxBytes) throw overflow();
+  }
+
+  const chunks = [buffer];
+
+  for await (const chunk of fileChunks(file, signal, maxBytes + 1 - size)) {
     size += chunk.length;
 
     if (size > maxBytes) throw overflow();
     chunks.push(Buffer.from(chunk));
   }
 
-  return Buffer.concat(chunks);
+  return Buffer.concat(chunks, size);
 }
 
 async function hasFileParent(target) {

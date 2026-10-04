@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.11.0 (not yet published)
+## 0.11.0
 
 ### Changed
 
@@ -10,7 +10,7 @@
   Windows loaded-byte baselines
   and final publication also verify content when timestamps alias a rewrite.
   Overlong Windows edit paths receive the same bounded recovery guidance as
-  Unix paths. Scanner exceptions are documented in [UBS.md](UBS.md).
+  Unix paths.
 - Missing optional TypeBox no longer changes the public JSON schema or its
   serialized standing-definition cost. Explicit nested program-entry validation
   remains unchanged; clean-install token gates use the same schema as hosts.
@@ -67,6 +67,22 @@
   for a cleanup polling interval. Source searches and background terminals retain
   the existing process-group ownership, escalation and deadline checks. No Pi
   modifications, runtime dependency changes or public API changes are required.
+- Overlay keys, conflict signatures and commit destinations share canonical
+  filesystem identity. Logical paths remain in receipts and diagnostics. Missing
+  paths resolve through the nearest existing ancestor. Observed logical-to-physical
+  bindings reject retargeted aliases. Identity reuse is call-local; commits resolve
+  destinations afresh. `CausalVfs` still has no body cache: every read hits disk
+  or its overlay.
+- Successful native `edit`/`write` steps publish before returning. Later read
+  errors, failed shells, invalid returned images or uncaught JavaScript do not
+  undo those saved steps. `edit(async () => { ... })` remains an explicit atomic
+  filesystem checkpoint. A single `edit({path,edits:[...]})` replacement set is
+  still one atomic step. Independent sequential and parallel `programs` continue
+  after ordinary errors; shared budgets, cancellation and uncertain filesystem
+  outcomes stop queued work. Failed programs expose `details.savedPaths` and
+  `error.supernovaResult`. Batch results expose zero-based `failedPrograms`,
+  `notRunPrograms` and `programIndex`. Dependent JavaScript still stops at an
+  uncaught exception; there is no automatic resumption or replay.
 
 ## [0.10.2] - 2026-09-24
 
@@ -301,7 +317,7 @@
 
 - Guest worker links on hosts without `module.registerHooks` (Bun, Node <22.15):
   `node:module` is now a namespace import with runtime feature detection, so the
-  `register` fallback — and hosts with neither hook mechanism — no longer fail at
+  `register` fallback -- and hosts with neither hook mechanism -- no longer fail at
   module-eval time. Previously every program failed before its first command with
   "Export named 'registerHooks' not found", e.g. under OMP/Bun.
 
@@ -607,7 +623,7 @@
 
 ### Removed
 
-- Dead code (−638 lines net): the static `extractOperationsFromCode` source-regex preview (the live trace superseded it), `SafeText`/`fitOutputLines`/`wrapPlainToWidth` (the call slot is always empty), `shutdownGuestWorkers`, `decode.js` helpers nobody imported, `vfs.clear`, the `tools` alias for `nova`, unused bridge methods (`hasExecutor`, `clearVfsCache`, `isMutating`), `test/verify-width-crash.mjs`, and unused status-header knobs (`spinnerFrame`, `iconOverride`).
+- Dead code (-638 lines net): the static `extractOperationsFromCode` source-regex preview (the live trace superseded it), `SafeText`/`fitOutputLines`/`wrapPlainToWidth` (the call slot is always empty), `shutdownGuestWorkers`, `decode.js` helpers nobody imported, `vfs.clear`, the `tools` alias for `nova`, unused bridge methods (`hasExecutor`, `clearVfsCache`, `isMutating`), `test/verify-width-crash.mjs`, and unused status-header knobs (`spinnerFrame`, `iconOverride`).
 - `edit` no longer accepts a unified diff (`patch`/`oldText` starting with `@@`); `apply_patch` / `patch()` is the one way to apply a diff.
 - `nova.surface`/`nova.snap` host-side unwrapping and their dedicated RPC methods: both route through `nova.call` and the guest unwraps once.
 
@@ -624,12 +640,12 @@
 
 ### Added
 
-- **Seen-ledger.** The model's context window is treated as memory: a result never re-sends a run of lines (≥6, mostly substantive) that an earlier result in the session already contained. The run collapses to `⋯ N lines same as #12 · path:a–b ⋯`, citing the earlier program and, when the lines came from a file, the exact range, so one `read(path, a, n)` recovers them. Changed lines are never collapsed, so a re-read after an edit is exactly the delta. Lines the current program read with an explicit `offset`/`limit` are pinned and always shown. Programs are numbered (`ok #12 3ms`) to anchor the citations; the window is `seenWindow` programs (default 40) and resets on `session_start`. Not compression: every collapsed line already exists verbatim in the model's context. `/supernova` reports the session's returned vs. not-re-sent tokens.
+- **Seen-ledger.** The model's context window is treated as memory: a result never re-sends a run of lines (≥6, mostly substantive) that an earlier result in the session already contained. The run collapses to `⋯ N lines same as #12 · path:a--b ⋯`, citing the earlier program and, when the lines came from a file, the exact range, so one `read(path, a, n)` recovers them. Changed lines are never collapsed, so a re-read after an edit is exactly the delta. Lines the current program read with an explicit `offset`/`limit` are pinned and always shown. Programs are numbered (`ok #12 3ms`) to anchor the citations; the window is `seenWindow` programs (default 40) and resets on `session_start`. Not compression: every collapsed line already exists verbatim in the model's context. `/supernova` reports the session's returned vs. not-re-sent tokens.
 - **Edits close the loop.** `edit` returns the post-edit lines with numbers (±2 context, ≤40 lines) so no verification re-read is needed; a quick structural check (`check: unclosed '{' opened at line 1`, JSON parsed exactly; brackets/strings/templates/regex-aware, 0 false positives over 6,100 source files); and `X also referenced in a.js:12, b.js:40` for every declaration the edit changed, so callers are not forgotten.
 - **Failures carry their source.** A failing `bash` appends `--- source` with ±2 lines around each `path:line` it printed (≤4 sites), so a stack trace or test failure does not cost a read turn.
 - **Outlines carry relations.** Expanded spans in `read(path, {about})` end with `// used by: a.js:12, b.js:40`.
 
-Measured on a read→edit→verify→edit→verify→outline→outline loop: 20,967 tokens naive vs **3,098** (−85%); the verification re-read costs 49 tokens instead of 1,078.
+Measured on a read→edit→verify→edit→verify→outline→outline loop: 20,967 tokens naive vs **3,098** (-85%); the verification re-read costs 49 tokens instead of 1,078.
 
 ### Changed
 
@@ -660,7 +676,7 @@ Measured on a read→edit→verify→edit→verify→outline→outline loop: 20,
 
 ### Added
 
-- `evidence(query, {k?, path?, maxChars?})`: zero-token evidence selection over the codebase after Zero-Mem (arXiv:2607.29377), implemented 1:1 with the paper's non-generative pipeline: declared spans are the context units and identifiers the entities (eq.3), entity–span weights `w(d,e)=c(e,d)/Σc` (eq.4), file→span→line hierarchy (eq.5, eq.11), a deterministic query profile and relational/local route (eq.6–7), lexical entity alignment and one IDF-damped co-occurrence propagation step (eq.8–9), personalized PageRank `π=(1−γ)r+γPᵀπ` over spans (eq.10, γ=0.85, 10 iterations, factored through the entity layer so it is O(nnz)), per-view min-max normalisation and ρ-weighted fusion (eq.12–13, ρ=0.7), closure with definition bridges and in-file neighbours (eq.14), and calibration that filters by boundary/answer type/lexical support and ranks by type compatibility (eq.15). Returns top-K (default 5, per the paper's Top-5 ≈ Top-10 finding) verbatim source spans with path and line provenance under a 6000-char budget. Across 8 understanding questions on this repo the correct span ranks first and the result costs **68% fewer tokens** than reading the files the question spans (43,916 → 14,147). Warm latency 1–4ms.
+- `evidence(query, {k?, path?, maxChars?})`: zero-token evidence selection over the codebase after Zero-Mem (arXiv:2607.29377), implemented 1:1 with the paper's non-generative pipeline: declared spans are the context units and identifiers the entities (eq.3), entity--span weights `w(d,e)=c(e,d)/Σc` (eq.4), file→span→line hierarchy (eq.5, eq.11), a deterministic query profile and relational/local route (eq.6--7), lexical entity alignment and one IDF-damped co-occurrence propagation step (eq.8--9), personalized PageRank `π=(1-γ)r+γPᵀπ` over spans (eq.10, γ=0.85, 10 iterations, factored through the entity layer so it is O(nnz)), per-view min-max normalisation and ρ-weighted fusion (eq.12--13, ρ=0.7), closure with definition bridges and in-file neighbours (eq.14), and calibration that filters by boundary/answer type/lexical support and ranks by type compatibility (eq.15). Returns top-K (default 5, per the paper's Top-5 ≈ Top-10 finding) verbatim source spans with path and line provenance under a 6000-char budget. Across 8 understanding questions on this repo the correct span ranks first and the result costs **68% fewer tokens** than reading the files the question spans (43,916 → 14,147). Warm latency 1--4ms.
 - Structural surface now records column-0 `const/let/var` bindings, so module-level tables are their own spans (also sharpens `snap`).
 
 ### Changed

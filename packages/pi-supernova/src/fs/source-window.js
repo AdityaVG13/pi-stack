@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { relativeSlash } from "./workspace.js";
-import { sameFileVersion } from "./file-io.js";
+import { sameFileVersion, readLimitedBytes } from "./file-io.js";
 
 export const SOURCE_REF = /((?:\/|[A-Za-z]:[\\/])?(?:[\w.@-]+[\\/])*[\w.@-]+\.(?:m?[jt]sx?|c[jt]s|py|rs|go|java|kt|rb|php|c|cc|cpp|h|hpp|cs|swift|json|ya?ml|toml))(?::|\()(\d+)/g;
 
@@ -16,20 +16,11 @@ async function readBoundedFile(real, rootPrefix, signal) {
     const stat = await handle.stat();
 
     if (!real.startsWith(rootPrefix) || !stat.isFile() || stat.size > 1024 * 1024) return null;
-    const buffer = Buffer.alloc(Math.min(stat.size, 1024 * 1024));
-    let offset = 0;
-
-    while (offset < buffer.length) {
-      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
-
-      if (bytesRead <= 0) break;
-      offset += bytesRead;
-      signal?.throwIfAborted();
-    }
+    const buffer = await readLimitedBytes(handle, stat, 1024 * 1024, "diagnostic input", signal);
 
     if (!sameFileVersion(stat, await handle.stat())) return null;
 
-    return buffer.subarray(0, offset).toString("utf8");
+    return buffer.toString("utf8");
   } finally { await handle.close(); }
 }
 

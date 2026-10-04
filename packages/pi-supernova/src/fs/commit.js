@@ -20,6 +20,15 @@ async function canonicalNewPath(target) {
   }
 }
 
+export async function resolveFileIdentity(target) {
+  try { return { path: await fs.realpath(target) }; }
+  catch (error) {
+    if (error.code !== "ENOENT") throw error;
+
+    return { path: await canonicalNewPath(target), missing: error };
+  }
+}
+
 async function resolveExistingFile(logicalPath) {
   const target = await fs.realpath(logicalPath);
   const stat = await fs.stat(target);
@@ -171,10 +180,10 @@ async function cleanupStaged(staged, failed, createdDirs) {
 }
 
 async function assertExpectedSignature(vfs, logicalPath, target, stat) {
-  if (!vfs.expected.has(logicalPath)) return;
+  if (!vfs.expected.has(target)) return;
   const current = stat ? await fileSignature(target, vfs.signal) : null;
 
-  if (!sameSignature(current, vfs.expected.get(logicalPath))) {
+  if (!sameSignature(current, vfs.expected.get(target))) {
     throw new Error("write conflict: file changed since it was read: " + logicalPath + "; read it again before retrying");
   }
 }
@@ -206,7 +215,7 @@ async function installStaged(vfs, staged) {
   }
 
   for (const entry of staged) {
-    vfs.expected.set(entry.logicalPath, textSignature(entry.content));
+    vfs.expected.set(entry.target, textSignature(entry.content));
   }
 
   // Canonical commit destinations must not rewrite established event paths

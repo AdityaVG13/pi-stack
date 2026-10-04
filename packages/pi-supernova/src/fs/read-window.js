@@ -16,15 +16,18 @@ function advanceLines(bytes, start, remaining) {
   return { offset: start, remaining };
 }
 
-async function scanWindow(file, stat, startLine, lineCount, maxBytes, signal) {
-  const scan = { parts: [], collected: 0, startByte: undefined, endByte: undefined };
-  let skip = startLine - 1, take = lineCount ?? Infinity, position = 0;
+async function scanWindow(file, startLine, lineCount, maxBytes, signal) {
+  const scan = { parts: [], collected: 0, startByte: undefined, endByte: undefined, readBytes: 0, eof: false };
+  // Empty windows need an emptiness probe, not a seek to the requested line.
+  let skip = lineCount === 0 ? 0 : startLine - 1, take = lineCount ?? Infinity;
 
-  for await (const chunk of fileChunks(file, signal, stat.size)) {
+  // Regular virtual files can report zero, undersized or oversized stat lengths.
+  // Only the read stream establishes EOF and whether a selected window is whole.
+  for await (const chunk of fileChunks(file, signal, Infinity, lineCount === 0 ? 1 : undefined)) {
     const head = advanceLines(chunk, 0, skip);
     skip = head.remaining;
-    const start = position;
-    position += chunk.length;
+    const start = scan.readBytes;
+    scan.readBytes += chunk.length;
 
     if (skip) continue;
     scan.startByte ??= start + head.offset;
@@ -39,8 +42,10 @@ async function scanWindow(file, stat, startLine, lineCount, maxBytes, signal) {
       scan.collected += end - head.offset;
     }
 
-    if (take === 0 || scan.collected > maxBytes) break;
+    if (scan.collected > maxBytes || take === 0 && tail.offset < chunk.length) return scan;
   }
+
+  scan.eof = true;
 
   return scan;
 }
@@ -59,7 +64,7 @@ async function openReadFile(target) {
 
 export function createWindowReader(vfs) {
   return async function readWindow(target, startLine, lineCount, maxBytes, signal) {
-    const overlay = vfs.getOverlay(target);
+    const overlay = await vfs.getOverlay(target);
 
     if (overlay !== undefined) {
       const window = overlayWindow(overlay,startLine,lineCount);
@@ -77,20 +82,19 @@ export function createWindowReader(vfs) {
 
       if (!stat.isFile()) throw new Error("read requires a regular file: " + target);
 
-      const scan = lineCount === 0
-        ? { startByte: undefined }
-        : await scanWindow(file, stat, startLine, lineCount, maxBytes, signal);
+      const scan = await scanWindow(file, startLine, lineCount, maxBytes, signal);
 
       if (scan.startByte === undefined) {
-        result = { text: "", satisfied: true, whole: stat.size === 0 };
+        result = { text: "", satisfied: true, whole: scan.eof && scan.readBytes === 0 };
       } else {
         if (scan.collected > maxBytes) return { text: "", satisfied: false, whole: false };
         const bytes = Buffer.concat(scan.parts, scan.collected);
         const end = scan.startByte + scan.collected;
-        const eof = end >= stat.size;
+        const eof = scan.eof;
         const text = eof ? decodeUtf8Strict(bytes, target) : decodeUtf8Window(bytes, target);
         const whole = startLine === 1 && scan.startByte === 0 && eof;
-        wholeBytes = whole ? bytes : undefined;
+        // The digest-reuse contract requires bytes agreeing with observed size.
+        wholeBytes = whole && bytes.length === stat.size ? bytes : undefined;
         result = { text, satisfied: end >= scan.endByte || eof, whole };
       }
     } finally { await file.close(); }

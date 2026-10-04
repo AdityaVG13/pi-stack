@@ -203,7 +203,10 @@ export async function runBatchReuseWorkload(baseline) {
   assert.equal(result.details.ok,true);
   assert.equal(result.details.returnTruncated,false);
   assert.equal(result.details.logTruncated,false);
-  assert.deepEqual(result.details.result,baseline.result);
+  // Best-effort publication makes write receipts final, not speculative. Keep
+  // historical traffic frozen and project only this explicit contract change.
+  const expectedResult = baseline.result.map(row=>({...row,receipts:row.receipts.map(receipt=>receipt.replace(/ \(speculative\)$/, ""))}));
+  assert.deepEqual(result.details.result,expectedResult);
   assert.equal(result.details.attempted,baseline.programs.length);
   const full = modelText(result);
 
@@ -214,7 +217,17 @@ export async function runBatchReuseWorkload(baseline) {
   });
 
   const output = programBatchText(parts,baseline.programs.length);
-  assert.equal(output,baseline.output,"no output compression, citations, elision or changed observations");
+
+  const expectedOutput = baseline.output.replace(/\[(\d+)\] (\d+)\n([\s\S]*?)(?=\n(?:\[\d+\] \d+\n|$))/g, (_frame, index, length, text) => {
+    assert.equal(text.length, Number(length));
+    // Shorter final receipts cross the existing one-line object threshold.
+    const row = expectedResult[Number(index)];
+    const finalText = text.slice(0,text.indexOf("\n{")) + "\n{directory:" + JSON.stringify(row.directory) + ",receipts:" + JSON.stringify(row.receipts) + "}";
+
+    return "[" + index + "] " + finalText.length + "\n" + finalText;
+  });
+
+  assert.equal(output,expectedOutput,"only the final-versus-speculative receipt contract may change; no observations are elided");
   assert.deepEqual(await fs.readdir(root),["packages"],"reuse must not create hidden program/input files");
   assert.deepEqual((await fs.readdir(path.join(root,"packages"))).sort(),baseline.programs.map(p=>p.data.directory.split("/").at(-1)).sort());
 

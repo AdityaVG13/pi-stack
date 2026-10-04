@@ -89,7 +89,7 @@ it("bash materializes a staged working directory before running, including symli
   }
 });
 
-it("invalid working directories cannot flush staged files or bypass checkpoints", async t => {
+it("invalid working directories cannot execute shells or undo saved files and checkpoints", async t => {
   const f = await engineFixture(t);
   t.after(()=>f.emit("session_shutdown"));
   await f.write("existing-file.txt","original");
@@ -100,14 +100,15 @@ it("invalid working directories cannot flush staged files or bypass checkpoints"
         code:'await write("prefix-sibling/input.txt","staged"); await write("queued-file.txt","staged"); return await bash(data);',
         data:{command:process.execPath,args:["-e",'require("node:fs").writeFileSync("executed.txt","bad");'],cwd,background},
       }, undefined, undefined, {cwd:f.root}),error=>{
-        assert.equal(error.supernovaResult.details.mutations.committed,0);
+        assert.equal(error.supernovaResult.details.mutations.committed,2);
         assert.equal(error.supernovaResult.details.mutations.external,0);
         assert.match(error.message,/cwd is not a directory|escapes workspace/);
 
         return true;
       });
-      await assert.rejects(fs.stat(path.join(f.root,"prefix-sibling")),{code:"ENOENT"});
-      await assert.rejects(fs.stat(path.join(f.root,"queued-file.txt")),{code:"ENOENT"});
+      assert.equal(await fs.readFile(path.join(f.root,"prefix-sibling/input.txt"),"utf8"),"staged");
+      assert.equal(await fs.readFile(path.join(f.root,"queued-file.txt"),"utf8"),"staged");
+      await assert.rejects(fs.stat(path.join(f.root,"executed.txt")),{code:"ENOENT"});
       assert.equal(await fs.readFile(path.join(f.root,"existing-file.txt"),"utf8"),"original");
     }
 
@@ -136,4 +137,47 @@ it("C++ raw literal receipts preserve source without false string warnings or au
   await f.write("value.js","export const auto = 1;\n");
   const js = await f.execute('return await edit("value.js","auto = 1","auto = 2");');
   assert.match(js.details.result,/auto also referenced/);
+});
+
+it("multi-edit keeps original coordinates for reversed adjacent replacements and deletions", async t => {
+  const f = await engineFixture(t);
+  const original = "HEAD😀|delete me|grow me|TAIL\r\n";
+  await f.write("adjacent.txt", original);
+
+  const result = await f.execute(`
+    await edit({path:"adjacent.txt",edits:[
+      {oldText:"TAIL\\r\\n",newText:"尾\\r\\n"},
+      {oldText:"grow me|",newText:"expanded😀\\nsecond|"},
+      {oldText:"HEAD😀|",newText:""},
+      {oldText:"delete me|",newText:""}
+    ]});
+    return await read("adjacent.txt");
+  `);
+
+  const expected = "expanded😀\nsecond|尾\r\n";
+  assert.equal(result.details.result, expected);
+  assert.equal(await fs.readFile(path.join(f.root, "adjacent.txt"), "utf8"), expected);
+});
+
+it("multi-edit receipts preserve shifted coordinates and literal line endings", async t => {
+  const f = await engineFixture(t);
+  await f.write("receipt.txt", "remove me\r\nkeep 😀\nexpand me\r\nfooter");
+
+  const result = await f.execute(`
+    return await edit({path:"receipt.txt",edits:[
+      {oldText:"expand me",newText:"expanded\\nnew"},
+      {oldText:"remove me\\r\\n",newText:""}
+    ]});
+  `);
+
+  assert.equal(await fs.readFile(path.join(f.root, "receipt.txt"), "utf8"), "keep 😀\nexpanded\nnew\r\nfooter");
+  const diff = result.details.trace.find(row => row.name === "edit").diff;
+  assert.deepEqual(diff.lines.map(({ type, lineNum, newLineNum, text }) => [type, lineNum, newLineNum, text]), [
+    ["remove", 1, 1, "remove me"],
+    ["remove", 3, 2, "expand me"],
+    ["add", 2, undefined, "expanded"],
+    ["add", 3, undefined, "new"],
+  ]);
+  assert.equal(diff.added, 2);
+  assert.equal(diff.removed, 2);
 });

@@ -26,7 +26,11 @@ export function mapChangedChildren(value, visit, context) {
   if (!array && !isObject(value)) return value;
   let out = value;
 
-  for (const key of childKeys(value)) {
+  // Array indexes can be inherited; holes and non-index properties stay unvisited.
+  const keys = array ? value.keys() : Object.keys(value);
+
+  for (const key of keys) {
+    if (array && !(key in value)) continue;
     const before = value[key];
     const after = visit(before, context, key);
 
@@ -96,7 +100,7 @@ function plainFromCollection(value, seen, depth) {
   if (value instanceof Map) return plainFromMap(value, seen, depth);
   const out = Object.create(null);
 
-  for (const k of childKeys(value)) out[k] = toPlain(value[k], seen, depth + 1);
+  for (const k of Object.keys(value)) out[k] = toPlain(value[k], seen, depth + 1);
 
   return out;
 }
@@ -179,13 +183,4 @@ export function toPlain(value, seen = new Set(), depth = 0) {
 
 export function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
-}
-
-// Arrays visit present indexes (including inherited ones), not extra properties.
-function* childKeys(value) {
-  if (!Array.isArray(value)) { yield* Object.keys(value);
-
- return; }
-
-  for (const key of value.keys()) if (key in value) yield key;
 }

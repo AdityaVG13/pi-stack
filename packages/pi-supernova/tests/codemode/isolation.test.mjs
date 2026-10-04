@@ -20,7 +20,7 @@ it("overlapping programs never silently lose a successful same-file edit", async
   }`;
 
   const pending = Promise.allSettled(["left","right"].map((side,i)=>f.tool.execute("isolated-"+side,{
-    code:`await edit("shared.txt", "${side}=old", "${side}=new"); ${wait}`,timeoutMs:10000,
+    code:`await edit(async()=>{await edit("shared.txt", "${side}=old", "${side}=new"); ${wait}});`,timeoutMs:10000,
   },undefined,gates[i].onUpdate,{cwd:f.root})));
 
   await Promise.all(gates.map(gate=>gate.promise));

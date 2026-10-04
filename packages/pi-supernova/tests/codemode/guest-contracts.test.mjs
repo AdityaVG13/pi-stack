@@ -131,11 +131,11 @@ it("a missing JSON field isolates siblings, lists exact keys, and does not inven
   assert.doesNotMatch(all, /"acf"/);
 });
 
-it("a JSON miss after edits rolls the edits back; a settled miss does not", async t => {
+it("a JSON miss in an explicit checkpoint rolls edits back; a settled miss does not", async t => {
   const f = await engineFixture(t);
   await f.write("doc.md", "keep\n");
   await f.write("meta.json", JSON.stringify({ title: "ok" }));
-  const thrown = await rejection(f.execute('await edit("doc.md","keep","gone"); return await read({path:"meta.json",json:".schema"});'));
+  const thrown = await rejection(f.execute('return await edit(async()=>{await edit("doc.md","keep","gone"); return await read({path:"meta.json",json:".schema"});});'));
   assert.ok(thrown.includes('JSON selection failed for meta.json (.schema): JSON field not found: "schema"; available keys: "title"'));
   assert.equal(await fs.readFile(path.join(f.root, "doc.md"), "utf8"), "keep\n");
 
@@ -169,7 +169,7 @@ it("oversized multi-file returns keep every sentinel in its own framed slot", as
   }
 });
 
-it("sixteen returned images stay attached; overflow fails and rolls back pending writes", async t => {
+it("sixteen returned images stay attached; overflow fails without undoing saved writes", async t => {
   const f = await engineFixture(t);
   const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=", "base64");
   await f.write("pixel.png", pixel);
@@ -189,14 +189,14 @@ it("sixteen returned images stay attached; overflow fails and rolls back pending
   `), error => {
     const overflow = error.supernovaResult;
     assert.equal(overflow.details.ok, false);
-    assert.equal(overflow.details.mutations.committed, 0);
-    assert.equal(overflow.details.mutations.rolledBack, 1);
+    assert.equal(overflow.details.mutations.committed, 1);
+    assert.equal(overflow.details.mutations.rolledBack, 0);
     assert.equal(overflow.content.filter(block => block.type === "image").length, 0);
     assert.match(error.message, /17 images.*20 MiB/);
 
     return true;
   });
-  assert.equal(await fs.readFile(path.join(f.root, "ledger.md"), "utf8"), "kept-16");
+  assert.equal(await fs.readFile(path.join(f.root, "ledger.md"), "utf8"), "kept-17");
 });
 
 it("JavaScript syntax errors run no commands and name the data parameter", async t => {
@@ -405,7 +405,7 @@ it("modern host delegation preserves owned filesystem rollback and host override
   const builtin={name:"write",description:"builtin write",parameters:{type:"object",properties:{}},sourceInfo:{source:"builtin"},async execute(){assert.fail("raw builtin must not bypass owned staging");}};
   f.pi.getAllTools=()=>[...originalGetAll(),builtin];
   const ctx={cwd:f.root,tools:[builtin],async executeTool(){assert.fail("owned filesystem writes must not delegate");}};
-  await assert.rejects(f.tool.execute("modern-rollback",{code:'await write("rolled-back.txt","staged"); throw Error("reject-owned");'},undefined,undefined,ctx),/reject-owned/);
+  await assert.rejects(f.tool.execute("modern-rollback",{code:'await edit(async()=>{await write("rolled-back.txt","staged"); throw Error("reject-owned");});'},undefined,undefined,ctx),/reject-owned/);
   await assert.rejects(fs.stat(path.join(f.root,"rolled-back.txt")),{code:"ENOENT"});
 
   const override={...builtin,sourceInfo:{source:"local"}};

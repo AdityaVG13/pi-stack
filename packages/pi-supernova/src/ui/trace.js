@@ -46,7 +46,7 @@ function displayOperation(tool, target, diff, ok, item) {
 	if (!rawName) return null;
 	const normalized = rawName === "apply_patch" ? "patch" : rawName;
 
-	return { tool: normalized, target, diff, ok, ms: item?.ms, exitCode: item?.exitCode, time: item?.time, error: item?.error };
+	return { tool: normalized, target, diff, ok, ms: item?.ms, exitCode: item?.exitCode, time: item?.time, error: item?.error, mutationState: item?.mutationState };
 }
 
 function batchTarget(paths) {
@@ -207,7 +207,7 @@ function formatTarget(op, budget) {
 function opMarker(theme, op, isPartial, isError) {
   const status = [
     [op.ok === false, "error", "×"],
-    [op.mutationAttempt, "warning", "·"],
+    [op.mutationAttempt || op.mutationState === "rolled back" || op.mutationState === "uncertain", "warning", "·"],
     [op.ok === true, "success", "✓"],
     [isPartial, "dim", "·"],
     [isError, "error", "×"],
@@ -265,8 +265,8 @@ function formatOpRow(theme, op, width, isPartial, isError) {
 	const duration = theme.fg("dim", durationText.padStart(DURATION_COL));
 	const exit = appendExit(theme, op);
 	const counts = appendDiffCounts(theme, op);
-	const outcome = op.mutationAttempt ? "attempted " : "";
-	const prefix = `${marker} ${tool} ${duration}  ` + exit.text + counts.text + theme.fg("warning", outcome);
+	const outcome = op.mutationState ? op.mutationState + " " : op.mutationAttempt ? "attempted " : "";
+	const prefix = `${marker} ${tool} ${duration}  ` + exit.text + counts.text + theme.fg(op.mutationState === "saved" ? "success" : "warning", outcome);
 	const used = 2 + toolText.length + 1 + DURATION_COL + 2 + exit.width + counts.width + outcome.length;
 
 	return opRowSuffix(theme, op, prefix, Math.max(1, width - used));

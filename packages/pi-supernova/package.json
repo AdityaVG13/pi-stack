@@ -25,7 +25,8 @@
   "files": [
     "index.js",
     "src/",
-    "docs/",
+    "docs/CHANGELOG.md",
+    "docs/TOKEN_COSTS.md",
     "README.md",
     "LICENSE"
   ],

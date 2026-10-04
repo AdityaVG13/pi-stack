@@ -30,7 +30,7 @@ it("commit rejects a previously checked symlink retargeted outside the workspace
   await assert.rejects(f.execute('await write("link/item.txt","inside"); await bash({command:process.execPath,args:["-e",'+JSON.stringify(swap)+']}); await write("link/item.txt","escaped");'),/escapes workspace/);
   assert.equal(await fs.readFile(path.join(outside,"item.txt"),"utf8"),"outside");
   await fs.symlink("inside",path.join(f.root,"commit-link"));
-  const { pending, gate } = gatedExecute(f, `await write("commit-link/item.txt","staged"); ${GUEST_GATE_POLL}`, record => record.name === "write" && record.ok === true);
+  const { pending, gate } = gatedExecute(f, `await edit(async()=>{await write("commit-link/item.txt","staged"); ${GUEST_GATE_POLL}});`, record => record.name === "write" && record.ok === true);
   await gate;
   await fs.rename(path.join(f.root,"commit-link"), path.join(f.root,"old-commit-link"));
   await fs.symlink(outside, path.join(f.root,"commit-link"));
@@ -116,7 +116,7 @@ it("malformed UTF-8 windows fail without dropping corrupt bytes or committing pr
 
   for (const [i,bytes] of inputs.entries()) {
     await fs.writeFile(path.join(f.root,"bad.txt"), bytes);
-    await assert.rejects(f.execute('await write("pending-'+i+'.txt","discard"); return await read("bad.txt",1,1);'), /not valid UTF-8.*bad\.txt/);
+    await assert.rejects(f.execute('return await edit(async()=>{await write("pending-'+i+'.txt","discard"); return await read("bad.txt",1,1);});'), /not valid UTF-8.*bad\.txt/);
     await assert.rejects(fs.stat(path.join(f.root,"pending-"+i+".txt")), {code:"ENOENT"});
     assert.deepEqual(await fs.readFile(path.join(f.root,"bad.txt")), bytes);
   }
@@ -145,7 +145,7 @@ it("owned writes and edits reject unpaired surrogates instead of silently replac
 
   for (const content of malformed) {
     assert.equal(content.isWellFormed(), false);
-    await assert.rejects(f.execute('await write("pending.txt", "discard"); await write({path:"unicode.txt",content:' + JSON.stringify(content) + ',replace:true});'), /well-formed|surrogate/i);
+    await assert.rejects(f.execute('await edit(async()=>{await write("pending.txt", "discard"); await write({path:"unicode.txt",content:' + JSON.stringify(content) + ',replace:true});});'), /well-formed|surrogate/i);
     assert.deepEqual(await fs.readFile(path.join(f.root, "unicode.txt")), Buffer.from(original));
     await assert.rejects(fs.stat(path.join(f.root, "pending.txt")), { code: "ENOENT" });
   }

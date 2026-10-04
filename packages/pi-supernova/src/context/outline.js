@@ -27,9 +27,15 @@ function relevance(span, lower, stems) {
   return score;
 }
 
-function chooseExpanded(spans, lower, stems, raw, opts) {
-  if (stems.length === 0) return new Set();
-  const scored = spans.map((s, i) => ({ i, r: relevance(s, lower, stems), chars: raw.slice(s.start - 1, s.end).join("\n").length }));
+function chooseExpanded(spans, lower, stems, raw, opts, about) {
+  const indexed = spans.map((s, i) => ({ s, i }));
+  const name = String(about ?? "").trim().toLowerCase();
+  const exact = indexed.filter(({ s }) => s.name.toLowerCase() === name);
+
+  if (stems.length === 0 && exact.length === 0) return new Set();
+  // Ancestors accumulate descendant hits, but must not outvote an exact symbol.
+  const candidates = exact.length ? exact : indexed;
+  const scored = candidates.map(({ s, i }) => ({ i, r: relevance(s, lower, stems), chars: raw.slice(s.start - 1, s.end).join("\n").length }));
   scored.sort((a, b) => b.r - a.r || a.i - b.i);
   const expanded = new Set();
   let budget = opts.maxChars;
@@ -127,13 +133,30 @@ export function outlineFile(entry, relPath, about, options = {}) {
   const stems = [...new Set(tokenizeQuery(about || "").tokens.map(stem))];
 
   if (spans.length === 0) return about ? focusedText(raw, lower, stems, relPath, opts) : null;
-  const expanded = chooseExpanded(spans, lower, stems, raw, opts);
-  const parts = outlineHeader(spans, raw, opts);
+  const expanded = chooseExpanded(spans, lower, stems, raw, opts, about);
+  const header = outlineHeader(spans, raw, opts);
+  const parts = [...header];
+  const focused = [];
   const names = [...expanded].map(i => spans[i].name);
 
-  for (let i = 0; i < spans.length; i++) parts.push(expanded.has(i) ? expandedBlock(spans[i], raw, opts, names) : foldedLine(spans[i]));
+  for (let i = 0; i < spans.length; i++) {
+    const body = expanded.has(i) ? expandedBlock(spans[i], raw, opts, names) : null;
+    parts.push(body ?? foldedLine(spans[i]));
+
+    if (body !== null) focused.push(body);
+  }
+
   const label = about ? String(about).replace(/\s+/g, " ").slice(0, 120) : "";
   const title = "// " + relPath + " · " + lineCount + " lines · " + spans.length + " declarations · " + expanded.size + " expanded" + (label ? " for \"" + label + "\"" : "") + " · read(path, line, count) for a folded body";
 
-  return { text: clipOutline(title + "\n" + parts.join("\n"), title, opts.maxChars), expanded: expanded.size, declarations: spans.length };
+  let text = title + "\n" + parts.join("\n");
+
+  if (text.length > opts.maxChars && focused.length) {
+    // Navigation may be clipped; requested code must not lose to preceding folds.
+    const navigation = [...header, ...spans.map(foldedLine)];
+    text = title + "\n// focused bodies first; declaration map follows\n" + focused.join("\n")
+      + "\n// declaration map (bodies folded)\n" + navigation.join("\n");
+  }
+
+  return { text: clipOutline(text, title, opts.maxChars), expanded: expanded.size, declarations: spans.length };
 }

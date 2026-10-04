@@ -358,9 +358,7 @@ class GuestRun {
       return false;
     }
 
-    let available = isFunction(this.nova.names) ? await this.nova.names() : [];
-
-    if (!Array.isArray(available)) available = [];
+    if (isFunction(this.nova.names)) await this.nova.names();
 
     if (this.finished || this.signal?.aborted) {
       this.abort();
@@ -378,15 +376,12 @@ class GuestRun {
       return false;
     }
 
-    this.available = available;
-
     return true;
   }
 
   postRun() {
-    this.handle.worker.postMessage({ op: "run", runId: this.runId, prepared: this.prepared, data: this.data, available: this.available,
+    this.handle.worker.postMessage({ op: "run", runId: this.runId, prepared: this.prepared, data: this.data,
       batchRead: this.nova.batchRead !== false,
-      nativeArgv: this.nova.nativeArgv === true,
       formatResult:true,
       limits: { maxReturnChars:this.config.maxReturnChars ?? 32000, maxLogLines: this.config.maxLogLines ?? 100, maxLogLineChars: this.config.maxLogLineChars ?? 4096 } });
   }

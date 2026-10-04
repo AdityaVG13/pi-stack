@@ -82,7 +82,11 @@ function classifyReplacements(args) {
 
   if (!Array.isArray(edits) || !edits.length) throw new Error(EDIT_USAGE);
 
-  for (const edit of edits) if (!validReplacement(edit)) throw new Error(replacementError(edit));
+  for (const [i, edit] of edits.entries()) {
+    if (!validReplacement(edit)) throw new Error(replacementError(edit));
+
+    if (args.edits !== undefined) assertEditOptions(edit, REPLACEMENT_OPTION_KEYS, "edit " + (i + 1) + " of " + edits.length);
+  }
 
   return { kind: "edits", command: "edit", args };
 }
@@ -97,11 +101,13 @@ function replacementError(edit) {
 
 const EDIT_OPTION_KEYS = ["path", "oldText", "newText", "edits", "patch"];
 
-/** A view object carries host fields; only named replacements are validated. */
-function assertEditOptions(args) {
-  const unknown = Object.keys(args).filter(key => !EDIT_OPTION_KEYS.includes(key));
+const REPLACEMENT_OPTION_KEYS = ["oldText", "newText"];
 
-  if (unknown.length) throw new Error("edit does not accept option " + unknown.map(key => JSON.stringify(key)).join(", ") + "; supported options are path, oldText, newText, edits, patch");
+/** A view object carries host fields; only named replacements are validated. */
+function assertEditOptions(args, allowed = EDIT_OPTION_KEYS, label = "edit") {
+  const unknown = Object.keys(args).filter(key => !allowed.includes(key));
+
+  if (unknown.length) throw new Error(label + " does not accept option " + unknown.map(key => JSON.stringify(key)).join(", ") + "; supported options are " + allowed.join(", "));
 }
 
 function classifyNamedEdit(p, oldText, newText) {
@@ -114,7 +120,11 @@ function classifyNamedEdit(p, oldText, newText) {
 
 /** Guest signature → { command, args } for one host call. */
 export function classifyEdit(p, oldText, newText) {
-  if (isFunction(p)) return { kind: "checkpoint", fn: p };
+  if (isFunction(p)) {
+    if (oldText !== undefined || newText !== undefined) throw new Error(EDIT_USAGE);
+
+    return { kind: "checkpoint", fn: p };
+  }
 
   if (isEditView(p) && isString(oldText) && (newText === undefined || isString(newText))) return classifyViewEdit(p, oldText, newText);
 

@@ -30,7 +30,9 @@ export function createRead(ctx) {
     params = { ...params, resolve: params.resolve !== false };
     const cwd = getCwd();
 
-    if (params.indexed && vfs.getOverlayPaths().length === 0) {
+    const pendingPaths = await vfs.getOverlayPaths(searchDir);
+
+    if (params.indexed && pendingPaths.length === 0) {
       const hint = await indexedSource(hooks, query, cwd, searchDir, signal);
 
       if (hint.status !== "found") return readResult(hint, {isSnap:true});
@@ -44,14 +46,14 @@ export function createRead(ctx) {
 
     const result = await executeSnap({ query, searchDir, root: cwd, includeHidden,
       pathContext: { frecency: index.frecency, currentFile: index.lastTouched },
-      overlayText: p => vfs.getOverlay(p), pendingPaths: vfs.getOverlayPaths(), signal });
+      overlayText: p => vfs.getOverlay(p), pendingPaths, signal });
 
     return openSource(result, params, signal, undefined, query);
   }
 
   async function sourceIsBounded(target, query, params) {
     if (!isString(query) || params.complete === true) return false;
-    const overlay = vfs.getOverlay(target);
+    const overlay = await vfs.getOverlay(target);
 
     if (overlay !== undefined) return Buffer.byteLength(overlay, "utf8") > 512 * 1024;
 
@@ -166,7 +168,7 @@ export function createRead(ctx) {
     const existing = needsProbe(params) ? await probeExistingPath(cwd, params.path, vfs) : null;
     const cls = classifyRead(params, existing);
     const scope = await scopeForRead(params, cwd, cls, signal);
-    const staged = vfs.getOverlay(scope) !== undefined;
+    const staged = await vfs.getOverlay(scope) !== undefined;
     const revision = await vfs.readRevision(scope);
 
     try {
@@ -177,7 +179,7 @@ export function createRead(ctx) {
 
       // Only the native text reader supplies these fields. JSON documents,
       // directories, outlines and empty windows are not text-open receipts.
-      if (source?.sourceChars > 0 && isString(source.path) && path.isAbsolute(source.path) && vfs.getOverlay(source.path) === undefined) value[READ_FILES] = [source.path];
+      if (source?.sourceChars > 0 && isString(source.path) && path.isAbsolute(source.path) && await vfs.getOverlay(source.path) === undefined) value[READ_FILES] = [source.path];
 
       return value;
     } finally { vfs.releaseRead(revision); }
@@ -264,7 +266,7 @@ export function createRead(ctx) {
         root: cwd,
         includeHidden,
         overlayText: (p) => vfs.getOverlay(p),
-        pendingPaths: vfs.getOverlayPaths(),
+        pendingPaths: await vfs.getOverlayPaths(cwd),
         signal,
       });
 
@@ -290,7 +292,7 @@ export function createRead(ctx) {
 
       if (signal?.aborted) throw new Error("aborted");
       const searchDir = params?.path ? await resolveWorkspacePath(cwd, params.path, "evidence", true) : cwd;
-      const res = await selectEvidence({ query: params.query, root: cwd, searchDir, index, overlayText: (p) => vfs.getOverlay(p), pendingPaths: vfs.getOverlayPaths(), options: evidenceOptions(params) });
+      const res = await selectEvidence({ query: params.query, root: cwd, searchDir, index, overlayText: (p) => vfs.getOverlay(p), pendingPaths: await vfs.getOverlayPaths(searchDir), options: evidenceOptions(params) });
 
       for (const span of res.spans) ledger.recordOrigin(span.path, span.lines[0], span.text.split("\n"));
 

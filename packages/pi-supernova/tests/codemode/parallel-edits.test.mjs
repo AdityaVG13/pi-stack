@@ -72,9 +72,9 @@ test("parallel edits preserve alias-conflict protection", {skip:process.platform
   const f = await engineFixture(t);
   await f.write("real.txt", "before");
   await fs.symlink(path.join(f.root,"real.txt"), path.join(f.root,"alias.txt"));
-  await assert.rejects(f.execute(`await Promise.all([
+  await assert.rejects(f.execute(`await edit(async()=>{await Promise.all([
     edit("real.txt","before","real"), edit("alias.txt","before","alias")
-  ]);`), /conflicting write aliases/);
+  ]);});`), /conflicting write aliases/);
   assert.equal(await fs.readFile(path.join(f.root, "real.txt"), "utf8"), "before");
 });
 

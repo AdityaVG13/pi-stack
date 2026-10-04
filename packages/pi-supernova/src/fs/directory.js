@@ -40,15 +40,15 @@ async function formatDirBatch(dirPath, batch, rows, signal) {
 }
 
 export function createDirectoryReader(vfs) {
-  function overlayDirRows(dirPath, rows) {
-    for (const file of vfs.getOverlayPaths()) {
+  async function overlayDirRows(dirPath, rows) {
+    for (const file of await vfs.getOverlayPaths(dirPath)) {
       const relative = path.relative(dirPath,file);
 
       if (!relative || relative === ".." || relative.startsWith(".."+path.sep) || path.isAbsolute(relative)) continue;
       const [name,child] = relative.split(path.sep);
       admitEntry(rows,name,dirPath);
       rows.set(name,child === undefined
-        ? formatDirectoryEntry(name,"file",Buffer.byteLength(vfs.getOverlay(file),"utf8"))
+        ? formatDirectoryEntry(name,"file",Buffer.byteLength(await vfs.getOverlay(file),"utf8"))
         : formatDirectoryEntry(name,"dir"));
     }
   }
@@ -80,7 +80,7 @@ export function createDirectoryReader(vfs) {
   return async function readDirectory(dirPath, signal) {
     signal?.throwIfAborted();
     const rows = new Map();
-    overlayDirRows(dirPath,rows);
+    await overlayDirRows(dirPath,rows);
     await diskDirRows(dirPath,rows,signal);
     const values = [...rows.values()];
 

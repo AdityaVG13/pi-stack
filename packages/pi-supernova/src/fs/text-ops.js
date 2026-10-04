@@ -48,8 +48,9 @@ export function resolveReadPath(cwd, target) {
 export async function probeExistingPath(cwd, targetParam, vfs) {
   const targetPath = resolveReadPath(cwd, targetParam);
 
-  if (vfs.getOverlay(targetPath) !== undefined) {
-    const overlay = vfs.getOverlay(targetPath);
+  const overlay = await vfs.getOverlay(targetPath);
+
+  if (overlay !== undefined) {
 
     return { path: targetPath, directory: false, size: Buffer.byteLength(overlay, "utf8"), overlay };
   }
@@ -61,7 +62,7 @@ export async function probeExistingPath(cwd, targetParam, vfs) {
   } catch (err) {
     if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") throw err;
 
-    if (vfs.getOverlayPaths().some(file => file.startsWith(targetPath + path.sep))) return { path: targetPath, directory: true };
+    if ((await vfs.getOverlayPaths(targetPath)).some(file => file.startsWith(targetPath + path.sep))) return { path: targetPath, directory: true };
 
     return null;
   }
@@ -137,14 +138,19 @@ export function applyReplacements(target, content, requestedEdits) {
 
   matches.sort((a, b) => a.index - b.index);
   assertNoOverlap(target, content, matches);
-  let updated = content;
+  const parts = [];
+  let from = 0;
 
-  for (let i = matches.length - 1; i >= 0; i--) {
-    const match = matches[i];
-    updated = updated.slice(0, match.index) + match.newText + updated.slice(match.end);
+  // All coordinates refer to the original. Assemble once instead of copying
+  // the growing document for every replacement; inserted text is never rematched.
+  for (const match of matches) {
+    parts.push(content.slice(from, match.index), match.newText);
+    from = match.end;
   }
 
-  return { updated, matches };
+  parts.push(content.slice(from));
+
+  return { updated: parts.join(""), matches };
 }
 
 export function shiftDiffLines(diff, delta) {
@@ -243,14 +249,14 @@ async function existingStat(target) {
 /** Prior body (or line count) for a write receipt / CAS, without always materializing huge files. */
 export async function writeSnapshot(vfs, target, signal) {
   const stat = await existingStat(target);
-  const overlay = vfs.getOverlay(target);
+  const overlay = await vfs.getOverlay(target);
   const existingBytes = overlay !== undefined ? Buffer.byteLength(overlay, "utf8") : stat?.size;
 
   if (existingBytes !== undefined && existingBytes > WRITE_DIFF_MAX_READ_BYTES) {
-    return { previous: "", removedLines: await snapshotLargeFile(vfs, target, overlay, signal), overlay, existingBytes };
+    return { previous: "", removedLines: await snapshotLargeFile(vfs, target, overlay, signal) };
   }
 
-  return { previous: await snapshotSmallFile(vfs, target, overlay), removedLines: undefined, overlay, existingBytes };
+  return { previous: await snapshotSmallFile(vfs, target, overlay), removedLines: undefined };
 }
 
 export async function countContentLines(target, signal) {

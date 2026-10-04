@@ -1,5 +1,6 @@
 
 import { isString } from "../shared/decode.js";
+import { lineNumberAt } from "./lines.js";
 
 /** Receipts render at most this many matches; totals still cover every match. */
 export const MAX_DIFF_MATCHES = 32;
@@ -39,21 +40,22 @@ export function buildEditDiff(filePath, originalText, oldText, newText) {
 export function buildMultiEditDiff(filePath, originalText, replacements) {
   const rendered = replacements.slice(0, MAX_DIFF_MATCHES);
 
-  const parts = rendered.map(({ oldText, newText }) =>
-    buildEditDiff(filePath, originalText, oldText, newText),
-  );
-
   const lines = [];
   let shift = 0;
 
-  for (const [index, part] of parts.entries()) {
-    for (const line of part.lines) {
-      if (line.type === "context") continue;
-      lines.push(line.type === "add" ? { ...line, lineNum: line.lineNum + shift }
-        : { ...line, newLineNum: Math.max(1, line.lineNum + shift) });
+  // Multi-edit receipts omit context. Do not split the entire original for
+  // each replacement just to build context rows that would be discarded.
+  for (const { oldText, newText } of rendered) {
+    const idx = isString(originalText) ? originalText.indexOf(oldText) : -1;
+    const startLine = idx >= 0 ? lineNumberAt(originalText, idx) : 1;
+    const oldLines = contentLines(oldText);
+
+    for (const [i, text] of oldLines.entries()) {
+      lines.push({ type: "remove", lineNum: startLine + i, text, newLineNum: Math.max(1, startLine + i + shift) });
     }
 
-    shift += rendered[index].newText.split("\n").length - rendered[index].oldText.split("\n").length;
+    appendDiffLines(lines, "add", contentLines(newText), startLine + shift);
+    shift += newText.split("\n").length - oldText.split("\n").length;
   }
 
   return {

@@ -1,5 +1,6 @@
 import { it } from "node:test";
 import assert from "node:assert/strict";
+import { StringDecoder } from "node:string_decoder";
 import { engineFixture } from "../helpers/engine.mjs";
 import { runCommand } from "../../src/fs/workspace.js";
 import fs from "node:fs/promises";
@@ -77,7 +78,7 @@ it("object-form bash keeps its own cwd over a second options argument", async t 
   assert.equal(result.details.result.trim(), await fs.realpath(path.join(f.root, "sub")));
 });
 
-it("invalid shell inputs do not flush staged files or count as external attempts", async t => {
+it("invalid shell inputs preserve saved files and do not count as external attempts", async t => {
   const f = await engineFixture(t);
 
   const invalid = [
@@ -90,13 +91,13 @@ it("invalid shell inputs do not flush staged files or count as external attempts
     const file = `uncommitted-${i}.txt`;
     await assert.rejects(f.execute(`await write(${JSON.stringify(file)},"pending"); await bash(${args});`), error => {
       assert.match(error.message, /positive finite number|null bytes/);
-      assert.equal(error.supernovaResult.details.mutations.committed, 0);
+      assert.equal(error.supernovaResult.details.mutations.committed, 1);
       assert.equal(error.supernovaResult.details.mutations.external, 0);
-      assert.equal(error.supernovaResult.details.mutations.rolledBack, 1);
+      assert.equal(error.supernovaResult.details.mutations.rolledBack, 0);
 
       return true;
     });
-    await assert.rejects(fs.stat(path.join(f.root, file)), {code:"ENOENT"});
+    assert.equal(await fs.readFile(path.join(f.root, file),"utf8"), "pending");
   }
 });
 
@@ -138,4 +139,49 @@ it("long shell failures keep diagnostics instead of echoing the entire script", 
 
     return true;
   });
+});
+
+
+it("command capture drains overflow without decoding discarded output", async t => {
+  const limit = 64, original = StringDecoder.prototype.write;
+
+  for (const name of ["stdout","stderr"]) {
+    let decodedBytes = 0, largestChunk = 0, result;
+
+    const decoder = t.mock.method(StringDecoder.prototype,"write",function(chunk) {
+      decodedBytes += chunk.length;
+      largestChunk = Math.max(largestChunk,chunk.length);
+
+      return original.call(this,chunk);
+    });
+
+    try {
+      const script = 'process.'+name+'.write(Buffer.alloc(8*1024*1024,120));';
+      result = await runCommand([process.execPath,"-e",script],{maxOutputChars:limit,timeoutMs:10000});
+    } finally { decoder.mock.restore(); }
+
+    assert.equal(result[name],"x".repeat(limit));
+    assert.equal(result[name==="stdout" ? "stderr" : "stdout"],"");
+    assert.equal(result.exitCode,0,"overflow must still drain the pipes and let the command finish");
+    assert.equal(result.outputTruncated,true);
+    assert.ok(decodedBytes>0,"the retained text must exercise decoding");
+    assert.ok(decodedBytes<=4*limit+2*largestChunk,"discarded output must not all be decoded after the capture budget fills");
+  }
+});
+
+it("command capture retains UTF-8 across chunks and EOF with one shared stream budget", async () => {
+  const stdout = "start:"+"λ😀".repeat(100000)+"�";
+  const stderr = "error:"+"λ😀".repeat(123)+"�";
+  const script = 'process.stdout.end(Buffer.concat([Buffer.from("start:"+"λ😀".repeat(100000)),Buffer.from([0xe2,0x82])]));process.stderr.end(Buffer.concat([Buffer.from("error:"+"λ😀".repeat(123)),Buffer.from([0xf0,0x9f])]));process.exitCode=7;';
+
+  for (const limit of [stdout.length+stderr.length,1,0]) {
+    const result = await runCommand([process.execPath,"-e",script],{maxOutputChars:limit,timeoutMs:10000});
+    assert.equal(result.exitCode,7);
+    assert.equal(result.stdout.length+result.stderr.length,limit);
+    assert.equal(result.outputTruncated,limit<stdout.length+stderr.length);
+    assert.ok(stdout.startsWith(result.stdout));
+    assert.ok(stderr.startsWith(result.stderr));
+
+    if (limit>1) { assert.equal(result.stdout,stdout); assert.equal(result.stderr,stderr); }
+  }
 });

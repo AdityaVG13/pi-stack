@@ -49,6 +49,8 @@ it("batches share the host-call budget rather than multiplying it per guest", as
   assert.equal(result.details.ok,false); assert.equal(result.details.attempted,2);
   assert.match(modelText(result),/256 calls per program batch/);
   assert.equal(result.details.trace.length,256);
+  assert.deepEqual(result.details.failedPrograms,[1]);
+  assert.deepEqual(result.details.notRunPrograms,[2]);
   await assert.rejects(fs.stat(path.join(f.root,"never.txt")),{code:"ENOENT"});
 });
 
@@ -133,7 +135,7 @@ it("batch cancellation after confirmed staging rolls back only the active progra
 
   const result = await f.tool.execute("cancel-batch",{programs:[
     {code:'await write("kept.txt","kept"); return 1;'},
-    {code:'await write("rolled.txt","discard"); while(true){}'},
+    {code:'await edit(async()=>{await write("rolled.txt","discard"); while(true){};});'},
     {code:'await write("never.txt","bad");'},
   ]},controller.signal,update=>{
     const trace = update.details.trace;
@@ -244,8 +246,9 @@ it("failed cutovers compose file reuse, JSON, checkpoints, argv, images and repa
     'await edit(data.path,data.oldText,data.newText);',
     'const args={command:process.execPath,args:["-e",data.verifier,data.path,data.literal]}; const before=JSON.stringify(args);',
     'const proof=await bash(args); const repeated=await bash(args); if(proof!==data.literal || repeated!==proof || JSON.stringify(args)!==before)throw Error("argv changed");',
-    'console.log(proof); await write("late.txt","after verification");',
+    'console.log(proof); return await edit(async()=>{await write("late.txt","after verification");',
     failure,
+    '});',
   ].join("\n");
 
   const roots = [f.root,path.join(f.root,"second")];
@@ -265,8 +268,8 @@ it("failed cutovers compose file reuse, JSON, checkpoints, argv, images and repa
       {code:'await write("never.txt","bad");'},
     ]);
 
-    assert.equal(stopped.details.ok,false); assert.equal(stopped.details.attempted,2);
-    assert.equal(stopped.details.mutations.committed,2); assert.equal(stopped.details.mutations.rolledBack,3);
+    assert.equal(stopped.details.ok,false); assert.equal(stopped.details.attempted,3);
+    assert.equal(stopped.details.mutations.committed,4); assert.equal(stopped.details.mutations.rolledBack,3);
     assert.equal(stopped.details.mutations.external,2);
     assert.match(modelText(stopped),/cannot be rolled back/);
     assert.equal(stopped.content.find(block=>block.type==="image")?.data,png);
@@ -274,7 +277,9 @@ it("failed cutovers compose file reuse, JSON, checkpoints, argv, images and repa
     assert.match(modelText(stopped),/post-verification failure/);
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(cwd,data.path),"utf8")),{version:2,payload:data.payload});
 
-    for(const name of ["rejected.txt","late.txt","never.txt","injected"]) await assert.rejects(fs.stat(path.join(cwd,name)),{code:"ENOENT"});
+    assert.equal(await fs.readFile(path.join(cwd,"never.txt"),"utf8"),"bad");
+
+    for(const name of ["rejected.txt","late.txt","injected"]) await assert.rejects(fs.stat(path.join(cwd,name)),{code:"ENOENT"});
 
     // Repair the saved source through Nova, then execute it again. Stale source
     // or leaked worker state would repeat the failure instead of returning proof.
@@ -284,7 +289,7 @@ it("failed cutovers compose file reuse, JSON, checkpoints, argv, images and repa
     ]);
 
     assert.equal(repaired.details.ok,true);
-    assert.deepEqual(repaired.details.result[1],{version:2,alias:"undefined"});
+    assert.deepEqual(repaired.details.result[1],{ok:true,committed:true,value:{version:2,alias:"undefined"}});
     assert.equal(await fs.readFile(path.join(cwd,"late.txt"),"utf8"),"after verification");
   }));
 });
@@ -383,13 +388,13 @@ it("shared defaults reject malformed flags and oversized inputs before any progr
   const code = 'await write(data.path,data.text); if(data.fail)throw Error("preserved failure"); return data.text;';
   const stopped = await run(f,[{data:{path:"kept-default.txt"}},{data:{path:"rolled-default.txt",fail:true}},{data:{path:"unrun-default.txt"}}],{code,data:{text:"exact\r\n"},mergeData:true});
   assert.equal(stopped.details.ok,false);
-  assert.equal(stopped.details.attempted,2);
-  assert.deepEqual(stopped.details.mutations.committed,1);
-  assert.deepEqual(stopped.details.mutations.rolledBack,1);
+  assert.equal(stopped.details.attempted,3);
+  assert.deepEqual(stopped.details.mutations.committed,3);
+  assert.deepEqual(stopped.details.mutations.rolledBack,0);
   assert.match(modelText(stopped),/preserved failure/);
   assert.equal(await fs.readFile(path.join(f.root,"kept-default.txt"),"utf8"),"exact\r\n");
 
-  for(const name of ["rolled-default.txt","unrun-default.txt"])await assert.rejects(fs.stat(path.join(f.root,name)),{code:"ENOENT"});
+  for(const name of ["rolled-default.txt","unrun-default.txt"]) assert.equal(await fs.readFile(path.join(f.root,name),"utf8"),"exact\r\n");
 });
 
 
@@ -405,7 +410,7 @@ it("shared source counts once without raising admission or worker code limits", 
   await assert.rejects(run(f,[{}],{code:"/*"+"x".repeat(48000)+"*/ return 1;"}),/exceeds.*no programs ran/);
 });
 
-it("a real failure after clipped text still stops sequential work and retains prior commits", async t => {
+it("a real failure after clipped text continues independent work and retains prior commits", async t => {
   const f = await engineFixture(t);
 
   const result = await run(f,[
@@ -416,11 +421,11 @@ it("a real failure after clipped text still stops sequential work and retains pr
 
   assert.equal(result.isError,true);
   assert.equal(result.details.ok,false);
-  assert.equal(result.details.attempted,2);
-  assert.equal(result.details.mutations.committed,1);
+  assert.equal(result.details.attempted,3);
+  assert.equal(result.details.mutations.committed,2);
   assert.match(modelText(result),/failure after clipping/);
   assert.equal(await fs.readFile(path.join(f.root,"kept.txt"),"utf8"),"committed");
-  await assert.rejects(fs.stat(path.join(f.root,"never.txt")),{code:"ENOENT"});
+  assert.equal(await fs.readFile(path.join(f.root,"never.txt"),"utf8"),"bad");
 });
 
 
@@ -439,7 +444,10 @@ it("failed batches project host error status without discarding completed result
   assert.equal(projected.content, result.content);
   assert.equal(projected.details.programs[0].details.result, "completed");
   assert.equal(await fs.readFile(path.join(f.root, "kept.txt"), "utf8"), "kept");
-  await assert.rejects(fs.stat(path.join(f.root, "never.txt")), { code: "ENOENT" });
+  assert.equal(await fs.readFile(path.join(f.root, "never.txt"),"utf8"), "bad");
+  assert.equal(result.details.attempted, 3);
+  assert.equal(result.details.failed, 1);
+  assert.equal(result.details.notRun, 0);
 
   for (const other of [
     { ...event, toolName: "unrelated" },
@@ -471,4 +479,25 @@ it("oversized batches keep every program's diagnostics visible", async t => {
   assert.match(text, /last /);
   assert.equal(result.details.programs[0].details.result, "first " + "λ😀".repeat(10000));
   assert.equal(result.details.programs[2].details.result, "last " + "λ😀".repeat(10000));
+});
+
+
+it("batch snapshots revalidate serialized array shape and entry count before execution", async t => {
+  const f = await engineFixture(t);
+  const entry = {code:'await write("never-snapshot.txt","bad");'};
+
+  for (const options of [{},{data:{shared:true}}]) {
+    for (const snapshot of [[],null,{},Array(33).fill(entry)]) {
+      const programs = [entry];
+      Object.defineProperty(programs,"toJSON",{value:()=>snapshot});
+      await assert.rejects(run(f,programs,options),/programs requires 1\.\.32 entries.*no programs ran/);
+      await assert.rejects(fs.stat(path.join(f.root,"never-snapshot.txt")),{code:"ENOENT"});
+    }
+  }
+
+  const valid = [{code:"return 99;"}];
+  Object.defineProperty(valid,"toJSON",{value:()=>[{code:"return data;",data:0}]});
+  const result = await run(f,valid);
+  assert.equal(result.details.attempted,1);
+  assert.deepEqual(result.details.result,[0]);
 });

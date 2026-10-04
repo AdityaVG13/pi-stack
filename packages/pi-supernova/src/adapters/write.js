@@ -63,21 +63,15 @@ export function createWrite(ctx) {
     return content;
   }
 
-  async function applyAppend(target, content, snap) {
-    const { overlay, existingBytes } = snap;
-
-    if (existingBytes > WRITE_APPEND_MAX_READ_BYTES) throw new Error("append input exceeds " + WRITE_APPEND_MAX_READ_BYTES + " bytes; stream it with bash redirection instead");
-    // Append needs the real content: the diff snapshot may be a lossy decode, and
-    // concatenating that would silently corrupt a non-UTF-8 file.
-    let prevText;
-
-    try { prevText = overlay !== undefined ? overlay : await vfs.read(target, { maxBytes: WRITE_APPEND_MAX_READ_BYTES, preserveRead: true }); }
+  async function readAppendBase(target) {
+    // Append bytes and receipt text share one strict, bounded read. The VFS
+    // supplies staged overlays and preserves any earlier read's CAS baseline.
+    try { return await vfs.read(target, { maxBytes: WRITE_APPEND_MAX_READ_BYTES, label: "append input", preserveRead: true }); }
     catch (error) {
       if (error.code !== "ENOENT") throw error;
-      prevText = "";
-    }
 
-    return { content: prevText + content, prevText, removedLines: undefined };
+      return "";
+    }
   }
 
   async function write(params, signal) {
@@ -86,15 +80,13 @@ export function createWrite(ctx) {
 
       if (signal?.aborted) throw new Error("aborted");
       let content = assertWriteParams(params);
-      const snap = await writeSnapshot(vfs, target, signal);
-      let { previous: prevText, removedLines } = snap;
+      const appending = params.append === true;
 
-      if (params.append === true) {
-        const appended = await applyAppend(target, content, snap);
-        content = appended.content;
-        prevText = appended.prevText;
-        removedLines = appended.removedLines;
-      }
+      const { previous: prevText, removedLines } = appending
+        ? { previous: await readAppendBase(target) }
+        : await writeSnapshot(vfs, target, signal);
+
+      if (appending) content = prevText + content;
 
       const { speculative } = await vfs.write(target, content);
       index.touch(relativeSlash(cwd, target));

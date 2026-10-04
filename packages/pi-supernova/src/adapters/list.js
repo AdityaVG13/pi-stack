@@ -48,7 +48,7 @@ export function createList(ctx) {
     if (signal?.aborted) throw new Error("aborted");
     const searchDir = await resolveListDir(op, params, cwd);
     const globPattern = globPatternOf(op, params);
-    const pending = vfs.getOverlayPaths();
+    const pending = await vfs.getOverlayPaths(searchDir);
     const cached = await listFromCache(searchDir, cwd, globPattern, pending);
 
     if (cached !== null) return cached;
@@ -72,7 +72,7 @@ export function createList(ctx) {
 
       if (!pattern) throw new Error("grep requires pattern");
       const searchPath = params?.path ? await resolveWorkspacePath(cwd, params.path, "grep", true) : cwd;
-      const indexed = await grepIndexed(index, pattern, params, searchPath, cwd, file => vfs.getOverlay(file), vfs.getOverlayPaths());
+      const indexed = await grepIndexed(index, pattern, params, searchPath, cwd, file => vfs.getOverlay(file), await vfs.getOverlayPaths(searchPath));
 
       if (indexed !== null) return textResult(indexed, { exitCode: indexed ? 0 : 1, via: "index" });
 
@@ -91,7 +91,7 @@ export function createList(ctx) {
   async function ls(params, signal) {
       const cwd = getCwd();
       const dirPath = params?.path ? await resolveWorkspacePath(cwd, params.path, "ls", true) : cwd;
-      const pending = vfs.getOverlay(dirPath);
+      const pending = await vfs.getOverlay(dirPath);
 
       if (pending !== undefined) return fileListing(dirPath, Buffer.byteLength(pending, "utf8"));
       const stat = await fs.stat(dirPath).catch(() => null);

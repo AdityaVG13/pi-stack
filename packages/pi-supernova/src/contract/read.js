@@ -1,4 +1,4 @@
-import { errorMessage, isString, isObject, isNumber, looksLikePath } from "../shared/decode.js";
+import { errorMessage, isString, isObject, looksLikePath } from "../shared/decode.js";
 import { foldJsonSelectorAlias, sessionJsonArgs, validateJsonRead } from "../fs/json-read.js";
 
 export const SESSION_URI = /^(?:agent|artifact):\/\//i;
@@ -187,37 +187,16 @@ function jsonSelectorNote(args) {
   return args.json === undefined ? "" : " (" + (Array.isArray(args.json) ? args.json.join(", ") : String(args.json)) + ")";
 }
 
-export const ROUTING_STATUS = "too_large";
-
-const ROUTING_PREFIX = '{"status":"too_large",';
-
-export function isRoutingPayload(value) {
-  return isString(value) && value.startsWith(ROUTING_PREFIX);
-}
-
-function isRoutingObject(parsed) {
-  return isObject(parsed) && parsed.status === ROUTING_STATUS && isString(parsed.path)
-    && isNumber(parsed.chars) && (Array.isArray(parsed.keys) || isNumber(parsed.length));
-}
-
 function decodeByArgs(args, value) {
   return (args.resolve || args.json !== undefined || args.outline || args.evidence) && isString(value);
 }
 
 export function decodeReadValue(args, value) {
-  const sniffed = isRoutingPayload(value);
+  // Decode only by requested mode, never by fields inside literal host text.
+  if (!decodeByArgs(args, value)) return value;
 
-  if (!sniffed && !decodeByArgs(args, value)) return value;
-
-  try {
-    const parsed = JSON.parse(value);
-
-    return sniffed && !isRoutingObject(parsed) ? value : parsed;
-  } catch (error) {
-    if (sniffed && !decodeByArgs(args, value)) return value;
-
-    throw jsonReadError(args, error);
-  }
+  try { return JSON.parse(value); }
+  catch (error) { throw jsonReadError(args, error); }
 }
 
 function jsonReadError(args, error) {

@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import {extractStructuralSurface} from './surface.js';
+import { braceBlockEndLine } from "../fs/check.js";
 
 const IDENT_TOKEN = /[A-Za-z_$][\w$]*/g;
 
@@ -18,49 +19,83 @@ function lineIndent(raw, i) {
   return raw[i].length - raw[i].trimStart().length;
 }
 
-function pythonDeclarationEnd(raw, lower, start, lineCount) {
-  const base = lineIndent(raw, start - 1);
-  let end = start;
-
-  for (let i = start; i < lineCount; i++) {
-    if (lower[i] === "") { end = i + 1; continue; }
-
-    if (lineIndent(raw, i) <= base) break;
-    end = i + 1;
-  }
-
-  return Math.min(end, lineCount);
-}
-
-function braceDelta(text) {
+function pythonHeaderEnd(raw, start, lineCount, suite = true) {
   let depth = 0;
+  let quote = "";
+  let escape = false;
 
-  for (const ch of text) {
-    if (ch === "{") depth++;
-    else if (ch === "}") depth--;
-  }
+  for (let i = start - 1; i < lineCount; i++) {
+    let statement = raw[i].trimEnd();
 
-  return depth;
-}
+    for (let j = 0; j < statement.length; j++) {
+      const ch = statement[j];
 
-function braceDeclarationEnd(raw, start, lineCount) {
-  let depth = braceDelta(raw[start - 1] ?? "");
+      if (quote) {
+        if (escape) { escape = false; continue; }
 
-  if (depth <= 0) return start;
+        if (ch === "\\") { escape = true; continue; }
 
-  for (let i = start; i < raw.length; i++) {
-    depth += braceDelta(raw[i]);
+        if (statement.startsWith(quote, j)) {
+          j += quote.length - 1;
+          quote = "";
+        }
 
-    if (depth <= 0) return i + 1;
+        continue;
+      }
+
+      // Comments only start outside strings; triple-quoted payload persists
+      // across physical lines and closes on its full delimiter.
+      if (ch === "#") { statement = statement.slice(0, j).trimEnd(); break; }
+
+      if (ch === "'" || ch === "\"") {
+        quote = statement.startsWith(ch.repeat(3), j) ? ch.repeat(3) : ch;
+        j += quote.length - 1;
+      }
+      else if ("([{".includes(ch)) depth++;
+      else if (")]}".includes(ch)) depth--;
+      else if (suite && ch === ":" && depth === 0) return i + 1;
+    }
+
+    // A backslash escaping a physical newline does not escape the next line's
+    // first character; the quote itself still persists.
+    escape = false;
+
+    // Assignments end at a logical newline, not at a suite-opening colon.
+    if (!suite && depth === 0 && !quote && !statement.endsWith("\\")) return i + 1;
   }
 
   return lineCount;
 }
 
-function declarationEnd(raw, lower, start, lineCount, ext) {
-  if (ext === ".py") return pythonDeclarationEnd(raw, lower, start, lineCount);
+function pythonDeclarationEnd(raw, lower, start, lineCount) {
+  const base = lineIndent(raw, start - 1);
+  // Only a top-level colon ends a header, including a header with an inline
+  // suite. Colons in annotations, defaults and comments are not terminators.
+  let end = pythonHeaderEnd(raw, start, lineCount);
 
-  return braceDeclarationEnd(raw, start, lineCount);
+  for (let i = end; i < lineCount; i++) {
+    // Blank and comment-only lines do not dedent a Python suite. Include them
+    // only when a later body line extends the span, preserving neighbor comments.
+    if (lower[i] === "" || lower[i].startsWith("#")) continue;
+
+    if (lineIndent(raw, i) <= base) break;
+    // Dedentation inside a continued expression or string is payload, not a
+    // suite boundary. Resume indentation checks after its logical newline.
+    end = pythonHeaderEnd(raw, i + 1, lineCount, false);
+    i = end - 1;
+  }
+
+  return Math.min(end, lineCount);
+}
+
+const BLOCK_DECLARATIONS = new Set(["function", "function*", "method", "class", "fn", "struct", "enum", "trait", "impl", "interface"]);
+
+function declarationEnd(raw, lower, start, lineCount, ext, kind) {
+  if (String(ext ?? "").toLowerCase() === ".py") return kind === "constant"
+    ? pythonHeaderEnd(raw, start, lineCount, false)
+    : pythonDeclarationEnd(raw, lower, start, lineCount);
+
+  return Math.min(lineCount, Math.max(start, braceBlockEndLine(raw.join("\n"), start, ext, BLOCK_DECLARATIONS.has(kind))));
 }
 
 export function fromText(filePath, text) {
@@ -95,7 +130,7 @@ export function spansOf(entry) {
 
     for (let i = 0; i < items.length; i++) {
       const start = items[i].line;
-      let end = declarationEnd(raw, lower, start, lineCount, entry.ext);
+      let end = declarationEnd(raw, lower, start, lineCount, entry.ext, items[i].kind);
 
       while (end > start && lower[end - 1] === "") end--;
       spans.push({ start, end, name: items[i].name, kind: items[i].kind, isExport: items[i].isExport === true });

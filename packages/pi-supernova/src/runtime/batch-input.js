@@ -37,8 +37,11 @@ function parseBatchPayload(params, config) {
 
   for (const p of params.programs) assertProgramEntry(p, defaults);
 
-  // Validate before serialization and again after snapshotting: toJSON may change an entry.
-  return applyBatchDefaults(snapshotBatch(params, defaults, config), params.mergeData === true);
+  // Serialization may change the array itself as well as its entries.
+  const parsed = snapshotBatch(params, defaults, config);
+  assertBatchOptions(parsed);
+
+  return applyBatchDefaults(parsed, params.mergeData === true);
 }
 
 function batchTimeoutMs(params, config) {

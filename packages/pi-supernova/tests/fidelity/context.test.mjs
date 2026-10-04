@@ -46,14 +46,17 @@ it("diagnostic source windows omit a file changed between short reads", async t 
   const f = await engineFixture(t);
   await f.write("unit.js","old-one\nold-two\n");
   const handle = await fs.open(path.join(f.root,"unit.js"));
+  const identity = await handle.stat();
   const prototype = Object.getPrototypeOf(handle), original = prototype.read;
   await handle.close();
   let changed = false;
 
   const mock = t.mock.method(prototype,"read",async function(buffer,offset,length,position) {
-    const result = await original.call(this,buffer,offset,!changed && buffer.length === 16 ? 8 : length,position);
+    const current = await this.stat();
+    const target = current.dev === identity.dev && current.ino === identity.ino;
+    const result = await original.call(this,buffer,offset,!changed && target ? Math.min(8,length) : length,position);
 
-    if (!changed && result.bytesRead === 8 && buffer.subarray(0,8).toString() === "old-one\n") {
+    if (!changed && target && result.bytesRead === 8 && buffer.subarray(offset,offset+8).toString() === "old-one\n") {
       changed = true;
       await f.write("unit.js","new-one\nnew-two\n");
     }
@@ -262,4 +265,132 @@ it("canonical locator paths work through workspace aliases without widening inde
   await fs.symlink(path.join(physical,"outside.js"),path.join(physical,"scope","escape.js"));
   locator = path.join(alias,"scope","escape.js");
   await assert.rejects(execute('return await read({path:"scope",query:"located",indexed:true});'),/scope|workspace/);
+});
+
+it("focused outline caller hints match whole dollar-bearing identifiers on disk and staged source", async t => {
+  const f = await engineFixture(t);
+  const source = "export function alpha() { return 1; }\nexport function $leading() { return 2; }\nexport function trailing$() { return 3; }\n";
+  const callers = "$leading();\ntrailing$();\nalpha();\nalpha(); prefix$leading(); trailing$suffix();\n$alpha(); alpha$();\n$leading(); $alpha(); alpha$();\n";
+  assert.doesNotThrow(() => new Function(source.replaceAll("export ", "") + callers));
+  await f.write("target.js", source);
+  await f.write("caller.js", callers);
+  const hints = outline => outline.split("\n").filter(line => line.includes("used by:"));
+  const disk = (await f.execute('return await read("target.js",{about:"alpha leading trailing"});')).details.result;
+  assert.match(disk, /3 expanded/);
+  assert.deepEqual(hints(disk), [
+    "      // used by: caller.js:3, caller.js:4",
+    "      // used by: caller.js:1, caller.js:6",
+    "      // used by: caller.js:2",
+  ]);
+
+  const pending = "$leading();\ntrailing$();\nalpha();\n";
+  const staged = (await f.execute('return await edit(async () => { await write("staged.js",' + JSON.stringify(pending) + '); return await read("target.js",{about:"alpha leading trailing"}); });')).details.result.value;
+  assert.deepEqual(hints(staged), [
+    "      // used by: caller.js:3, caller.js:4, staged.js:3",
+    "      // used by: caller.js:1, caller.js:6, staged.js:1",
+    "      // used by: caller.js:2, staged.js:2",
+  ]);
+  assert.equal(await fs.readFile(path.join(f.root, "target.js"), "utf8"), source);
+  assert.equal(await fs.readFile(path.join(f.root, "staged.js"), "utf8"), pending);
+});
+
+it("exact method about reads keep the requested body without expanding noisy enclosing classes", async t => {
+  const f = await engineFixture(t);
+
+  const source = [
+    "export class SliceLibrary {",
+    "  usefulSlice(value) {",
+    "    return value.trim();",
+    "  }",
+    "  get(value) {",
+    "    return this.usefulSlice(value);",
+    "  }",
+    "  unrelatedWork() {",
+    ...Array(250).fill("    // useful slice context that belongs to unrelated work"),
+    "    return false;",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+
+  await f.write("slices.js", source);
+  const focused = await f.execute('return await read("slices.js", {about:"usefulSlice"});');
+  assert.equal(focused.details.ok, true);
+  const text = modelText(focused);
+  assert.match(text, /return value\.trim\(\);/, "the exact requested method body must remain available");
+  assert.doesNotMatch(text, /context that belongs to unrelated work/, "an enclosing class must not swamp an exact method query");
+  assert.match(text, /export class SliceLibrary/, "the enclosing declaration remains navigable");
+  assert.match(text, /unrelatedWork\(\).*lines/, "unrequested bodies retain line-based recovery guidance");
+  const stopWord = await f.execute('return await read("slices.js", {about:"get"});');
+  assert.match(modelText(stopWord), /return this\.usefulSlice\(value\);/, "exact identifiers are not prose stop words");
+  const full = await f.execute('return (await read("slices.js", {complete:true})).length;');
+  assert.equal(full.details.result, source.length, "focused output must not limit full internal reads");
+});
+
+it("late-file focused bodies survive a large declaration map with exact source recovery", async t => {
+  const f = await engineFixture(t);
+
+  const prefix = Array.from({length:180}, (_, i) => `export function earlierDeclarationNumber${i}() {\n  return ${i};\n}\n`).join("\n");
+  const target = "export function lateTarget(value) {\n  return value.trim();\n}\n";
+  await f.write("late.js", prefix + target);
+  const focused = await f.execute('return await read("late.js", {about:"lateTarget"});');
+  assert.equal(focused.details.ok, true);
+  const text = modelText(focused);
+  assert.ok(text.includes("return value.trim();"), "the display budget must retain the requested late-file body");
+  const location = text.match(/^\s*(\d+) export function lateTarget\(value\) \{/m);
+  assert.ok(location, "requested source must retain its real line locator");
+  assert.equal(Number(location[1]), prefix.split("\n").length);
+  assert.ok(text.includes("earlierDeclarationNumber0"), "navigation remains available after the focused body");
+  assert.ok(text.includes("outline truncated"), "omitted navigation must be disclosed");
+  const recovered = await f.execute(`return await read("late.js", {offset:${location[1]},limit:3});`);
+  assert.equal(recovered.details.result, target, "the emitted line locator must recover exact source bytes");
+});
+
+
+it("image reads bound bytes consumed when a file grows after stat", async t => {
+  const f = await engineFixture(t);
+  const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=", "base64");
+  await f.write("growing.png", image);
+  const target = path.join(f.root, "growing.png");
+  const handle = await fs.open(target, "r"), initial = await handle.stat();
+  const prototype = Object.getPrototypeOf(handle);
+  await handle.close();
+  const stat = prototype.stat, read = prototype.read, readFile = prototype.readFile;
+  const limit = 20 * 1024 * 1024;
+  let targetFd, consumed = 0;
+
+  const mocks = [
+    t.mock.method(prototype, "stat", async function(...args) {
+      const observed = await stat.apply(this, args);
+
+      if (targetFd === undefined && observed.ino === initial.ino && observed.dev === initial.dev) {
+        targetFd = this.fd;
+        await fs.truncate(target, limit + 4 * 1024 * 1024);
+      }
+
+      return observed;
+    }),
+    t.mock.method(prototype, "read", async function(...args) {
+      const result = await read.apply(this, args);
+
+      if (this.fd === targetFd) consumed += result.bytesRead;
+
+      return result;
+    }),
+    t.mock.method(prototype, "readFile", async function(...args) {
+      const result = await readFile.apply(this, args);
+
+      if (this.fd === targetFd) consumed += result.length;
+
+      return result;
+    }),
+  ];
+
+  try {
+    await assert.rejects(f.execute('return await read("growing.png");'), /file changed while reading|image read limit/);
+  } finally { for (const mock of mocks) mock.mock.restore(); }
+
+  assert.ok(consumed > image.length, "the test must exercise growth after the size observation");
+  assert.ok(consumed <= limit + 1, "image I/O must stop at the byte limit plus one overflow byte, not buffer the grown file");
+  assert.equal((await fs.stat(target)).size, limit + 4 * 1024 * 1024);
 });

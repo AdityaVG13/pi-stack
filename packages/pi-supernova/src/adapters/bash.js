@@ -110,7 +110,7 @@ export function createBash(ctx) {
 // Admit only directories that the pending file set will materialize. Checking
 // before the barrier keeps invalid cwd requests from committing unrelated files.
 async function stagedDirectory(target, vfs) {
-  const pending = vfs.getOverlayPaths();
+  const pending = await vfs.getOverlayPaths();
 
   if (!pending.length) return false;
   const directory = await canonicalNewPath(target);

@@ -55,6 +55,9 @@ const contractEvents = structuredClone(baseline.events);
 // long-standing `edited <rel>` form; the frozen absolute marker is the
 // normalizer's /workspace/ prefix, stripped here rather than regenerated.
 for (const event of contractEvents) event.output = event.output.replaceAll("wrote /workspace/", "wrote ");
+
+// Contract v6 publishes each write before returning; these receipts are final.
+for (const event of contractEvents) event.output = event.output.replace(/(wrote [^\n]+) \(speculative\)/g, "$1");
 // Contract v4 prints the mutations line only when it informs: a successful
 // program that committed and rolled back nothing omits it (shell side effects
 // matter only when a failure rolls files back). Failures keep it.

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { syncBuiltinESMExports } from "node:module";
-import { engineFixture, limits } from "../helpers/engine.mjs";
+import { engineFixture, limits, modelText } from "../helpers/engine.mjs";
 import { CausalVfs } from "../../src/fs/vfs.js";
 import { warmGuestWorker } from "../../src/runtime/runtime.js";
 
@@ -50,7 +50,7 @@ test("a disk failure after one replacement restores every original and reports f
   syncBuiltinESMExports();
 
   try {
-    await assert.rejects(f.execute('await write("first.txt", "changed first"); await write("second.txt", "changed second");'), /disk failure sentinel/);
+    await assert.rejects(f.execute('await edit(async()=>{await write("first.txt", "changed first"); await write("second.txt", "changed second");});'), /disk failure sentinel/);
   } finally { fs.rename = rename; syncBuiltinESMExports(); }
 
   assert.ok(failureInjected, "the test must reach partial on-disk replacement");
@@ -84,7 +84,15 @@ test("failed recovery is reported as uncertain and retains the original backup",
   syncBuiltinESMExports();
 
   try {
-    await assert.rejects(f.execute('await write("first.txt","changed"); await write("second.txt","changed");'), /filesystem outcome uncertain.*\nerror:.*recovery failed/s);
+    const result = await f.tool.execute("uncertain-batch", {programs:[
+      {code:'await edit(async()=>{await write("first.txt","changed"); await write("second.txt","changed");});'},
+      {code:'await write("unsafe.txt","must not continue after failed recovery");'},
+    ]}, undefined, undefined, {cwd:f.root});
+
+    assert.match(modelText(result), /filesystem outcome uncertain.*\nerror:.*recovery failed/s);
+    assert.deepEqual(result.details.failedPrograms, [0]);
+    assert.deepEqual(result.details.notRunPrograms, [1]);
+    await assert.rejects(fs.stat(path.join(f.root,"unsafe.txt")), {code:"ENOENT"});
   } finally { fs.rename = rename; syncBuiltinESMExports(); }
 
   assert.ok(recoveryFailed);
@@ -94,7 +102,7 @@ test("failed recovery is reported as uncertain and retains the original backup",
   assert.ok(retained.includes("first original"), "failed recovery must retain a copy of the original bytes");
 });
 
-test("final commit waits obey the program deadline and queued cancellation cannot write later", {timeout:7000}, async t => {
+test("checkpoint commit waits obey the program deadline and queued cancellation cannot write later", {timeout:7000}, async t => {
   const f = await engineFixture(t);
   await warmGuestWorker(limits);
   let entered, release;
@@ -113,7 +121,7 @@ test("final commit waits obey the program deadline and queued cancellation canno
 
   controller.abort(new Error("cancelled while queued"));
 
-  const timed = f.tool.execute("commit-deadline", {code:'console.log("commit context"); await write("late.txt","forbidden"); return "done";',timeoutMs:1000}, undefined, undefined, {cwd:f.root})
+  const timed = f.tool.execute("commit-deadline", {code:'console.log("commit context"); await edit(async()=>{await write("late.txt","forbidden");}); return "done";',timeoutMs:1000}, undefined, undefined, {cwd:f.root})
     .then(value => ({ok:true,value}), error => ({ok:false,error}));
 
   const readOnly = f.execute("return 42;");
@@ -138,7 +146,7 @@ test("final commit waits obey the program deadline and queued cancellation canno
 
   assert.notEqual(beforeRelease, "still blocked", "deadlines/cancellation must settle without waiting for another transaction");
   assert.equal(beforeRelease[0].ok, false);
-  assert.match(beforeRelease[0].error.message, /timed out.*timeoutMs=1000/);
+  assert.match(beforeRelease[0].error.message, /timed out[\s\S]*ran \d+ms of 1000ms/);
   assert.match(beforeRelease[0].error.message, /commit context/);
   assert.equal(beforeRelease[0].error.supernovaResult.details.mutations.pendingCommits, 0);
   assert.equal(beforeRelease[2].details.result, 42, "read-only programs must not queue behind disk commits");
@@ -162,7 +170,7 @@ test("new destinations obey filesystem alias rules without losing either write",
       throw error;
     });
 
-    const code = 'await write(data.first,"first value"); await write(data.second,"second value");';
+    const code = 'await edit(async()=>{await write(data.first,"first value"); await write(data.second,"second value");});';
     const run = () => f.tool.execute("alias-commit",{code,data:{first,second}},undefined,undefined,{cwd:f.root});
 
     if (aliases) {
@@ -225,7 +233,7 @@ test("exclusive publication cleans staging links on success and partial failure"
   });
 
   try {
-    await assert.rejects(f.execute('await write("first.txt","one"); await write("second.txt","two");'),/exclusive publication unsupported sentinel/);
+    await assert.rejects(f.execute('await edit(async()=>{await write("first.txt","one"); await write("second.txt","two");});'),/exclusive publication unsupported sentinel/);
   } finally { mock.mock.restore(); }
 
   assert.equal(published,true,"exercise recovery after a new destination became visible");
@@ -257,7 +265,7 @@ test("rollback preserves a newer external edit rather than restoring or deleting
       return rename.call(this,from,to);
     });
 
-    try { await f.execute('await write("first.txt","our value"); await write("second.txt","our value");'); }
+    try { await f.execute('await edit(async()=>{await write("first.txt","our value"); await write("second.txt","our value");});'); }
     catch (error) { failure = error; }
     finally { mock.mock.restore(); }
 
@@ -821,3 +829,36 @@ for (const existed of [true, false]) {
     });
   }
 }
+
+test("uncertain parallel recovery cancels already-running siblings before more writes", async t => {
+  const f = await engineFixture(t);
+  await f.write("first.txt", "original first");
+  await f.write("second.txt", "original second");
+  const first = await fs.realpath(path.join(f.root,"first.txt"));
+  const second = await fs.realpath(path.join(f.root,"second.txt"));
+  const rename = fs.rename;
+  let installed = false;
+
+  const fault = t.mock.method(fs,"rename",async (from,to) => {
+    if (to === second || (to === first && installed)) throw Object.assign(new Error("recovery fault sentinel"),{code:"EIO"});
+    await rename(from,to);
+
+    if (to === first) installed = true;
+  });
+
+  let result;
+
+  try {
+    result = await f.tool.execute("unsafe-parallel",{parallel:true,timeoutMs:4000,programs:[
+      {code:'await edit(async()=>{await write("first.txt","changed first");await write("second.txt","changed second");});'},
+      {code:'await new Promise(resolve=>setTimeout(resolve,500));await write("unsafe.txt","must not continue after uncertain recovery");'},
+    ]},undefined,undefined,{cwd:f.root});
+  } finally { fault.mock.restore(); }
+
+  assert.equal(result.details.mutations.recoveryFailed,true);
+  assert.match(result.details.stopped,/uncertain filesystem outcome/);
+  await assert.rejects(fs.stat(path.join(f.root,"unsafe.txt")),{code:"ENOENT"});
+  assert.deepEqual(result.details.failedPrograms,[0,1]);
+  assert.match(result.details.programs[1].details.error,/abort|cancel/i);
+  assert.equal(await fs.readFile(second,"utf8"),"original second");
+});

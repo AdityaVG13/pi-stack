@@ -1,5 +1,5 @@
 import {pickEvidence} from "./evidence-rank.js";
-import {pendingInScope,overlaySearchEntry} from './search-files.js';
+import {pendingInScope,overlaySearchEntry,overlaySnapshot} from './search-files.js';
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { WorkspaceIndex } from "./repo-index.js";
@@ -237,7 +237,9 @@ export async function selectEvidence({ query, root, searchDir, index, overlayTex
   const profile = profileQuery(query);
 
   if (profile.keywords.length === 0) throw new Error("evidence requires at least one searchable concept keyword");
-  const { files: chosenFiles, fileScores } = candidateFiles(await listedFiles(root, searchDir, pendingPaths, index), profile, index, opts.maxCandidateFiles, overlayText);
+  const files = await listedFiles(root, searchDir, pendingPaths, index);
+  overlayText = await overlaySnapshot(files, overlayText);
+  const { files: chosenFiles, fileScores } = candidateFiles(files, profile, index, opts.maxCandidateFiles, overlayText);
   const spans = usageSpans(collectSpans(chosenFiles, overlayText, index, opts.maxSpanLines), profile, opts.maxSpanLines);
 
   if (spans.length === 0) return { route: profile.route, spans: [] };

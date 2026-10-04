@@ -24,7 +24,10 @@ function mutationText(outcome, failed) {
 
   if (!m.committed && !m.rolledBack && !external && !uncertain) return "";
 
-  return "\nmutations: committed=" + (m.committed || 0) + " rolledBack=" + (m.rolledBack || 0) + " (file versions)" + external + uncertain;
+  const saved = failed && outcome.savedPaths?.length ? "\nSaved edits: " + truncateChars(JSON.stringify(outcome.savedPaths), 2048, "saved paths").text : "";
+  const retry = failed && m.committed && !uncertain ? saved + "\nDo not repeat saved edits. Retry only failed or not-run work; dependent JavaScript stops at the uncaught error." : saved;
+
+  return "\nmutations: committed=" + (m.committed || 0) + " rolledBack=" + (m.rolledBack || 0) + " (file versions)" + external + uncertain + retry;
 }
 
 function mutationReceipts(trace) {
@@ -76,6 +79,14 @@ function fitOutput(outcome, call, limit, format) {
 }
 
 function attachReceipts(outcome, trace) {
+  const saved = new Set();
+
+  for (const row of trace) {
+    if (row.mutationState === "saved" && isString(row.args?.path)) saved.add(row.args.path);
+  }
+
+  outcome.savedPaths = [...saved];
+
   if (outcome.ok && outcome.result === undefined) {
     const receipts = mutationReceipts(trace);
 

@@ -156,7 +156,7 @@ for (const pty of [false,true]) it(`stop and session shutdown terminate stubborn
   }
 });
 
-it("background validation, unknown sessions and checkpoints fail before staged files commit", async t => {
+it("background validation and unknown sessions preserve saved files while checkpoints remain atomic", async t => {
   const f = await fixture(t);
   assert.match(f.tool.description, /poll waitMs 0\.\.30000/, "the model must see the polling range before calling");
 
@@ -175,11 +175,12 @@ it("background validation, unknown sessions and checkpoints fail before staged f
   for (const [i,[params,pattern]] of invalid.entries()) {
     await assert.rejects(f.execute(`await write("pending-${i}","pending"); return await bash(data);`,params),error=>{
       assert.match(error.message,pattern);
-      assert.equal(error.supernovaResult.details.mutations.committed,0);
+      assert.equal(error.supernovaResult.details.mutations.committed,1);
+      assert.equal(error.supernovaResult.details.mutations.external,0);
 
       return true;
     });
-    await assert.rejects(fs.stat(path.join(f.root,`pending-${i}`)),{code:"ENOENT"});
+    assert.equal(await fs.readFile(path.join(f.root,`pending-${i}`),"utf8"),"pending");
   }
 
   await assert.rejects(f.execute('return await edit(async()=>{await bash({command:"true",background:true});});'),/cannot run inside an edit checkpoint/);
@@ -276,6 +277,7 @@ it("stale bridges cannot control replacement-session jobs or flush staged files"
   t.after(()=>bridge.shutdownTerminals());
   const stale = bridge.fork({getCwd:()=>f.root});
   stale.beginSpeculation();
+  stale.beginSpeculation();
   await stale.natives.write({path:"old-session.txt",content:"must not commit"});
   await bridge.shutdownTerminals();
   bridge.reopenTerminals();
@@ -344,6 +346,7 @@ for (const changedOwner of [false,true]) it(`session identity gates every host c
   let sessionId = "original";
   bridge.bindCallContext({sessionManager:{getSessionId:()=>sessionId,getArtifactsDir:()=>f.root}});
   bridge.beginSpeculation();
+  bridge.beginSpeculation();
   await bridge.call("write",{path:"old-staged.txt",content:"must not commit"});
 
   if (changedOwner) sessionId = "replacement";
@@ -374,6 +377,8 @@ for (const boundary of ["final commit","native shell","delegated shell"]) it(`qu
     return {content:[{type:"text",text:"must not run"}]};
   });
   bridge.beginSpeculation();
+
+  if (boundary === "final commit") bridge.beginSpeculation();
   await bridge.call("write",{path:"old-queued.txt",content:"stale"});
   const entered = Promise.withResolvers();
   const release = Promise.withResolvers();
@@ -394,8 +399,10 @@ for (const boundary of ["final commit","native shell","delegated shell"]) it(`qu
   release.resolve();
   await blocking;
   await assert.rejects(queued,/session.*changed/);
-  await assert.rejects(fs.stat(path.join(f.root,"old-queued.txt")),{code:"ENOENT"});
-  assert.equal(bridge.getMutations().committed,0);
+
+  if (boundary === "final commit") await assert.rejects(fs.stat(path.join(f.root,"old-queued.txt")),{code:"ENOENT"});
+  else assert.equal(await fs.readFile(path.join(f.root,"old-queued.txt"),"utf8"),"stale");
+  assert.equal(bridge.getMutations().committed,boundary === "final commit" ? 0 : 1);
   assert.equal(dispatched,0);
   bridge.rollbackSpeculation();
 });

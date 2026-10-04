@@ -1,4 +1,5 @@
 import { relativeSlash } from "../fs/workspace.js";
+import { overlaySnapshot } from "../context/search-files.js";
 
 export function outlineOptions(params, references, config) {
   const options = { references };
@@ -22,10 +23,12 @@ export function createReferenceFinder(index, vfs) {
   return async function referenceFinder(cwd, targetPath) {
     let files;
 
-    try { files = [...new Set([...await index.files(cwd), ...vfs.getOverlayPaths()])]; }
+    try { files = [...new Set([...await index.files(cwd), ...await vfs.getOverlayPaths(cwd)])]; }
     catch { return () => []; }
 
     if (!index.canScan(files)) return () => [];
+    const overlayText = await overlaySnapshot(files, file => vfs.getOverlay(file));
+    const targetRel = relativeSlash(await vfs.resolvePath(cwd), await vfs.resolvePath(targetPath));
 
     // Each outline supplies its expanded names together. The row snapshot is
     // call-local; the existing index still owns file validation and body caching.
@@ -34,13 +37,14 @@ export function createReferenceFinder(index, vfs) {
     return (name, excludeLine, names) => {
       if (!name || name.length < 3) return [];
       const escaped = name.replace(/[$]/g, (c) => "\\" + c);
-      const regex = new RegExp("\\b" + escaped + "\\b");
+      // JavaScript identifiers include $, which is not a regex word character.
+      const regex = new RegExp("(?<![\\w$])" + escaped + "(?![\\w$])");
 
-      rows ??= index.grepRows(files, new RegExp("\\b(?:" + names.filter(name => name.length >= 3)
-        .map(name => name.replaceAll("$", "\\$")).join("|") + ")\\b"), cwd, file => vfs.getOverlay(file));
+      rows ??= index.grepRows(files, new RegExp("(?<![\\w$])(?:" + names.filter(name => name.length >= 3)
+        .map(name => name.replaceAll("$", "\\$")).join("|") + ")(?![\\w$])"), cwd, overlayText);
 
       return rows
-        .filter((r) => regex.test(r.text) && !(r.line === excludeLine && r.rel === relativeSlash(cwd, targetPath)))
+        .filter((r) => regex.test(r.text) && !(r.line === excludeLine && r.rel === targetRel))
         .map((r) => r.rel + ":" + r.line);
     };
   };

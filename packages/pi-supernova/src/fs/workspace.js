@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { constants } from "node:os";
+import { StringDecoder } from "node:string_decoder";
 import { isString } from "../shared/decode.js";
 import { truncateChars } from "../output/format.js";
 
@@ -208,6 +209,23 @@ function appendCommandOutput(state, current, chunk) {
   return remaining ? current + chunk.slice(0, remaining) : current;
 }
 
+function captureCommandStream(state, name) {
+  const stream = state.child[name], decoder = new StringDecoder("utf8");
+
+  stream.on("data", chunk => {
+    // Keep draining after the shared cap fills, without decoding discarded text
+    // or backpressuring a child that still needs to finish its work.
+    if (state.stdout.length + state.stderr.length >= state.maxOutputChars) {
+      if (chunk.length) state.outputTruncated = true;
+
+      return;
+    }
+
+    state[name] = appendCommandOutput(state, state[name], decoder.write(chunk));
+  });
+  stream.once("end", () => { state[name] = appendCommandOutput(state, state[name], decoder.end()); });
+}
+
 function attachCommandIO(state, options, argv, timeoutMs) {
   const { child } = state;
   const onAbort = () => terminateCommand(state, new Error("aborted"));
@@ -220,10 +238,8 @@ function attachCommandIO(state, options, argv, timeoutMs) {
     "command timed out after " + timeoutMs + "ms: " + truncateChars(options.commandLabel ?? argv.join(" "), 240, "command").text
     + "\nhint: Increase this bash timeoutMs and the outer supernova timeoutMs, or split the work. Sleeps and every command in a shell chain share the same limit."
   )), timeoutMs);
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", chunk => { state.stdout = appendCommandOutput(state, state.stdout, chunk); });
-  child.stderr.on("data", chunk => { state.stderr = appendCommandOutput(state, state.stderr, chunk); });
+  captureCommandStream(state, "stdout");
+  captureCommandStream(state, "stderr");
   child.on("error", error => failCommand(state,commandSpawnError(error,argv[0])));
   child.once("exit", (code, signal) => {
     state.processExited = true;

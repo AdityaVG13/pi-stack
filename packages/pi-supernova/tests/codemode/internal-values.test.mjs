@@ -166,7 +166,7 @@ it("64 large reads, blocked acknowledgements and expanded returns leave a constr
   const text="x".repeat(2*1024*1024)+"END";
   await f.write("large.txt",text);
   const code=String.raw`await write("derived.txt","retained"); return await Promise.all(Array.from({length:64},async()=>{const text=await read("large.txt"); return [text.length,text.slice(-3)];}));`;
-  const blocked=String.raw`await write("cancelled.txt","must roll back"); const jobs=Array.from({length:64},()=>read("large.txt")); await Promise.race(jobs); while(true) {}`;
+  const blocked=String.raw`await edit(async()=>{await write("cancelled.txt","must roll back"); const jobs=Array.from({length:64},()=>read("large.txt")); await Promise.race(jobs); while(true) {}});`;
   const expansion=String.raw`const values=Array(100000).fill("x".repeat(10000)); console.log({values}); return {values};`;
 
   const program=`import assert from "node:assert/strict";
@@ -217,9 +217,63 @@ it("disk and staged line windows enforce the exact UTF-8 byte ceiling at EOF and
 it("JSON selector batches cannot bypass aggregate string storage limits or commit staged work", async t => {
   const f = await engineFixture(t);
   await f.write("report.json",JSON.stringify({rows:Array(600).fill("x".repeat(1024))}));
-  await assert.rejects(f.execute('await write("must-rollback.txt","staged"); return await read({path:"report.json",json:Array(64).fill(".rows")});'),/JSON selection failed.*remaining storage budget/);
+  await assert.rejects(f.execute('return await edit(async()=>{await write("must-rollback.txt","staged"); return await read({path:"report.json",json:Array(64).fill(".rows")});});'),/JSON selection failed.*remaining storage budget/);
   await assert.rejects(fs.stat(path.join(f.root,"must-rollback.txt")),{code:"ENOENT"});
   const recovered = await f.execute('const rows=await read({path:"report.json",json:".rows"});await write("accepted.txt",rows[599]);return [rows.length,rows[0].length,rows[599].length];');
   assert.deepEqual(recovered.details.result,[600,1024,1024]);
   assert.equal(await fs.readFile(path.join(f.root,"accepted.txt"),"utf8"),"x".repeat(1024));
+});
+
+it("captured raw reads keep routing-looking JSON as text across all delivery forms", async t => {
+  const f = await engineFixture(t);
+
+  const replies = {
+    "object.txt": '{"status":"too_large","path":"literal.txt","chars":12,"keys":["x"]}',
+    "array.txt": '{"status":"too_large","path":"literal.txt","chars":12,"length":3}',
+    "malformed.txt": '{"status":"too_large", not JSON',
+  };
+
+  f.pi.registerTool({name:"read", async execute(_id, args) {
+    return {content:[{type:"text",text:replies[args.path]}]};
+  }});
+
+  const result = await f.execute(`
+    const paths = ["object.txt", "array.txt", "malformed.txt"];
+    const single = await read("object.txt");
+    const batch = await read(paths);
+    const concurrent = await Promise.all(paths.map(file => read(file)));
+    const explicit = await read({path:"object.txt",resolve:true});
+    await write("copy.txt", single);
+    return {single,batch,concurrent,explicit};
+  `);
+
+  assert.deepEqual(result.details.result, {
+    single:replies["object.txt"], batch:Object.values(replies), concurrent:Object.values(replies),
+    explicit:JSON.parse(replies["object.txt"]),
+  });
+
+  assert.equal(await fs.readFile(path.join(f.root,"copy.txt"),"utf8"), replies["object.txt"]);
+});
+
+it("captured bash truncation cannot be hidden by a literal word in its output", async t => {
+  const f = await engineFixture(t);
+  let outputTruncated = true;
+  let text = "const truncated = false;\n// partial source";
+
+  f.pi.registerTool({name:"bash", async execute() {
+    return {content:[{type:"text",text}],details:{exitCode:0,outputTruncated}};
+  }});
+
+  await assert.rejects(f.execute('await write("copy.js",await bash("captured command"));'), /refusing to write truncated read output/);
+  await assert.rejects(fs.stat(path.join(f.root,"copy.js")), {code:"ENOENT"});
+  const shown = await f.execute('return await bash("captured command");');
+  const marked = text + "\n…[output truncated]…";
+  assert.equal(shown.details.result, marked);
+
+  text = marked;
+  assert.equal((await f.execute('return await bash("captured command");')).details.result, marked, "do not duplicate the explicit marker");
+  outputTruncated = false;
+  text = "const truncated = false;\n// complete source";
+  await f.execute('await write("copy.js",await bash("captured command"));');
+  assert.equal(await fs.readFile(path.join(f.root,"copy.js"),"utf8"), text);
 });

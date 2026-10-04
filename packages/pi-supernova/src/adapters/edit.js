@@ -7,7 +7,7 @@ import { applyPatchToText } from "../fs/patch.js";
 import { resolveWorkspacePath, relativeSlash } from "../fs/workspace.js";
 import { referencesForNames } from "../context/search.js";
 import {
-  textResult, sourceLines, lineTextRange, applyReplacements, applyViewReplace,
+  textResult, sourceLines, applyReplacements, applyViewReplace,
   shiftDiffLines, contentLineInfo, boundedEditDiff, QUICK_CHECK_MAX_CHARS, lineStartIndex, lineEndIndex,
 } from "../fs/text-ops.js";
 
@@ -112,18 +112,29 @@ export function createEdit(ctx) {
     return out;
   }
 
-  function lineText(text, lines, number) {
-    if (lines) return lines[number - 1] ?? "";
-    const { start, end } = lineTextRange(text, number);
+  function lineReader(text) {
+    let line = 1, start = 0;
 
-    return text.slice(start, end).replace(/\r?\n$/, "");
+    // Diff rows share a forward cursor per version, not a fresh prefix scan
+    // per row or a second array of every line. Backward coordinates rewind it.
+    return number => {
+      const nextLine = Math.max(1, number);
+
+      if (nextLine < line) { line = 1; start = 0; }
+
+      start = lineEndIndex(text, start, nextLine - line);
+      line = nextLine;
+      const end = lineEndIndex(text, start, 1);
+
+      return text.slice(start, end).replace(/\r?\n$/, "");
+    };
   }
 
-  function nameAtDiffLine(l, original, updated, oldLines, newLines, canMapOwners, target, spans) {
+  function nameAtDiffLine(l, original, updated, readOldLine, readNewLine, canMapOwners, target, spans) {
     const number = l.type === "remove" ? l.lineNum : l.newLineNum ?? l.lineNum;
     const source = l.type === "remove" ? original : updated;
-    const cached = l.type === "remove" ? oldLines : newLines;
-    const name = declaredName(lineText(source, cached, number));
+    const readLine = l.type === "remove" ? readOldLine : readNewLine;
+    const name = declaredName(readLine(number));
 
     if (name) return name;
 
@@ -136,14 +147,14 @@ export function createEdit(ctx) {
 
   function collectChangedNames(target, original, updated, diff) {
     const canMapOwners = original.length <= 512 * 1024 && updated.length <= 512 * 1024;
-    const oldLines = canMapOwners ? original.split("\n") : null;
-    const newLines = canMapOwners ? updated.split("\n") : null;
+    const readOldLine = lineReader(original);
+    const readNewLine = lineReader(updated);
     const names = new Set();
     const spans = new Map();
 
     for (const l of diff.lines) {
       if (l.type === "context") continue;
-      const name = nameAtDiffLine(l, original, updated, oldLines, newLines, canMapOwners, target, spans);
+      const name = nameAtDiffLine(l, original, updated, readOldLine, readNewLine, canMapOwners, target, spans);
 
       // The generic declaration heuristic reads "const auto" as a binding.
       // In C++ it is a type keyword, not a symbol to search across the repo.
@@ -174,8 +185,10 @@ export function createEdit(ctx) {
     if (names.size === 0) return "";
 
     try {
+      const excludePath = path.resolve(cwd, path.relative(await vfs.resolvePath(cwd), await vfs.resolvePath(target)));
+
       const { references, incomplete } = await referencesForNames({ root: cwd, names: [...names].slice(0, 3),
-        excludePath: target, overlayText: file => vfs.getOverlay(file), pendingPaths: vfs.getOverlayPaths(), signal });
+        excludePath, overlayText: file => vfs.getOverlay(file), pendingPaths: await vfs.getOverlayPaths(cwd), signal });
 
       return formatNameRefs(references, incomplete);
     } catch (error) {
@@ -222,7 +235,7 @@ export function createEdit(ctx) {
       const target = await editTargetPath(cwd, params?.path, "edit");
 
       if (signal?.aborted) throw new Error("aborted");
-      const content = await vfs.read(target, { maxBytes: 64 * 1024 * 1024 });
+      const content = await vfs.read(target, { maxBytes: 64 * 1024 * 1024, forWrite: true });
 
       if (isNumber(params?.viewStart) && isNumber(params?.viewEnd) && isString(params?.viewText) && isString(params?.newText)) {
         return applyViewEdit(cwd, target, content, params, signal);
@@ -250,7 +263,7 @@ export function createEdit(ctx) {
 
   async function readPatchOriginal(target) {
     try {
-      return await vfs.read(target, { maxBytes: 64 * 1024 * 1024, preserveRead: true });
+      return await vfs.read(target, { maxBytes: 64 * 1024 * 1024, forWrite: true });
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
 

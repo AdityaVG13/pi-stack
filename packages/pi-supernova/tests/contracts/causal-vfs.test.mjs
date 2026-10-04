@@ -4,6 +4,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { CausalVfs } from "../../src/fs/vfs.js";
+import { readLimitedBytes } from "../../src/fs/file-io.js";
+import { createWindowReader } from "../../src/fs/read-window.js";
+import { sourceForReferences } from "../../src/fs/source-window.js";
+import { SeenLedger } from "../../src/context/ledger.js";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { syncBuiltinESMExports } from "node:module";
@@ -309,3 +313,250 @@ for (const outcome of ["released", "external"]) {
     }
   });
 }
+
+
+it("bounded file reads handle short reads, stale sizes, growth limits and cancellation", async t => {
+  const target = path.join(await scratch(), "growing.txt");
+  const bytes = Buffer.from("\uFEFFλ😀\r\n".repeat(20000));
+  await fs.writeFile(target, bytes);
+
+  for (const size of [0, 11, bytes.length, bytes.length + 13]) {
+    const file = await fs.open(target, "r");
+    const original = file.read.bind(file);
+    const reader = t.mock.method(file, "read", (buffer, offset, length, position) => original(buffer, offset, Math.min(length, 7919), position));
+
+    try {
+      const result = await readLimitedBytes(file, {size}, Math.max(size, bytes.length), "fixture");
+      assert.deepEqual(result, bytes, "short reads must not truncate a file or expose uninitialized bytes");
+    } finally { reader.mock.restore(); await file.close(); }
+  }
+
+  const file = await fs.open(target, "r");
+
+  try {
+    await assert.rejects(readLimitedBytes(file, {size: 11}, bytes.length - 1, "fixture"), /fixture exceeds/);
+  } finally { await file.close(); }
+
+  const cancelled = await fs.open(target, "r"), controller = new AbortController();
+  const original = cancelled.read.bind(cancelled);
+
+  const reader = t.mock.method(cancelled, "read", async (...args) => {
+    const result = await original(...args);
+    controller.abort(new Error("cancelled after I/O"));
+
+    return result;
+  });
+
+  try {
+    await assert.rejects(readLimitedBytes(cancelled, {size: bytes.length}, bytes.length, "fixture", controller.signal), /cancelled after I\/O/);
+  } finally { reader.mock.restore(); await cancelled.close(); }
+});
+
+// /proc and /sys regular files may report zero or page-sized lengths unrelated
+// to their readable bytes. Keep real I/O and CAS, changing only that metadata.
+async function withReportedSize(file, size, run) {
+  const open = fs.open, stat = fs.stat;
+
+  fs.open = async (target, ...args) => {
+    const handle = await open(target, ...args);
+
+    if (target === file) {
+      const handleStat = handle.stat.bind(handle);
+      handle.stat = async (...options) => Object.assign(await handleStat(...options), {size});
+    }
+
+    return handle;
+  };
+
+  fs.stat = async (target, ...args) => {
+    const result = await stat(target, ...args);
+
+    return target === file ? Object.assign(result, {size}) : result;
+  };
+
+  syncBuiltinESMExports();
+
+  try { return await run(); }
+  finally { fs.open = open; fs.stat = stat; syncBuiltinESMExports(); }
+}
+
+it("read windows use actual EOF when reported file sizes differ from readable bytes", async () => {
+  const root = await fs.realpath(await scratch()), file = path.join(root, "virtual.txt");
+  const body = "α😀\r\nsecond\nlast";
+
+  for (const size of [0, 1, 4096]) {
+    await fs.writeFile(file, body);
+    await withReportedSize(file, size, async () => {
+      const vfs = new CausalVfs(), readWindow = createWindowReader(vfs);
+
+      for (const [start, count, text, whole] of [
+        [1, 1, "α😀\r\n", false], [2, 1, "second\n", false], [3, 4, "last", false],
+        [1, 9, body, true], [1, undefined, body, true], [4, 2, "", false], [1, 0, "", false],
+      ]) {
+        assert.deepEqual(await readWindow(file, start, count, 8192), {text,satisfied:true,whole});
+      }
+
+      assert.deepEqual(await readWindow(file, 1, 1, 7), {text:"",satisfied:false,whole:false});
+      assert.deepEqual(await readWindow(file, 1, 1, 8), {text:"α😀\r\n",satisfied:true,whole:false});
+
+      const line = "x".repeat(65535) + "\n";
+      await fs.writeFile(file, line + "tail");
+      assert.deepEqual(await readWindow(file, 1, 1, 65536), {text:line,satisfied:true,whole:false});
+      await fs.writeFile(file, line);
+      assert.deepEqual(await readWindow(file, 1, 1, 65536), {text:line,satisfied:true,whole:true});
+      await fs.writeFile(file, "");
+      assert.deepEqual(await readWindow(file, 1, 0, 0), {text:"",satisfied:true,whole:true});
+      assert.deepEqual(await readWindow(file, 8, 1, 0), {text:"",satisfied:true,whole:true});
+
+      await fs.writeFile(file, Buffer.from([111, 107, 10, 0xe2, 0x82]));
+      assert.deepEqual(await readWindow(file, 1, 1, 8), {text:"ok\n",satisfied:true,whole:false});
+      await assert.rejects(readWindow(file, 2, 1, 8), /not valid UTF-8/);
+    });
+  }
+});
+
+it("content signatures agree across full reads and commits despite reported file sizes", async () => {
+  const root = await fs.realpath(await scratch()), file = path.join(root, "virtual.txt");
+  const before = "original λ😀\n", after = "committed\n";
+
+  for (const size of [0, 1, 4096]) {
+    await fs.writeFile(file, before);
+    await withReportedSize(file, size, async () => {
+      const vfs = new CausalVfs();
+      assert.equal(await vfs.read(file, {maxBytes:8192}), before);
+      await vfs.write(file, after);
+      assert.equal(await fs.readFile(file, "utf8"), after);
+      await fs.writeFile(file, "external\n");
+      await assert.rejects(vfs.write(file, "must not overwrite"), /write conflict/);
+      assert.equal(await fs.readFile(file, "utf8"), "external\n");
+    });
+  }
+});
+
+it("diagnostic windows read actual bytes despite reported file sizes and retain their cap", async () => {
+  const root = await fs.realpath(await scratch()), file = path.join(root, "virtual.js");
+  const source = "const first = 1;\nthrow Error('diagnostic-sentinel');\nconst last = 3;\n";
+  const ledger = new SeenLedger();
+
+  for (const size of [0, 1, 4096]) {
+    await fs.writeFile(file, source);
+    await withReportedSize(file, size, async () => {
+      const context = await sourceForReferences(root, root, "failed at virtual.js:2", undefined, ledger);
+      assert.match(context, /virtual\.js:2/);
+      assert.match(context, /►\s+2 throw Error\('diagnostic-sentinel'\)/);
+
+      await fs.writeFile(file, source + "x".repeat(1024 * 1024));
+      assert.equal(await sourceForReferences(root, root, "virtual.js:2", undefined, ledger), "");
+    });
+  }
+});
+
+it("filesystem identity shares staged bytes and checkpoint state across path aliases", async () => {
+  const root = await scratch(), real = path.join(root, "real"), alias = path.join(root, "alias");
+  await fs.mkdir(real);
+  await fs.symlink(real, alias, process.platform === "win32" ? "junction" : "dir");
+  const file = path.join(real, "state.txt"), linked = path.join(alias, "state.txt");
+  await fs.writeFile(file, "original");
+  const vfs = new CausalVfs();
+  vfs.begin();
+  await vfs.write(linked, "outer");
+  assert.equal(await vfs.read(file), "outer");
+  vfs.begin();
+  await vfs.write(linked, "inner");
+  assert.equal(await vfs.read(file), "inner");
+  vfs.rollback();
+  assert.equal(await vfs.read(file), "outer");
+  await vfs.write(path.join(alias, "new", "deep.txt"), "new bytes");
+  assert.equal(await vfs.read(path.join(real, "new", "deep.txt")), "new bytes");
+  assert.deepEqual((await vfs.getOverlayPaths(real)).sort(), [path.join(real, "new", "deep.txt"), file].sort());
+  await assert.rejects(vfs.write(file, "competing alias"), /conflicting write aliases/);
+  await vfs.commit();
+  assert.equal(await fs.readFile(file, "utf8"), "outer");
+  assert.equal(await fs.readFile(path.join(real, "new", "deep.txt"), "utf8"), "new bytes");
+});
+
+it("filesystem identity retains and refreshes CAS observations across aliases", async () => {
+  const root = await scratch(), real = path.join(root, "real"), alias = path.join(root, "alias");
+  await fs.mkdir(real);
+  await fs.symlink(real, alias, process.platform === "win32" ? "junction" : "dir");
+  const file = path.join(real, "state.txt"), linked = path.join(alias, "state.txt");
+
+  for (const mode of ["text", "window", "signature"]) {
+    await fs.writeFile(file, "original\n");
+    const vfs = new CausalVfs();
+
+    if (mode === "text") await vfs.read(linked);
+    else if (mode === "window") await createWindowReader(vfs)(linked, 1, 1, 65536);
+    else await vfs.captureExpected(linked);
+    await fs.writeFile(file, "external\n");
+    await assert.rejects(vfs.write(file, "clobbered\n"), /write conflict/, mode);
+    assert.equal(await fs.readFile(file, "utf8"), "external\n");
+    await vfs.read(file, {forWrite:true});
+    await assert.rejects(vfs.write(linked, "still clobbered\n"), /write conflict/);
+    await vfs.read(file);
+    await vfs.write(linked, "explicitly refreshed\n");
+    assert.equal(await fs.readFile(file, "utf8"), "explicitly refreshed\n");
+  }
+});
+
+it("retargeted aliases cannot redirect observed or staged writes", async () => {
+  const root = await scratch();
+  const first = path.join(root, "first"), second = path.join(root, "second");
+  await fs.mkdir(first);
+  await fs.mkdir(second);
+  await fs.writeFile(path.join(first, "state.txt"), "same bytes");
+  await fs.writeFile(path.join(second, "state.txt"), "same bytes");
+
+  for (const stage of [false, true]) {
+    const alias = path.join(root, stage ? "staged" : "observed");
+    await fs.symlink(first, alias, process.platform === "win32" ? "junction" : "dir");
+    const file = path.join(alias, "state.txt"), vfs = new CausalVfs();
+    await vfs.read(file);
+    vfs.begin();
+
+    if (stage) await vfs.write(file, "must not publish");
+    await fs.rename(alias, alias + "-old");
+    await fs.symlink(second, alias, process.platform === "win32" ? "junction" : "dir");
+
+    if (stage) await vfs.read(file);
+    await assert.rejects(stage ? vfs.commit() : vfs.write(file, "must not publish"), /write conflict/);
+    vfs.rollback();
+    assert.equal(await fs.readFile(path.join(first, "state.txt"), "utf8"), "same bytes");
+    assert.equal(await fs.readFile(path.join(second, "state.txt"), "utf8"), "same bytes");
+    await vfs.read(file);
+    await vfs.write(file, "explicit refresh");
+    assert.equal(await fs.readFile(path.join(second, "state.txt"), "utf8"), "explicit refresh");
+    await fs.writeFile(path.join(second, "state.txt"), "same bytes");
+  }
+});
+
+it("filesystem identity rejects concurrent aliases before they can replace an overlay", async () => {
+  const root = await scratch(), real = path.join(root, "real"), alias = path.join(root, "alias");
+  await fs.mkdir(real);
+  await fs.symlink(real, alias, process.platform === "win32" ? "junction" : "dir");
+  const file = path.join(real, "state.txt"), linked = path.join(alias, "state.txt");
+  await fs.writeFile(file, "original");
+  const vfs = new CausalVfs();
+  vfs.begin();
+  const resolvePath = vfs.resolvePath.bind(vfs);
+  let arrivals = 0, release;
+  const admitted = new Promise(resolve => { release = resolve; });
+  // Both writers reach the pre-stage point before either begins signing bytes.
+  vfs.resolvePath = async target => {
+    const canonical = await resolvePath(target);
+
+    if (++arrivals === 2) release();
+    await admitted;
+
+    return canonical;
+  };
+
+  const outcomes = await Promise.allSettled([vfs.write(file, "first"), vfs.write(linked, "second")]);
+  assert.equal(outcomes.filter(outcome => outcome.status === "fulfilled").length, 1);
+  assert.match(outcomes.find(outcome => outcome.status === "rejected").reason.message, /conflicting write aliases/);
+  const staged = await vfs.read(file);
+  assert.equal(await vfs.read(linked), staged);
+  assert.equal(await fs.readFile(file, "utf8"), "original");
+  await vfs.commit();
+  assert.equal(await fs.readFile(file, "utf8"), staged);
+});

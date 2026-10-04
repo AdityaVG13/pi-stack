@@ -16,7 +16,7 @@ import { SeenLedger } from "../context/ledger.js";
 import { CausalVfs, resolveCommitTarget } from "../fs/vfs.js";
 import { resolveWorkspacePath, runCommand, clearPathCache, relativeSlash } from "../fs/workspace.js";
 import { createNativeAdapters } from "../adapters/index.js";
-import { resultDiff, boundedWriteDiff, writeSnapshot } from "../fs/text-ops.js";
+import { resultDiff, boundedWriteDiff, writeSnapshot, resolveReadPath } from "../fs/text-ops.js";
 
 export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedger, budget, terminalIdentity }) {
   const index = registry?.index ?? new WorkspaceIndex((argv, opts) => runCommand(argv, opts));
@@ -26,6 +26,8 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     index.invalidate();
     notifyWorkspaceChanged(paths);
   }, target => resolveWorkspacePath(getCwd(), target, "commit", false, true), assertSession);
+
+  vfs.bestEffort = true;
 
   const executors = registry?.executors ?? new Map();
   const definitions = registry?.definitions ?? new Map();
@@ -41,6 +43,8 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
   let activeSignal = undefined;
   let trace = [];
   const readFiles = new Set();
+  // Write protection is independent of optional, bounded disk-read receipts.
+  const openedPaths = new Set();
   let callListener = null;
   const scheduler = createNativeScheduler();
 
@@ -65,6 +69,68 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     for (const file of raw?.[READ_FILES] ?? []) {
       if (readFiles.size === 256) break;
       readFiles.add(file);
+    }
+  }
+
+  async function fileIdentities(input, existingOnly = false) {
+    if (!isString(input)) return [];
+    let logical;
+
+    try { logical = resolveReadPath(getCwd(), input); }
+    catch { return existingOnly ? [] : [input]; }
+
+    let canonical;
+
+    try { canonical = await vfs.resolvePath(logical, false); }
+    catch {
+      if (existingOnly && await vfs.getOverlay(logical) === undefined) return [];
+      canonical = await vfs.resolvePath(logical).catch(() => logical);
+    }
+
+    // Captured tools can serve virtual paths; retain lexical identity too.
+    // This is path-based protection, not an inode lease or cross-process lock.
+    return logical === canonical ? [logical] : [logical, canonical];
+  }
+
+  function readPaths(args, result) {
+    const paths = [];
+
+    // A resolved missing-file probe must not forbid creation. Actual source
+    // provenance also covers staged files that do not exist on disk yet.
+    if (args?.query === undefined && args?.evidence !== true && isString(args?.path)) paths.push({path:args.path,existingOnly:args.resolve===true});
+
+    if (isString(result.sourcePath)) paths.push({path:result.sourcePath,existingOnly:false});
+
+    return paths;
+  }
+
+  async function rememberOpenedPaths(args, result) {
+    if (result.streamed) return;
+
+    const paths = Array.isArray(args?.path) && Array.isArray(result.items)
+      ? args.path.flatMap((input, i) => result.itemErrors?.[i] ? [] : readPaths({...args,path:input},{sourcePath:result.sourcePaths?.[i]}))
+      : result.ok ? readPaths(args, result) : [];
+
+    const unique = new Map();
+
+    for (const entry of paths) {
+      if (!unique.has(entry.path) || !entry.existingOnly) unique.set(entry.path, entry);
+    }
+
+    const entries = [...unique.values()];
+
+    for (let i = 0; i < entries.length; i += 8) {
+      await Promise.all(entries.slice(i, i + 8).map(async entry => {
+        for (const identity of await fileIdentities(entry.path, entry.existingOnly)) openedPaths.add(identity);
+      }));
+    }
+  }
+
+  async function assertUnreadWrite(args) {
+    if (args?.replace === true || args?.append === true || !openedPaths.size) return;
+
+    if ((await fileIdentities(args?.path)).some(identity => openedPaths.has(identity))) {
+      throw new Error("file was already read this program; use edit(oldText, newText) or edit(view, ...). write({path,content,replace:true}) replaces anyway");
     }
   }
 
@@ -113,6 +179,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     callCount = 0;
     trace = [];
     readFiles.clear();
+    openedPaths.clear();
     // Files may change between programs (editor, git); never serve a stale run.
     vfs.invalidateObserved();
     clearPathCache();
@@ -218,6 +285,7 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
 
   async function invokeNative(target, args, record, onItem) {
     assertSession();
+    vfs.bindMutationRecord(record);
     const res = await target.native(target.argvOwned ? { ...args, args: args.args.map(String) } : args || {}, activeSignal, onItem);
     completeRecord(record, res);
 
@@ -237,7 +305,9 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     assertCallableTarget(name);
 
     if (!isCallable(name)) throw new Error(unknownToolMessage(name, [...definitions.keys(), ...Object.keys(natives)].filter(isCallable)));
+
     // Refused calls are free: only charge the budget once a target will run.
+    if (name === "write") await assertUnreadWrite(args);
     chargeCallBudget();
 
     const command = { apply_patch: "edit", surface: "read", evidence: "read", snap: "read" }[name] ?? name;
@@ -289,17 +359,21 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
 
     const deliver = onItem ? async (index, raw) => {
       const result = packageResult(raw);
+
+      if (name === "read") await rememberOpenedPaths({...args,path:args.path[index]}, result);
       await onItem(index, result);
       rememberReads(raw, result);
     } : undefined;
 
-    const invoke = async () => {
+    const invoke = () => vfs.withPathScope(async () => {
       const raw = await invokeRaw(name, args, deliver);
       const result = packageResult(raw);
+
+      if (name === "read") await rememberOpenedPaths(args, result);
       rememberReads(raw, result);
 
       return result;
-    };
+    });
 
     const kind = isMutatingTool(name, config, args, definitions.get(name)) ? "write" : "read";
 
@@ -315,8 +389,6 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     isCallable,
     externalNames,
     supportsBatchRead: () => !hostTool("read") && (tools.modern || !executors.has("read")),
-    // Windows command shims need shell handling; preserve the existing route there.
-    supportsNativeArgv: () => process.platform !== "win32" && !hostTool("bash") && (tools.modern || !executors.has("bash")),
     summarizeEdit: (target, before, after, diff) => hooks.summarizeEdit(getCwd(), target, before, after, diff),
     invalidateFiles() { vfs.invalidateObserved(); index.invalidate(); clearPathCache(); },
     describeMemory() {
@@ -362,7 +434,14 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
     async commitSpeculation() {
       assertSession();
 
+      const depth = vfs.getOverlayDepth();
       const result = await vfs.commit();
+
+      for (const record of trace) {
+        if (record.mutationState !== "pending" || record.mutationDepth < depth) continue;
+        record.mutationState = result.depth <= 1 ? "saved" : "pending";
+        record.mutationDepth = result.depth;
+      }
 
       // The outer success commit follows guest completion/delivery. Checkpoint
       // merges and failed programs must not publish provisional read credit.
@@ -375,7 +454,12 @@ export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedg
       return result;
     },
     rollbackSpeculation() {
+      const depth = vfs.getOverlayDepth();
       const result = vfs.rollback();
+
+      for (const record of trace) {
+        if (record.mutationState === "pending" && record.mutationDepth >= depth) record.mutationState = vfs.mutations.recoveryFailed ? "uncertain" : "rolled back";
+      }
 
       if (vfs.getOverlayDepth() === 0) readFiles.clear();
 

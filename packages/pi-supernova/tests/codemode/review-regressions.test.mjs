@@ -138,7 +138,7 @@ it("large staged focus includes the last character of an unterminated line", asy
 
 it("large staged focus reports a matching window that exceeds its budget", async t => {
   const f = await engineFixture(t);
-  const result = await f.execute('await write("focus.log", "noise\\n".repeat(90000)+"quasar".repeat(6000)+"\\n"); return await read("focus.log", {about:"quasar"});');
+  const result = await f.execute('return (await edit(async()=>{await write("focus.log", "noise\\n".repeat(90000)+"quasar".repeat(6000)+"\\n"); return await read("focus.log", {about:"quasar"});})).value;');
   assert.match(result.details.result, /matching text exceeds view budget/);
   assert.match(result.details.result, /90001/);
   assert.doesNotMatch(result.details.result, /no matching/);
@@ -243,7 +243,7 @@ it("additional: new-file symlink aliases cannot silently overwrite one another",
   const f = await engineFixture(t);
   await fs.mkdir(path.join(f.root, "real"));
   await fs.symlink(path.join(f.root, "real"), path.join(f.root, "alias"), "junction");
-  await assert.rejects(f.execute('await write("real/new.txt","first"); await write("alias/new.txt","second");'), /conflicting write aliases/);
+  await assert.rejects(f.execute('await edit(async()=>{await write("real/new.txt","first"); await write("alias/new.txt","second");});'), /conflicting write aliases/);
   await assert.rejects(fs.access(path.join(f.root, "real/new.txt")), {code:"ENOENT"});
   assert.equal((await fs.lstat(path.join(f.root, "alias"))).isSymbolicLink(), true);
 });

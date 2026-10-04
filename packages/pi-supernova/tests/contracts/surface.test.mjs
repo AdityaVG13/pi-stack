@@ -72,7 +72,7 @@ it("external outlines follow read-only path semantics without granting mutations
   assert.deepEqual(result.details.result.alias, result.details.result.external);
 
   await assert.rejects(f.tool.execute("external-edit-denied", {
-    code: 'await write("pending.txt","pending"); await read({path:data.file,outline:true}); await edit(data.file,"42","99");',
+    code: 'await edit(async()=>{await write("pending.txt","pending"); await read({path:data.file,outline:true}); await edit(data.file,"42","99");});',
     data: { file },
   }, undefined, undefined, { cwd: f.root }), /escapes workspace/);
   await assert.rejects(fs.stat(path.join(f.root, "pending.txt")), { code: "ENOENT" });

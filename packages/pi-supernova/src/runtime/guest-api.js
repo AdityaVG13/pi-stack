@@ -200,7 +200,10 @@ function formatBashFailure(command, res) {
 }
 
 function markTruncatedOutput(res, text) {
-  if (res?.truncated && isString(text) && !text.includes("truncated")) return text + "\n…[output truncated]…";
+  // A literal word such as a variable name is not a truncation disclosure.
+  const marker = "…[output truncated]…";
+
+  if (res?.truncated && isString(text) && !text.endsWith(marker)) return text + "\n" + marker;
 
   return text;
 }

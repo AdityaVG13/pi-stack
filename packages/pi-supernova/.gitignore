@@ -1,0 +1,5 @@
+node_modules/
+*.tgz
+.supernova-perf/
+tests/efficiency/shared-runtime-spike.mjs
+tests/helpers/shared-runtime.mjs

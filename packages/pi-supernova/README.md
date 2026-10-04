@@ -14,51 +14,23 @@ transactional file operations, batching, bounded results and the grouped nova UI
 There is no `supernova` object inside a program: use `await bash(...)`, not
 `const { bash } = supernova`. Do not shadow the four command names with variables.
 
-## What is new in 0.11.0
+## Contents
 
-- Pi 0.99+ nested execution uses the current host invocation and its permissions;
-  optional `indexed:true` source lookup opens owned, editable source bytes.
-- Final commit deadlines, concurrent filesystem reads and atomic publication
-  keep transaction outcomes explicit under cancellation and contention.
-- Compact Nova cards retain successful call rows without source/JSON clutter;
-  Unicode layout reuse and dense-line scans reduce measured local costs.
-- Command capture, write options, JSON selectors and edit diagnostics fix
-  session-derived failures without weakening exact-match or workspace guards.
-- Image decoders retain ownership until close; repeated errors, watchdogs and
-  failed retries remain fail-closed. Background output preserves code points.
-
-### Previous release: 0.10.2
-
-- Results print the `mutations:` line only when it informs: files committed or
-  rolled back, an uncertain filesystem outcome, or shell side effects left behind
-  by a failed program. It had appeared on most results, usually all zeros.
-- Clearer guest errors: naming a variable after a command (`const read = await
-  read(...)`) says so, `supernova(...)` inside a program says to call the
-  commands directly, and an empty `oldText` explains how to insert.
-
-Earlier releases: [changelog](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/CHANGELOG.md).
-
-## Tokens: native tool calls vs Supernova
-
-Fixed 13-program workload (inspect, reproduce, repair, verify; JSON report update;
-five-term audit), full tool-history replay, `js-tiktoken`. Regenerate with
-`npm run test:tokens --prefix packages/pi-supernova`.
-
-| Workload | Tokenizer | Without Supernova batching | Through Supernova 0.10.2 | Reduction |
-|---|---|---:|---:|---:|
-| Mixed 13-program workload | o200k_base | 28,130 | 9,631 | **65.8%** |
-| | cl100k_base | 27,841 | 9,476 | **66.0%** |
-| 16 programs, shared source + data (32 files) | o200k_base | 17,771 | 3,559 | **80.0%** |
-| | cl100k_base | 17,595 | 3,493 | **80.1%** |
-| 8 programs sharing a 48-path input | o200k_base | 16,309 | 5,471 | **66.5%** |
-| | cl100k_base | 14,649 | 5,157 | **64.8%** |
-| Standing tool definition per request | o200k_base / cl100k_base | 908 / 901 | 617 / 606 | 32.0% / 32.7% |
-
-All rows deliver identical complete outputs and files; only call and argument
-placement change. The baseline is a frozen non-batched snapshot, not a separate
-product. Excludes provider envelopes, unrelated conversation, reasoning tokens and
-caching; no model-quality claim. Method and speed measurements:
-[TOKEN_COSTS.md](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/TOKEN_COSTS.md).
+1. [Install and update](#install-and-update)
+2. [Four guest commands](#four-guest-commands)
+3. [Tokens: native tool calls vs Supernova](#tokens-native-tool-calls-vs-supernova)
+4. [TUI presentation](#tui-presentation)
+5. [Background terminal sessions](#background-terminal-sessions)
+6. [JSON reports and targeted text audits](#json-reports-and-targeted-text-audits)
+7. [Execution and automatic batching](#execution-and-automatic-batching)
+8. [Context, caching and failure fidelity](#context-caching-and-failure-fidelity)
+9. [Optional workspace change notifications](#optional-workspace-change-notifications)
+10. [Security and host boundary](#security-and-host-boundary)
+11. [Development and evidence](#development-and-evidence)
+12. [Research and prior art](#research-and-prior-art)
+13. [Release notes](#release-notes)
+14. [Limits](#limits)
+15. [License](#license)
 
 ## Install and update
 
@@ -205,7 +177,14 @@ not as an absent match. Do not combine incompatible modes such as `outline:true`
 and `evidence:true`.
 
 Ordinary reads stay self-contained. Outlines and graph evidence remain explicit
-options, not mandatory stages of source resolution. Focused outlines collect
+options, not mandatory stages of source resolution. An exact declaration-name
+`about` query expands matching declarations ahead of enclosing keyword-heavy
+scopes; this also preserves identifiers such as `get` that are prose stop words.
+Other questions retain relevance ranking, and folded declarations keep line-based
+recovery guidance. If the view exceeds its budget, expanded bodies appear before
+the folded declaration map with their original source line numbers; clipped
+navigation is explicitly disclosed. Views that fit retain source order.
+Focused outlines collect
 lexical caller hints for all expanded declarations in one workspace scan. The
 per-name order and counts are preserved, staged callers stay visible, and the
 matching-row snapshot lives only for that outline. Existing index cache rules
@@ -295,7 +274,16 @@ full dataflow tracking or a security sandbox.
 Read/modify/write conflict checks retain a signature of the actual disk bytes,
 including for empty windows, partial and large-file reads. A fresh explicit text read refreshes
 that observation; internal receipt reads and body-cache eviction do not. Commits
-reject changed content and conflicting symlink aliases, including new file paths.
+reject changed content; explicit checkpoints also reject conflicting symlink aliases,
+including new file paths.
+Overlays, read observations and commits share canonical filesystem identity:
+reading through another symlink spelling sees staged bytes, including in directory
+listings and source queries. A retargeted observed or staged path conflicts rather
+than redirecting a write. Internal edit/patch reads do not refresh that observation.
+Logical paths remain in receipts. Identity lookups are shared only within one
+native operation; the next operation and commit resolve them afresh. Missing paths
+canonicalize their existing ancestors; case/Unicode collisions between new names
+are checked by the filesystem at publication, not guessed by case folding.
 These checks do not provide a cross-process lock or make shell/import mutations
 transactional. Extensionless filenames also support `complete:true`, for example
 `read({path:"LICENSE",complete:true})`.
@@ -434,17 +422,23 @@ arguments do not authorize result deduplication or context rewriting. Existing
 programs that depend on whole-input replacement keep that behavior unless the
 caller explicitly requests `mergeData:true`.
 
-The batch stops on the first failed entry, cancellation/deadline, or exhausted
-image budget. Display-text and console-log clipping do not stop execution or mark
+Independent batch entries continue after ordinary failures, including in sequential
+mode. Cancellation/deadline, exhausted shared call/image budgets, or an uncertain
+filesystem outcome stop remaining work. Display-text and console-log clipping do not stop execution or mark
 a successful batch failed; clipped logs set `details.logTruncated` and carry a
-bounded warning. Earlier successful commits remain; only the active
-program's uncommitted writes roll back. Admission errors throw before any program.
-Execution failures return a **typed stop report**, rather than throwing away prior
+bounded warning. Completed edit/write steps remain saved; only an active explicit
+checkpoint's uncommitted writes roll back. Admission errors throw before any program.
+Execution failures return a **typed partial/stop report**, rather than throwing away prior
 results/images. A `tool_result` hook also projects the error flag into Pi, which
 otherwise treats a resolved tool call as successful. `isError` and `details.ok`
 identify failure, `details.programs` contains
-every attempted result, and details.attempted/total identifies unstarted work.
-Single code/file invocations retain their existing throwing behavior.
+every attempted result with its zero-based `details.programIndex`.
+`details.failedPrograms` and `details.notRunPrograms` identify exactly what needs
+attention; `details.attempted/total` gives the counts. Single code/file invocations
+still throw on uncaught errors, but saved edits are listed in the error and
+`details.savedPaths`. Do not repeat them. Arbitrary dependent JavaScript cannot
+be resumed after an uncaught exception; split independent work into `programs`
+or use `Promise.allSettled` for independent commands.
 
 Set `parallel: true` with `programs` to run independent entries concurrently
 (up to 8 at once). Each still gets a fresh guest and its own commit; results stay
@@ -483,7 +477,7 @@ also accepts `append`, `replace`, and `allowReadArtifacts` boolean flags. Unknow
 options and mixed object/positional signatures reject; options never override the
 path or content arguments. Append uses the complete internal
 file buffer, never a bounded model-facing read; it retains conflict checks and
-per-program rollback. Missing files are created. Multiple invocations are not
+explicit-checkpoint rollback. Missing files are created. Multiple invocations are not
 one atomic transaction: for an all-or-nothing publication, assemble a new staging
 file and publish it only when complete. External write overrides reject append.
 
@@ -514,7 +508,8 @@ on the final file. After a completed flush, cancellation keeps the committed fil
 but prevents the pending external command from starting; those versions are not
 reported as rolled back.
 Cancellation is reported separately from timeout; neither triggers a retry.
-Progress files survive shell execution but staged VFS writes may roll back.
+Progress files and completed edit/write steps survive later failures; active explicit
+checkpoint writes may roll back.
 Termination is a hard stop: guest `catch`/`finally` cleanup is not guaranteed to run.
 On macOS/Linux, foreground and background commands share process-group cleanup:
 normal leader exit, cancellation and timeout retire ordinary descendants before
@@ -537,6 +532,15 @@ valid Unicode and newlines. This
 does not shorten values inside the guest or create resumable artifact handles.
 Select fields and array windows before returning, rather than parsing a truncated
 preview; read explicit file windows when you need complete source.
+
+## Tokens: native tool calls vs Supernova
+
+0.11.0 keeps complete results: committed native edits and writes stay, independent `programs` continue after ordinary errors, and `indexed:true` opens owned source.
+Source and result text are not compressed; the remaining lever is the standing definition (645 / 633 tokens on o200k_base / cl100k_base).
+Fixed 13-program replay (`js-tiktoken` 1.0.21): 28,130 -> 9,819 tokens on o200k_base (65% less than unbatched). Shared source and data, 16 programs, one model call: 17,771 -> 3,487 (80%).
+Eight programs sharing a 48-path input: 16,309 -> 5,527 (66%). Same six-call schedule versus `d444eb7`: 18,535 -> 9,819 (47%).
+Local 8-file worker, Apple M5 Max, Node 22.23.3: unbatched cold p95 19.7 ms (8 bridge calls); coalesced pristine-warm p95 3.1 ms (1 call).
+Method, both encodings, and limits: [TOKEN_COSTS.md](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/TOKEN_COSTS.md).
 
 ## TUI presentation
 
@@ -661,7 +665,6 @@ return await bash({action:"list"});
   override is rejected rather than silently ignoring background options or
   bypassing the override's permissions.
 
-
 ## JSON reports and targeted text audits
 
 For JSON, select fields inside the read adapter, **before** output budgeting:
@@ -710,7 +713,7 @@ Uncaught read errors abort the program, including `return {a:await read(...),
 b:await read(...)}`; earlier successful values are not an implicit partial return.
 For optional sources, explicitly return `await Promise.allSettled(paths.map(path =>
 read(path)))`. This keeps successful text and per-path errors without weakening
-rollback for uncaught failures.
+explicit checkpoint rollback. Completed edits outside a checkpoint remain saved.
 
 Other read options, even false-valued flags, do not bypass a captured external
 read executor; its policy, transforms and failures remain authoritative.
@@ -766,9 +769,13 @@ and non-yielding code can prevent sampling until it reaches a command or returns
 The outer deadline still terminates non-yielding workers. This is not a hard
 process-memory or security boundary.
 
-File changes are staged until program success. A throw before an external-mutation
-barrier rolls them back. Shell execution flushes preceding changes; external shell
-side effects cannot be rolled back. Stale commits fail explicitly rather than
+Each successful `edit` or `write` command publishes its changes before returning.
+A later failed command, returned-image error, or uncaught exception does not undo
+those saved steps. A single multi-replacement `edit({path,edits:[...]})` is still one
+atomic step: its replacements use original coordinates and must all validate.
+Use separate commands or independent `programs` for best-effort work; use an explicit
+checkpoint when the changes must succeed together. Shell execution flushes any
+pending changes; external shell side effects cannot be rolled back. Stale commits fail explicitly rather than
 silently overwriting successful concurrent changes. New files use atomic
 no-clobber publication, so filesystem-equivalent names and destinations created
 during staging conflict rather than replace existing data. This requires hard-link
@@ -778,14 +785,14 @@ and before atomic replacement. These checks are not a cross-process filesystem
 lock. Outcomes explicitly report
 committed/rolledBack **file versions**
 (counted per flush/checkpoint, not unique paths) and external-call attempts. A
-successful inner checkpoint merges into the program, not necessarily onto disk.
+successful explicit checkpoint publishes the group together before returning.
 Recovery checks destinations against the bytes this transaction published before
 restoring or removing them. Detected intervening changes remain intact, and any
 original backup is retained. Pending commits or failed recovery are reported as
 uncertain: inspect disk and recovery backups before retrying. Import-based mutations and shell side effects
 are outside the VFS counters; this is not a filesystem audit.
 
-`edit(async () => {...})` creates a nested filesystem checkpoint. It returns
+`edit(async () => {...})` creates an explicit atomic filesystem checkpoint. It returns
 `{ok:true,committed:true,value}` on success. On failure it rolls back and rethrows
 the cause, so an ignored failed checkpoint cannot report program success. Use
 `try { await edit(async () => {...}); } catch (error) {...}` for deliberate recovery.
@@ -794,9 +801,8 @@ checkpoints, and concurrent commands outside the active callback are rejected.
 Await the checkpoint before running shell checks. A checkpoint cannot roll back
 external shell effects. For a temporary mutation test, save the original text,
 edit and run the check outside a checkpoint, then explicitly restore it. Catch
-the check failure, restore, and let that program succeed so the restoration
-commits before reporting the failure. A `finally` restoration followed by an
-uncaught error is only staged and rolls back too. Keep a backup: cancellation
+the check failure and restore before reporting it. A completed `finally` restoration
+outside a checkpoint stays saved even if the program subsequently throws. Keep a backup: cancellation
 or a worker deadline can prevent cleanup from running.
 
 ## Context, caching and failure fidelity
@@ -1076,15 +1082,45 @@ an additional model call are not silently invoked by the tools.
 
 | Work | What we use it for | Where |
 |------|--------------------|-------|
-| **Zero-Mem: Zero-Token Memory Operations for LLM Agents**, Xiao, Zhu, Zhang, Chen, Hong, Zhuang, Zhang, Chen, Ouyang, Ren, Huang (arXiv:2607.29377) | Evidence selection: entity–context graph with co-occurrence weights (eq. 3–4), turn/window/episode hierarchy as line/span/file (eq. 5, 11), query profile and relational/local routing (eq. 6–7), lexical entity alignment and one propagation step (eq. 8–9), personalized PageRank over spans (eq. 10), per-view normalisation and ρ-weighted fusion (eq. 12–13), closure with bridges and neighbours (eq. 14), deterministic calibration (eq. 15). Top-K = 5 follows the paper's Top-5 ≈ Top-10 finding. | `src/context/evidence.js` |
+| **Zero-Mem: Zero-Token Memory Operations for LLM Agents**, Xiao, Zhu, Zhang, Chen, Hong, Zhuang, Zhang, Chen, Ouyang, Ren, Huang (arXiv:2607.29377) | Evidence selection: entity-context graph with co-occurrence weights (eq. 3-4), turn/window/episode hierarchy as line/span/file (eq. 5, 11), query profile and relational/local routing (eq. 6-7), lexical entity alignment and one propagation step (eq. 8-9), personalized PageRank over spans (eq. 10), per-view normalisation and ρ-weighted fusion (eq. 12-13), closure with bridges and neighbours (eq. 14), deterministic calibration (eq. 15). Top-K = 5 follows the paper's Top-5 ≈ Top-10 finding. | `src/context/evidence.js` |
 | **Agent Zero Memory: Provenance-Aware Long-Term Memory for LLM Agents**, Zhu, Wu (arXiv:2608.29606) | Every returned unit carries provenance (path, line range, verbatim text); the L0→L1→L2 read discipline (`read(query)` → `read(path, {about})` → `read(path, offset, limit)`); the citation-lock idea that a model should only cite what it actually opened. | `src/context/evidence.js`, `src/context/outline.js`, tool guidance |
 | **Harness-of-Harness: Multi-Day Autonomous Software Development with Continual Improvement**, Yan, Su, et al. (arXiv:2609.01481) | Progressive disclosure (index first, detail on demand) and carrying evidence forward instead of reconstructing it from code. | outline / result shaping |
 | **Act More, Decide Less: Skill-Guided Adaptive Action Chunking for Long-Horizon LLM Agents**, Yang, Jin, Zhao, et al. (arXiv:2609.02042) | Framing: one supernova program is an action chunk (one model decision, many primitive actions, stop at the first failing one). | runtime design |
-| **fff**, Dmitriy Kovalenko, MIT, <https://github.com/dmtrKovalenko/fff> | File search. We reimplemented fff's ranking in plain JavaScript after reading its Rust sources (`crates/fff-core/src/score.rs`, `dbs/frecency.rs`, `path_utils.rs`); the formulas and constants are fff's, the code is ours, and nothing runs out of process. Bounded fuzzy filename hints now run automatically for unmatched bare source names, using in-memory frecency and directory distance without extra filesystem probes. The full internal search implementation also retains typo-tolerant fuzzy path matching with boundary/consecutive/case bonuses; smart-case; exact-filename +40% and filename +20% bonuses; frecency boost `base·f/100` with fff's AI-mode decay (3-day half-life, 7-day window) and modification-recency steps (30s/5m/15m/1h/4h); git-modified +15%; directory-distance penalty from the current file (−1 per hop, floor −20); definition-first result hinting; fuzzy fallback on zero literal matches; weak-match cutoff; watcher-driven index refresh. Git/mtime boosts and full indexed grep are not mandatory stages of ordinary reads. Not ported: fff's SIMD/frizbee matcher (ours is an fzf-style greedy match with backward tightening), LMDB persistence (frecency is per session), and the MCP/Neovim surfaces. | `src/context/fuzzy.js`, `src/context/repo-index.js`, `src/bridge/host-bridge.js` |
+| **fff**, Dmitriy Kovalenko, MIT, <https://github.com/dmtrKovalenko/fff> | File search. We reimplemented fff's ranking in plain JavaScript after reading its Rust sources (`crates/fff-core/src/score.rs`, `dbs/frecency.rs`, `path_utils.rs`); the formulas and constants are fff's, the code is ours, and nothing runs out of process. Bounded fuzzy filename hints now run automatically for unmatched bare source names, using in-memory frecency and directory distance without extra filesystem probes. The full internal search implementation also retains typo-tolerant fuzzy path matching with boundary/consecutive/case bonuses; smart-case; exact-filename +40% and filename +20% bonuses; frecency boost `base·f/100` with fff's AI-mode decay (3-day half-life, 7-day window) and modification-recency steps (30s/5m/15m/1h/4h); git-modified +15%; directory-distance penalty from the current file (-1 per hop, floor -20); definition-first result hinting; fuzzy fallback on zero literal matches; weak-match cutoff; watcher-driven index refresh. Git/mtime boosts and full indexed grep are not mandatory stages of ordinary reads. Not ported: fff's SIMD/frizbee matcher (ours is an fzf-style greedy match with backward tightening), LMDB persistence (frecency is per session), and the MCP/Neovim surfaces. | `src/context/fuzzy.js`, `src/context/repo-index.js`, `src/bridge/host-bridge.js` |
 
-## License
+## Release notes
 
-MIT. fff is © Dmitriy Kovalenko and contributors, also MIT.
+- Pi 0.99+ nested execution uses the current host invocation and its permissions;
+  optional `indexed:true` source lookup opens owned, editable source bytes.
+- Final commit deadlines, concurrent filesystem reads and atomic publication
+  keep transaction outcomes explicit under cancellation and contention.
+- Compact Nova cards retain successful call rows without source/JSON clutter;
+  Unicode layout reuse and dense-line scans reduce measured local costs.
+- Command capture, write options, JSON selectors and edit diagnostics fix
+  session-derived failures without weakening exact-match or workspace guards.
+- Image decoders retain ownership until close; repeated errors, watchdogs and
+  failed retries remain fail-closed. Background output preserves code points.
+- Overlay keys, conflict signatures and commit destinations share canonical
+  filesystem identity. Logical paths stay in receipts; identity reuse is
+  call-local; commits resolve destinations afresh.
+- Successful native `edit`/`write` steps stay saved. Later read errors, failed
+  shells, invalid images or uncaught JavaScript do not undo them. Independent
+  `programs` continue after ordinary errors. `edit(async () => { ... })` and a
+  single `edits[]` replacement set remain atomic. Failed results expose
+  `details.savedPaths` and batch indices so only unsaved work is retried.
+
+### Previous release: 0.10.2
+
+- Results print the `mutations:` line only when it informs: files committed or
+  rolled back, an uncertain filesystem outcome, or shell side effects left behind
+  by a failed program. It had appeared on most results, usually all zeros.
+- Clearer guest errors: naming a variable after a command (`const read = await
+  read(...)`) says so, `supernova(...)` inside a program says to call the
+  commands directly, and an empty `oldText` explains how to insert.
+
+Earlier releases: [changelog](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-supernova/docs/CHANGELOG.md).
+
+## Limits
 
 ### Reviewed concurrency and ranking boundaries
 
@@ -1103,3 +1139,8 @@ plain reads, including absolute external references and symlinks to them.
 The outline remains bounded to a 2 MiB source read. This does not grant external
 write or edit access; those operations still require workspace admission, and
 a denied mutation rolls back pending workspace writes before a barrier.
+
+## License
+
+MIT. fff is © Dmitriy Kovalenko and contributors, also MIT.
+

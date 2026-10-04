@@ -272,11 +272,11 @@ it("an I/O safety-limit failure cancels sibling JSON reads without killing the h
   const moduleUrl = new URL("../../index.js", import.meta.url).href;
   const runtimeUrl = new URL("../../src/runtime/runtime.js", import.meta.url).href;
 
-  const program = `await write("pending.txt", "must roll back");
+  const program = `return await edit(async()=>{await write("pending.txt", "must roll back");
     return await Promise.all([
       read("oversized.txt", {complete:true}),
       ...Array.from({length:6}, () => read({path:"report.json", json:".rows[0:2]"})),
-    ]);`;
+    ]);});`;
 
   // An uncaught stream error can arrive after execute() has already rejected.
   // Keep that failure in a disposable process, and also prove the next call works.

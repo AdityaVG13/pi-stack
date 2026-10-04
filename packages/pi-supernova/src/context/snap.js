@@ -30,7 +30,7 @@ function location(candidate, root) {
 }
 
 async function spanCandidates(filePath, lines, root, overlayText, signal) {
-  const staged = overlayText(filePath);
+  const staged = await overlayText(filePath);
   const rel = relativeSlash(root, filePath);
   let text = staged;
 
@@ -62,7 +62,7 @@ async function rankedSpanCandidates(ranked, root, overlayText, signal) {
 
   for (const candidate of ranked) {
     const lines = candidate.exactLines?.size ? [...candidate.exactLines].sort((a, b) => a - b) : [candidate.line];
-    const staged = overlayText(candidate.path);
+    const staged = await overlayText(candidate.path);
     let large = false;
 
     if (staged !== undefined) large = Buffer.byteLength(staged) > 512 * 1024;

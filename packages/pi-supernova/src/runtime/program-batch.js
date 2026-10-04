@@ -24,7 +24,7 @@ export function programBatchText(results, total, stopped = "", failed = 0, texts
 
   return summary +
     (m.recoveryFailed || m.pendingCommits ? "; filesystem outcome uncertain: inspect disk" : "") + "\nresults (UTF-16 lengths):\n" + texts.map((text,i) => {
-      return "[" + i + "] " + text.length + "\n" + text + "\n";
+      return "[" + (results[i].details?.programIndex ?? i) + "] " + text.length + "\n" + text + "\n";
     }).join("");
 }
 
@@ -91,7 +91,7 @@ class ProgramBatch {
     return " (ran " + Math.round(performance.now() - this.started) + "ms of " + this.timeout + "ms)";
   }
   takeSettled(result, i) {
-    this.results.push(result);
+    this.results.push({...result,details:{...result.details,programIndex:i}});
     this.trace.push(...(result.details?.trace ?? []));
     this.collectImages(result, i);
   }
@@ -113,7 +113,9 @@ class ProgramBatch {
         const i = next++;
         settled[i] = await this.runOne(this.programs[i], i);
         this.live[i] = [];
-        this.stopped ||= this.parallelBudgetStop(settled);
+        this.stopped ||= this.parallelBudgetStop(settled) || this.sequentialStop(settled[i], i);
+
+        if (settled[i].details?.mutations?.recoveryFailed || settled[i].details?.mutations?.pendingCommits) this.controller.abort(new Error("batch stopped: filesystem outcome uncertain"));
       }
     }));
 
@@ -122,7 +124,7 @@ class ProgramBatch {
       this.takeSettled(settled[i], i);
     }
 
-    if ((!this.stopped && settled.includes(undefined)) || this.combined.aborted || performance.now() >= this.deadline) this.stopped = "batch deadline or cancellation; earlier commits remain" + this.deadlineNote();
+    if ((!this.stopped && settled.includes(undefined)) || this.combined.aborted || performance.now() >= this.deadline) this.stopped ||= "batch deadline or cancellation; earlier commits remain" + this.deadlineNote();
   }
 
   sequentialStop(result, i) {
@@ -130,7 +132,7 @@ class ProgramBatch {
 
     if (this.imageDropped) stopped = "batch image budget exceeded; remaining programs did not run";
 
-    if (result.details?.ok === false) stopped = "program " + (i+1) + " failed; remaining programs did not run; earlier commits remain";
+    if (!result.details?.mutations || result.details.mutations.recoveryFailed || result.details.mutations.pendingCommits || /host call budget exceeded/.test(result.details?.error ?? "")) stopped = "program " + (i+1) + " exhausted a shared budget or has an uncertain filesystem outcome; remaining programs did not run; earlier commits remain";
     // Text/log clipping is not an execution failure. Finish every requested
     // entry unless a real execution/resource limit stops it; delivery is bounded.
 
@@ -154,7 +156,7 @@ class ProgramBatch {
   }
 
   failNote(failed) {
-    return this.stopped || (this.parallel && failed ? failed + " program" + (failed>1?"s":"") + " failed" : undefined);
+    return this.stopped || (failed ? failed + " program" + (failed>1?"s":"") + " failed" : undefined);
   }
 
   boundedText(failed, logTruncated) {
@@ -165,7 +167,7 @@ class ProgramBatch {
 
     const limit = Math.max(0, this.config.maxReturnChars - this.imageTextChars());
     const texts = this.results.map(textOf);
-    const render = previews => programBatchText(this.results, this.programs.length, this.stopped, this.parallel ? failed : 0, previews) + (note ? "; " + note : "");
+    const render = previews => programBatchText(this.results, this.programs.length, this.stopped, failed, previews) + (note ? "; " + note : "");
     const text = render(texts);
 
     if (text.length <= limit) return { text, truncated: false };
@@ -180,21 +182,30 @@ class ProgramBatch {
   }
 
   finish() {
-    const failed = this.results.filter(result => result.details?.ok === false).length;
+    const failedPrograms = [];
+
+    for (const result of this.results) {
+      if (result.details?.ok === false) failedPrograms.push(result.details.programIndex);
+    }
+
+    const attempted = new Set(this.results.map(result => result.details.programIndex));
+    const notRunPrograms = this.programs.flatMap((_, i) => attempted.has(i) ? [] : [i]);
+    const failed = failedPrograms.length;
     const logs = this.results.flatMap(result => result.details?.logs ?? []);
     const logLimit = this.config.maxLogLines ?? 100;
     const logTruncated = logs.length > logLimit || this.results.some(result=>result.details?.logTruncated);
     const bounded = this.boundedText(failed, logTruncated);
+    const mutations = mutationTotals(this.results);
     const content = [{type:"text",text:bounded.text}];
     this.images.forEach((image,i) => content.push({type:"text",text:this.imageLabels[i]},image));
 
     // Return a typed stop report instead of throwing away earlier results/images.
     // Single-program errors retain their existing throwing behavior.
-    return {content,isError:!!this.stopped || (this.parallel && failed>0),details:{ok:!this.stopped && !(this.parallel && failed),error:this.failNote(failed),wallMs:Math.round(performance.now()-this.started),
-      programs:this.results,attempted:this.results.length,total:this.programs.length,stopped:this.stopped,parallel:this.parallel,
+    return {content,isError:!!this.stopped || failed>0,details:{ok:!this.stopped && !failed,partial:failed>0 && mutations.committed>0,error:this.failNote(failed),wallMs:Math.round(performance.now()-this.started),
+      programs:this.results,attempted:this.results.length,failed,failedPrograms,notRunPrograms,notRun:this.programs.length-this.results.length,total:this.programs.length,stopped:this.stopped,parallel:this.parallel,
       result:bounded.truncated ? bounded.text : this.results.map(result=>result.details?.result),
       returnTruncated:bounded.truncated || this.results.some(result=>result.details?.returnTruncated),
-      logTruncated,logs:logs.slice(0,logLimit),trace:this.trace,mutations:mutationTotals(this.results)}};
+      logTruncated,logs:logs.slice(0,logLimit),trace:this.trace,mutations}};
   }
 
   async run() {

@@ -2,15 +2,16 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { engineFixture, modelText } from "../helpers/engine.mjs";
+import { engineFixture, modelText, gatedExecute, GUEST_GATE_POLL } from "../helpers/engine.mjs";
 
 it("large document chunks append without round-tripping bounded reads", async t => {
   const f = await engineFixture(t);
-  const first = "λ😀\r\n".repeat(14000);
+  // Exercise the byte-based 512 KiB snapshot boundary with multibyte text.
+  const first = "λ😀\r\n".repeat(100000);
   await f.write("chunks.txt", first);
   await f.execute('await write({path:"chunks.txt",content:"tail\\n",append:true});');
   assert.equal(await fs.readFile(path.join(f.root,"chunks.txt"),"utf8"), first + "tail\n");
-  await assert.rejects(f.execute('await write({path:"chunks.txt",content:"lost",append:true}); throw Error("rollback append");'), /rollback append/);
+  await assert.rejects(f.execute('await edit(async()=>{await write({path:"chunks.txt",content:"lost",append:true}); throw Error("rollback append");});'), /rollback append/);
   assert.equal(await fs.readFile(path.join(f.root,"chunks.txt"),"utf8"), first + "tail\n");
   await assert.rejects(f.execute('await write({path:"chunks.txt",content:"…[host-result truncated 10 chars]…",append:true});'), /refusing.*truncat/i);
   await assert.rejects(f.execute('await write({path:"chunks.txt",content:"…[output truncated]…",append:true});'), /refusing.*truncat/i);
@@ -148,12 +149,12 @@ it("read, mutation, read submission order survives automatic batching", async t 
   assert.deepEqual(result.details.result, ["before", "after"]);
 });
 
-it("a failed edit set and a failed program do not install partial file changes", async t => {
+it("a failed edit set and an explicit checkpoint do not install partial file changes", async t => {
   const f = await engineFixture(t);
   await f.write("atomic.txt", "original");
   await assert.rejects(f.execute('await edit({path:"atomic.txt", edits:[{oldText:"original",newText:"changed"},{oldText:"missing",newText:"bad"}]});'), /not found/);
   assert.equal(await fs.readFile(path.join(f.root, "atomic.txt"), "utf8"), "original");
-  await assert.rejects(f.execute('await write("atomic.txt", "staged"); throw Error("rollback");'), /rollback/);
+  await assert.rejects(f.execute('await edit(async()=>{await write("atomic.txt", "staged"); throw Error("rollback");});'), /rollback/);
   assert.equal(await fs.readFile(path.join(f.root, "atomic.txt"), "utf8"), "original");
 });
 
@@ -165,7 +166,7 @@ it("plain reads reject a FIFO without waiting for a writer", {skip:process.platf
 
 it("image reads reject staged non-images and FIFOs", {skip:process.platform === "win32"}, async t => {
   const f = await engineFixture(t);
-  await assert.rejects(f.execute('await write("staged.png","png-data"); return await read("staged.png");'), /invalid image.*staged.png.*signature/);
+  await assert.rejects(f.execute('return await edit(async()=>{await write("staged.png","png-data"); return await read("staged.png");});'), /invalid image.*staged.png.*signature/);
   await assert.rejects(fs.stat(path.join(f.root,"staged.png")),{code:"ENOENT"});
   await f.execute('await bash("mkfifo fifo.png");');
   await assert.rejects(f.execute('return await read("fifo.png");'), /regular file/);
@@ -225,8 +226,9 @@ it("corrupt PNGs fail before shell/commit or model delivery and leave the host u
     assert.match(error.message,/invalid PNG.*IDAT.*checksum/);
     assert.match(error.message,/no image attached/);
     assert.equal(error.supernovaResult.content.some(block=>block.type==="image"),false);
-    assert.equal(error.supernovaResult.details.mutations.committed,0);
-    assert.equal(error.supernovaResult.details.mutations.rolledBack,1);
+    assert.equal(error.supernovaResult.details.mutations.committed,1);
+    assert.equal(error.supernovaResult.details.mutations.rolledBack,0);
+    assert.equal(error.supernovaResult.details.mutations.external,0);
 
     return true;
   };
@@ -236,7 +238,7 @@ it("corrupt PNGs fail before shell/commit or model delivery and leave the host u
     code:'await write("pending.txt","not committed"); return {nested:data};',
     data:{type:"image",mimeType:"image/png",data:corrupt},
   },undefined,undefined,{cwd:f.root}),noImages);
-  await assert.rejects(fs.stat(path.join(f.root,"pending.txt")),{code:"ENOENT"});
+  assert.equal(await fs.readFile(path.join(f.root,"pending.txt"),"utf8"),"not committed");
   assert.equal((await fs.readFile(path.join(f.root,"corrupt.png"))).toString("base64"),corrupt);
   assert.equal((await f.execute('return "still usable";')).details.result,"still usable");
 });
@@ -255,8 +257,9 @@ for (const [extension,mimeType,base64] of [
     const noImages = error => {
       assert.match(error.message,/image|PNG|JPEG|GIF|WebP/);
       assert.equal(error.supernovaResult.content.some(block=>block.type==="image"),false);
-      assert.equal(error.supernovaResult.details.mutations.committed,0);
-      assert.equal(error.supernovaResult.details.mutations.rolledBack,1);
+      assert.equal(error.supernovaResult.details.mutations.committed,1);
+      assert.equal(error.supernovaResult.details.mutations.rolledBack,0);
+      assert.equal(error.supernovaResult.details.mutations.external,0);
 
       return true;
     };
@@ -265,7 +268,7 @@ for (const [extension,mimeType,base64] of [
     await assert.rejects(f.tool.execute("undecodable-return",{
       code:'await write("pending.txt","discard"); return data;',data:{type:"image",mimeType,data:base64},
     },undefined,undefined,{cwd:f.root}),noImages);
-    await assert.rejects(fs.stat(path.join(f.root,"pending.txt")),{code:"ENOENT"});
+    assert.equal(await fs.readFile(path.join(f.root,"pending.txt"),"utf8"),"discard");
   });
 }
 
@@ -280,7 +283,7 @@ it("returned image base64 rejects invalid characters instead of decoding them pe
 
     return true;
   });
-  await assert.rejects(fs.stat(path.join(f.root,"pending.txt")),{code:"ENOENT"});
+  assert.equal(await fs.readFile(path.join(f.root,"pending.txt"),"utf8"),"discard");
 });
 
 it("image validation preserves valid static and animated bytes in every supported format", async t => {
@@ -316,7 +319,7 @@ it("decoded pixel budget rejects oversized images before allocating a full raste
   const {default:sharp} = await import("sharp");
   const bytes = await sharp({create:{width:8001,height:4000,channels:3,background:"red"}}).png().toBuffer();
   await f.write("oversized.png",bytes);
-  await assert.rejects(f.execute('await write("pending.txt","discard"); return await read("oversized.png");'),/pixel limit|32000000|32 MP/i);
+  await assert.rejects(f.execute('return await edit(async()=>{await write("pending.txt","discard"); return await read("oversized.png");});'),/pixel limit|32000000|32 MP/i);
   await assert.rejects(fs.stat(path.join(f.root,"pending.txt")),{code:"ENOENT"});
 });
 
@@ -407,7 +410,7 @@ it("image decoder watchdog fails closed and permits a subsequent decode", async 
   try {
     for (injectError of [false,true]) {
       watchdog = false;
-      await assert.rejects(f.execute('await write("pending.txt","discard"); return await read("watchdog.png");'),/image decoding exceeded 5000 ms/);
+      await assert.rejects(f.execute('return await edit(async()=>{await write("pending.txt","discard"); return await read("watchdog.png");});'),/image decoding exceeded 5000 ms/);
       assert.equal(watchdog,true);
       await assert.rejects(fs.stat(path.join(f.root,"pending.txt")),{code:"ENOENT"});
     }
@@ -537,4 +540,46 @@ it("decoder errors retain raster ownership until the child closes and do not poi
   finally { missing.mock.restore(); }
 
   await validateImageBytes(images[2],"image/png","spawn failure retry");
+});
+
+
+it("append preserves the earlier read baseline across an external rewrite", async t => {
+  const f = await engineFixture(t);
+  await f.write("append-race.txt", "observed\r\n");
+
+  const { pending, gate } = gatedExecute(f, `
+    await read("append-race.txt");
+    ${GUEST_GATE_POLL}
+    return await write({path:"append-race.txt",content:"must not commit",append:true});
+  `, row => row.name === "read" && row.args.path === "append-race.txt" && row.ok === true);
+
+  const rejected = assert.rejects(pending, /write conflict/);
+  await gate;
+  await f.write("append-race.txt", "external rewrite\r\n");
+  await f.write("go.txt", "ready");
+  await rejected;
+  assert.equal(await fs.readFile(path.join(f.root, "append-race.txt"), "utf8"), "external rewrite\r\n");
+});
+
+it("append rejects an oversized existing file without replacing it", async t => {
+  const f = await engineFixture(t);
+  const target = path.join(f.root, "oversized.txt");
+  const file = await fs.open(target, "w");
+  const size = 64 * 1024 * 1024 + 1;
+
+  try {
+    await file.truncate(size);
+    await file.write("tail sentinel", size - 13, "utf8");
+  } finally { await file.close(); }
+
+  await assert.rejects(f.execute('return await write({path:"oversized.txt",content:"unsafe",append:true});'), /append input exceeds 67108864 bytes/);
+  assert.equal((await fs.stat(target)).size, size);
+
+  const after = await fs.open(target, "r");
+
+  try {
+    const tail = Buffer.alloc(13);
+    await after.read(tail, 0, tail.length, size - tail.length);
+    assert.equal(tail.toString("utf8"), "tail sentinel");
+  } finally { await after.close(); }
 });

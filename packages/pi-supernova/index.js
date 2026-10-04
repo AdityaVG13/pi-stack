@@ -72,7 +72,6 @@ export function registerCodeMode(pi) {
       names: () => NATIVE_NAMES,
       describeMemory: () => runBridge.describeMemory?.() ?? null,
       batchRead: runBridge.supportsBatchRead(),
-      nativeArgv: runBridge.supportsNativeArgv?.() === true,
       cancel,
     };
   }
@@ -183,9 +182,9 @@ export function registerCodeMode(pi) {
     const visible = runBridge.ledger.dedupe(bounded, call);
 
     const response = result(visible, {
-      ok: outcome.ok, error: outcome.error, wallMs: outcome.wallMs,
+      ok: outcome.ok, partial: !outcome.ok && outcome.mutations.committed > 0, error: outcome.error, wallMs: outcome.wallMs,
       returnTruncated: outcome.returnTruncated, logTruncated: outcome.logTruncated,
-      logs: outcome.logs, result: outcome.result, trace, mutations: outcome.mutations,
+      logs: outcome.logs, result: outcome.result, trace, mutations: outcome.mutations, savedPaths: outcome.savedPaths,
     });
 
     if (outcome.images?.length) response.content.push(...outcome.images);

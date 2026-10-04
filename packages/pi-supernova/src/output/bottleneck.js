@@ -65,7 +65,9 @@ function fitContainer(input, limit) {
   const out = Array.isArray(input) ? [] : { truncated: true };
   const entries = Object.entries(input);
 
-  if (!Array.isArray(input)) entries.sort((a, b) => json(a[1]).length - json(b[1]).length);
+  const lengths = Array.isArray(input) ? null : new Map(entries.map(([key, child]) => [key, json(child).length]));
+
+  if (lengths) entries.sort((a, b) => lengths.get(a[0]) - lengths.get(b[0]));
 
   for (const [key, child] of entries) {
     const used = json(out).length;
@@ -73,7 +75,7 @@ function fitContainer(input, limit) {
     const available = limit - used - overhead;
 
     if (available < 4) break;
-    assignBounded(out, key, fit(child, available));
+    assignBounded(out, key, fit(child, available, lengths?.get(key)));
 
     if (json(out).length > limit) rollbackBounded(out, key);
   }
@@ -81,10 +83,8 @@ function fitContainer(input, limit) {
   return out;
 }
 
-function fit(input, limit) {
-  const serialized = json(input);
-
-  if (serialized.length <= limit) return input;
+function fit(input, limit, encodedLength = json(input).length) {
+  if (encodedLength <= limit) return input;
 
   if (isString(input)) return fitString(input, limit);
 
@@ -99,7 +99,7 @@ function summarizeDetails(value, budget = 2000) {
 
   if (encoded.length <= budget) return encoded;
 
-  return json(fit(JSON.parse(encoded), budget));
+  return json(fit(JSON.parse(encoded), budget, encoded.length));
 }
 
 function spill(fullText, config) {

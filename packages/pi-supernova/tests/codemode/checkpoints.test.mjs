@@ -17,16 +17,16 @@ it("workspace notifications describe disk commits, not checkpoint merges or roll
     await edit(async () => { await write("kept.txt", "checkpoint"); });
     await write("kept.txt", "final");
   `);
-  assert.equal(events.length, 1);
-  assert.deepEqual(events[0].event, { version: 1, cwd: f.root, paths: [path.join(f.root, "kept.txt")] });
-  assert.deepEqual(events[0].contents, ["final"]);
+  assert.equal(events.length, 2);
+  assert.deepEqual(events[1].event, { version: 1, cwd: f.root, paths: [await fs.realpath(path.join(f.root, "kept.txt"))] });
+  assert.deepEqual(events.map(row=>row.contents), [["checkpoint"],["final"]]);
   assert.ok(Object.isFrozen(events[0].event));
   assert.ok(Object.isFrozen(events[0].event.paths));
-  await assert.rejects(f.execute(`await write("failed.txt", "no"); await read("missing.txt");`), /ENOENT|no such file/);
+  await assert.rejects(f.execute(`await edit(async()=>{await write("failed.txt", "no"); await read("missing.txt");});`), /ENOENT|no such file/);
   await assert.rejects(fs.stat(path.join(f.root,"failed.txt")),{code:"ENOENT"});
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 2);
   await f.execute(`return await read("kept.txt");`);
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 2);
   f.pi.events.emit = () => { throw Error("broken subscriber"); };
 
   await f.execute(`await write("kept.txt", "survives listener");`);
@@ -90,7 +90,7 @@ it("file-read receipts describe successful disk reads, not overlays, source data
   events.length = 0;
   await f.execute('await read({path:"spoof.json",json:true}); await read("."); await read("disk.js",99,1); await read("missing.js").catch(() => {});');
   assert.deepEqual(events, []);
-  await f.execute('await write({path:"disk.js",content:"function staged() {}\\n",replace:true}); return await read("disk.js");');
+  await f.execute('return await edit(async()=>{await write({path:"disk.js",content:"function staged() {}\\n",replace:true}); return await read("disk.js");});');
   assert.deepEqual(events, [], "a staged body is not an on-disk read");
   await assert.rejects(f.execute('await read("disk.js"); throw Error("after read");'), /after read/);
   assert.deepEqual(events, [], "failed programs publish no file-open credit");
@@ -141,4 +141,50 @@ it("cancellation after a flush reports retained writes as committed, not rolled 
   assert.equal(controller.signal.aborted, true);
   assert.equal(await fs.readFile(committed, "utf8"), "retained");
   await assert.rejects(fs.stat(path.join(f.root, "shell-ran.txt")), { code: "ENOENT" });
+});
+
+it("best-effort saves successful edits without replaying them after a later failure", async t => {
+  const f = await engineFixture(t);
+  await f.write("first.txt", "before");
+  await f.write("second.txt", "before");
+  const error = await f.execute('await edit("first.txt","before","after");await edit("second.txt","absent","bad");await write("unrun.txt","bad");').then(() => assert.fail("must report the failed step"), error => error);
+  assert.match(error.message, /edit target not found/);
+  assert.equal(await fs.readFile(path.join(f.root, "first.txt"), "utf8"), "after");
+  assert.equal(await fs.readFile(path.join(f.root, "second.txt"), "utf8"), "before");
+  await assert.rejects(fs.stat(path.join(f.root, "unrun.txt")), {code:"ENOENT"});
+  assert.equal(error.supernovaResult.details.trace[0].mutationState, "saved");
+  assert.match(error.message, /Do not repeat saved/);
+  assert.deepEqual(error.supernovaResult.details.savedPaths, ["first.txt"]);
+  assert.match(error.message, /Saved edits: \["first.txt"\]/);
+});
+
+it("best-effort continues independent sequential programs but preserves explicit checkpoints", async t => {
+  const f = await engineFixture(t);
+
+  const result = await f.tool.execute("best-effort-batch", {programs:[
+    {code:'await write("kept.txt","kept");throw Error("ordinary failure");'},
+    {code:'await edit(async()=>{await write("rolled.txt","no");throw Error("checkpoint failure");});'},
+    {code:'await write("later.txt","later");return 42;'}
+  ]}, undefined, undefined, {cwd:f.root});
+
+  assert.equal(result.details.ok, false);
+  assert.equal(result.details.attempted, 3);
+  assert.equal(result.details.stopped, "");
+  assert.deepEqual(result.details.failedPrograms, [0,1]);
+  assert.deepEqual(result.details.notRunPrograms, []);
+  assert.deepEqual(result.details.programs.map(program=>program.details.ok), [false,false,true]);
+  assert.equal(result.details.programs[2].details.result, 42);
+  assert.equal(await fs.readFile(path.join(f.root, "kept.txt"), "utf8"), "kept");
+  assert.equal(await fs.readFile(path.join(f.root, "later.txt"), "utf8"), "later");
+  await assert.rejects(fs.stat(path.join(f.root, "rolled.txt")), {code:"ENOENT"});
+  assert.equal(result.details.trace.find(row=>row.args.path==="rolled.txt").mutationState, "rolled back");
+});
+
+it("best-effort publishes a successful checkpoint as a group before a later failure", async t => {
+  const f = await engineFixture(t);
+  const error = await f.execute('await edit(async()=>{await write("a.txt","a");await write("b.txt","b");});throw Error("after checkpoint");').then(()=>assert.fail("must report failure"), error=>error);
+  assert.match(error.message, /after checkpoint/);
+
+  for (const name of ["a", "b"]) assert.equal(await fs.readFile(path.join(f.root, name + ".txt"), "utf8"), name);
+  assert.ok(error.supernovaResult.details.trace.filter(row=>row.name==="write").every(row=>row.mutationState==="saved"));
 });

@@ -102,8 +102,11 @@ function findHunkMatch(fileLines, expectedOld, nominal, hunk, oldStart, floor) {
   return { index: -1, relocated: 0 };
 }
 
-function hunkLineText(line) {
-  return line.slice(1).replace(/\r$/, "");
+function hunkLineText(hunk, i) {
+  const text = hunk.lines[i].slice(1);
+
+  // Without an original newline, a trailing CR is payload, not a CRLF ending.
+  return hunk.noNewline.includes(i) ? text : text.replace(/\r$/, "");
 }
 
 function applyHunkLines(hunk, fileLines, matchIndex, ending) {
@@ -114,7 +117,7 @@ function applyHunkLines(hunk, fileLines, matchIndex, ending) {
     const line = hunk.lines[i];
 
     if (line[0] === "+") {
-      replacement.push({ text: hunkLineText(line), ending: hunk.noNewline.includes(i) ? "" : ending });
+      replacement.push({ text: hunkLineText(hunk, i), ending: hunk.noNewline.includes(i) ? "" : ending });
     } else {
       const original = fileLines[oldIndex++];
 
@@ -128,7 +131,7 @@ function applyHunkLines(hunk, fileLines, matchIndex, ending) {
 }
 
 function applyOneHunk(hunk, h, fileLines, offsetShift, relocationShift, ending, floor) {
-  const expectedOld = hunk.lines.filter(line => line[0] !== "+").map(hunkLineText);
+  const expectedOld = hunk.lines.flatMap((line, i) => line[0] !== "+" ? [hunkLineText(hunk, i)] : []);
   const newCount = hunk.lines.filter(line => line[0] !== "-").length;
 
   if (expectedOld.length !== hunk.oldLength || newCount !== hunk.newLength) throw new Error("patch hunk " + (h + 1) + " length does not match its header");
@@ -138,7 +141,16 @@ function applyOneHunk(hunk, h, fileLines, offsetShift, relocationShift, ending, 
 
   if (match.index < 0) throw new Error("patch hunk " + (h + 1) + " rejected at line " + hunk.oldStart + ": context did not match");
   const replacement = applyHunkLines(hunk, fileLines, match.index, ending);
-  fileLines.splice(match.index, expectedOld.length, ...replacement);
+  const tailEnd = fileLines.length;
+  const length = tailEnd + replacement.length - expectedOld.length;
+
+  // Valid hunks can exceed the engine's argument-count limit. Move the tail
+  // in place rather than passing every replacement line as a splice argument.
+  if (length > tailEnd) fileLines.length = length;
+  fileLines.copyWithin(match.index + replacement.length, match.index + expectedOld.length, tailEnd);
+  fileLines.length = length;
+
+  for (let i = 0; i < replacement.length; i++) fileLines[match.index + i] = replacement[i];
 
   return {
     relocationShift: relocationShift + match.relocated,

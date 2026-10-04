@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import {isString} from '../shared/decode.js';
+import {overlaySnapshot} from './search-files.js';
 import {truncateChars} from '../output/format.js';
 import {extractStructuralSurface} from './surface.js';
 import {scorePathTopology,stem,SOURCE_EXT,MAX_NEEDLE_CHARS} from './query.js';
@@ -169,7 +170,7 @@ function rgSearchArgs(includeHidden, searchNeedles, focusFile, dir) {
 async function runContentSearch({ dir, includeHidden, searchNeedles, run, overlayText, signal, diskFiles, focusFile }) {
   const args = rgSearchArgs(includeHidden, searchNeedles, focusFile, dir);
 
-  const response = diskFiles || (focusFile && overlayText(focusFile) === undefined)
+  const response = diskFiles || (focusFile && await overlayText(focusFile) === undefined)
     ? await run(args, { cwd: focusFile ? path.dirname(focusFile) : dir, timeoutMs: 15000, maxOutputChars: MAX_SEARCH_CHARS, signal })
     : { stdout: "", stderr: "", exitCode: 1 };
 
@@ -178,8 +179,8 @@ async function runContentSearch({ dir, includeHidden, searchNeedles, run, overla
   return response;
 }
 
-function absorbRgRecords(candidates, response, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles, signal) {
-  const records = response.stdout.split("\n");
+async function absorbRgRecords(candidates, response, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles, signal, pendingPaths) {
+  const records = response.stdout.split("\n"), parsed = [];
 
   for (let i = 0; i < records.length; i++) {
     if ((i & 127) === 0) signal?.throwIfAborted();
@@ -188,8 +189,23 @@ function absorbRgRecords(candidates, response, dir, includeHidden, overlayText, 
     if (record === undefined) break;
 
     if (!record) continue;
-    absorbRgHit(candidates, record, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles);
+    parsed.push(record);
   }
+
+  const files = [];
+
+  for (const record of parsed) {
+    if ((record.type !== "match" && record.type !== "context") || !isString(record.data?.path?.text)) continue;
+    const file = path.resolve(dir, record.data.path.text);
+
+    if (inScope(file, dir, includeHidden)) files.push(file);
+  }
+
+  const snapshot = await overlaySnapshot([...pendingPaths, ...files], overlayText, signal);
+
+  for (const record of parsed) absorbRgHit(candidates, record, dir, includeHidden, snapshot, candidateRoot, query, tokens, flags, needles, candidateNeedles);
+
+  return snapshot;
 }
 
 async function contentCandidates({ dir, includeHidden, query, tokens, flags, pendingPaths, run, overlayText, signal, exact, diskFiles, focusFile }) {
@@ -200,8 +216,8 @@ async function contentCandidates({ dir, includeHidden, query, tokens, flags, pen
   const candidateRoot = focusFile ? path.dirname(focusFile) : dir;
   const candidates = new Map();
   const response = await runContentSearch({ dir, includeHidden, searchNeedles: [...new Set(needles)], run, overlayText, signal, diskFiles, focusFile });
-  absorbRgRecords(candidates, response, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles, signal);
-  const overlayTruncated = overlayCandidates(candidates, pendingPaths, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles, signal);
+  const snapshot = await absorbRgRecords(candidates, response, dir, includeHidden, overlayText, candidateRoot, query, tokens, flags, needles, candidateNeedles, signal, pendingPaths);
+  const overlayTruncated = overlayCandidates(candidates, pendingPaths, snapshot, candidateRoot, query, tokens, flags, needles, candidateNeedles, signal);
 
   return { candidates, truncated: response.outputTruncated === true || overlayTruncated };
 }

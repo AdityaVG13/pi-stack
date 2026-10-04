@@ -144,21 +144,20 @@ test("clipped logs do not hide execution failures or discard successful commits"
 
     const result = await f.tool.execute("noisy-failure", {parallel,programs:[
       {code:'console.log("x".repeat(50000)); await write("kept.txt","kept"); return 1;'},
-      {code:'console.log("y".repeat(50000)); await write("rolled.txt","bad"); throw Error("real-failure-sentinel");'},
+      {code:'console.log("y".repeat(50000)); await edit(async()=>{await write("rolled.txt","bad"); throw Error("real-failure-sentinel");});'},
       {code:'await write("later.txt","kept"); return 3;'},
     ]}, undefined, undefined, {cwd:f.root});
 
     assert.equal(result.details.ok,false);
     assert.equal(result.isError,true);
     assert.equal(result.details.logTruncated,true);
-    assert.equal(result.details.attempted,parallel?3:2);
+    assert.equal(result.details.attempted,3);
     assert.equal(result.details.programs[1].details.ok,false);
     assert.match(modelText(result),/real-failure-sentinel/);
     assert.equal(result.details.mutations.rolledBack,1);
     assert.equal(await fs.readFile(path.join(f.root,"kept.txt"),"utf8"),"kept");
     await assert.rejects(fs.stat(path.join(f.root,"rolled.txt")),{code:"ENOENT"});
 
-    if (parallel) assert.equal(await fs.readFile(path.join(f.root,"later.txt"),"utf8"),"kept");
-    else await assert.rejects(fs.stat(path.join(f.root,"later.txt")),{code:"ENOENT"});
+    assert.equal(await fs.readFile(path.join(f.root,"later.txt"),"utf8"),"kept");
   }
 });

@@ -6,16 +6,6 @@ const PARSE_OPTIONS = { ecmaVersion: "latest", sourceType: "module", allowReturn
 
 const FUNCTION_TYPES = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 
-function hasReturn(node) {
-  if (!isObject(node)) return false;
-
-  if (node.type === "ReturnStatement") return true;
-
-  if (FUNCTION_TYPES.has(node.type)) return false;
-
-  return Object.values(node).some(value => Array.isArray(value) ? value.some(hasReturn) : hasReturn(value));
-}
-
 function parseExpressionFunction(code) {
   try {
     const program = parse(code, PARSE_OPTIONS);
@@ -48,32 +38,51 @@ function deniedSpecifier(node) {
   if (node?.type === "TemplateLiteral" && node.expressions.length === 0) return node.quasis[0]?.value?.cooked;
 }
 
-function assertGuestImports(node) {
-  if (Array.isArray(node)) {
-    node.forEach(assertGuestImports);
+function inspectProgram(root, expression) {
+  let returns = expression?.type === "ArrowFunctionExpression" && expression.body.type !== "BlockStatement";
+  // Valid member chains can exceed the host call stack well below the code cap.
+  const pending = [{node:root,returnScope:true}];
 
-    return;
+  while (pending.length) {
+    let {node,returnScope} = pending.pop();
+
+    if (Array.isArray(node)) {
+      for (let i = node.length - 1; i >= 0; i--) pending.push({node:node[i],returnScope});
+
+      continue;
+    }
+
+    // eslint-disable-next-line anti-slop/no-runtime-typeof -- This is an Acorn-owned AST, not unparsed host or guest data.
+    if (!node || typeof node !== "object") continue;
+    const type = node.type;
+
+    // Function scopes affect only return hints. Import checks must still visit
+    // nested/unreachable bodies, even after finding a return in the invoked scope.
+    if (FUNCTION_TYPES.has(type)) returnScope = node === expression;
+
+    if (type === "ReturnStatement" && returnScope) returns = true;
+
+    if (type === "ImportDeclaration" || type === "ImportExpression") rejectGuestImport(node.source);
+
+    if (type === "CallExpression" && node.callee?.type === "Identifier" && node.callee.name === "require") rejectGuestImport(node.arguments?.[0]);
+
+    const keys = Object.keys(node);
+
+    for (let i = keys.length - 1; i >= 0; i--) {
+      const value = node[keys[i]];
+
+      // eslint-disable-next-line anti-slop/no-runtime-typeof -- Acorn already parsed these fields; distinguish child objects from scalar AST metadata.
+      if (value && typeof value === "object") pending.push({node:value,returnScope});
+    }
   }
 
-  if (!isObject(node)) return;
-
-  if (["ImportDeclaration", "ImportExpression"].includes(node.type)) rejectGuestImport(node.source);
-
-  if (node.type === "CallExpression" && node.callee?.type === "Identifier" && node.callee.name === "require") rejectGuestImport(node.arguments?.[0]);
-
-  for (const key of Object.keys(node)) {
-    if (!["start", "end", "loc", "range"].includes(key)) assertGuestImports(node[key]);
-  }
+  return returns;
 }
 
 function prepareProgram(code) {
   const parsed = parseExpressionFunction(code);
-  assertGuestImports(parsed.program ?? parsed.expression);
+  const returns = inspectProgram(parsed.program ?? parsed.expression, parsed.expression);
   const body = parsed.expression ? "return await (" + parsed.expressionSource + "\n)();" : code;
-
-  const returns = parsed.expression
-    ? parsed.expression.type === "ArrowFunctionExpression" && parsed.expression.body.type !== "BlockStatement" || hasReturn(parsed.expression.body)
-    : hasReturn(parsed.program);
 
   return { body, hasReturn: returns, sourceStart: parsed.sourceStart ?? 0, prefixLength: parsed.expression ? "return await (".length : 0 };
 }
@@ -131,18 +140,28 @@ function rejectGuestImport(source) {
   throw new Error(reason + "; no commands ran");
 }
 
-function containingAwait(node, offset) {
-  if (Array.isArray(node)) return node.map(child => containingAwait(child, offset)).find(Boolean);
+function containingAwait(root, offset) {
+  const pending = [root];
+  let found = null;
 
-  if (!isObject(node) || offset < node.start || offset >= node.end) return null;
+  while (pending.length) {
+    const node = pending.pop();
 
-  for (const child of Object.values(node)) {
-    const found = containingAwait(child, offset);
+    if (Array.isArray(node)) {
+      for (const child of node) pending.push(child);
 
-    if (found) return found;
+      continue;
+    }
+
+    if (!isObject(node) || offset < node.start || offset >= node.end) continue;
+
+    // Containing awaits nest; descendants supersede the enclosing await.
+    if (node.type === "AwaitExpression") found = node;
+
+    for (const child of Object.values(node)) pending.push(child);
   }
 
-  return node.type === "AwaitExpression" ? node : null;
+  return found;
 }
 
 // V8 points at 'await'; JSC points at the call parenthesis. Resolve the await

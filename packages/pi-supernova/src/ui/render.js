@@ -168,8 +168,8 @@ function buildBodyLines(theme, width, { payload, context, expanded, isPartial, i
 	const { maxOps, maxDiffLines } = bodyLimits(expanded, isPartial);
 	const ops = operationsFromTrace(visibleTrace(trace, maxOps));
 
-	// Trace success records an operation, not persistence of every staged version.
-	// Mixed rollback/commit counts cannot safely be attributed to individual rows.
+	// Native persistence states follow publication/checkpoint outcomes. Legacy and
+	// captured-tool traces remain conservative where persistence is unknown.
 	for (const op of ops) op.mutationAttempt = mutationAttempt(op, payload, isPartial, isError);
 	const lines = [];
 	appendOps(lines, theme, ops, maxOps, maxDiffLines, width, isPartial, isError, expanded);
@@ -187,7 +187,8 @@ function buildBodyLines(theme, width, { payload, context, expanded, isPartial, i
 function describeCard(model, opCount) {
 	const wall = model.payload?.wallMs != null ? formatDuration(model.payload.wallMs) : "";
 	const calls = opCount > 0 ? `${opCount} call${opCount === 1 ? "" : "s"}` : "";
-	const status = model.isError ? "failed" : model.isPartial ? "running" : "complete";
+	const saved = model.payload?.mutations?.committed > 0 || traceFor(model.payload, model.context).some(row=>row.mutationState === "saved");
+	const status = model.isError ? saved ? "partial · failed step" : "failed" : model.isPartial ? "running" : "complete";
 
 	return [calls, status, wall].filter(Boolean).join(" · ");
 }
@@ -306,6 +307,8 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 }
 
 function mutationAttempt(op, payload, isPartial, isError) {
+  if (op.mutationState) return op.mutationState !== "saved";
+
   return op.ok === true && ["write", "edit", "patch"].includes(op.tool)
     && (isPartial || isError || payload?.mutations?.rolledBack > 0 || payload?.mutations?.recoveryFailed);
 }

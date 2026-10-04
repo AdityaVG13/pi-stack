@@ -2,11 +2,12 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {assertModelImageMime} from '../shared/decode.js';
 import {validateImageBytes} from '../shared/image.js';
+import {readLimitedBytes} from '../fs/file-io.js';
 import {IMAGE_MIME,IMAGE_MAX_BYTES,imageTooLarge,missingFile} from './errors.js';
 
 export function createImageReader(vfs) {
-  async function readImage(rel, targetPath, mime, signal) {
-    const staged = vfs.getOverlay(targetPath);
+  async function readImage(rel, targetPath, signal) {
+    const staged = await vfs.getOverlay(targetPath);
 
     if (staged !== undefined) {
       const size = Buffer.byteLength(staged, "utf8");
@@ -32,7 +33,8 @@ export function createImageReader(vfs) {
       if (!stat.isFile()) throw new Error("image read requires a regular file: " + targetPath);
 
       if (stat.size > IMAGE_MAX_BYTES) throw imageTooLarge(rel, stat.size);
-      bytes = await file.readFile({ signal });
+      bytes = await readLimitedBytes(file, stat, IMAGE_MAX_BYTES, "image", signal,
+        () => new Error("image read limit exceeded: " + rel + "; maximum " + IMAGE_MAX_BYTES + " bytes (20 MiB); resize or select fewer/smaller images"));
     } finally { await file.close(); }
 
     // Recovery must be able to replace the destination before we await it.
@@ -46,9 +48,8 @@ export function createImageReader(vfs) {
 
     if (!mime) return null;
     assertModelImageMime(mime);
-    const bytes = await readImage(rel, targetPath, mime, signal);
+    const bytes = await readImage(rel, targetPath, signal);
 
-    if (bytes.length > IMAGE_MAX_BYTES) throw imageTooLarge(rel, bytes.length);
     await validateImageBytes(bytes,mime,rel,signal);
 
     return { content: [{ type: "image", mimeType: mime, data: bytes.toString("base64") }], details: { path: targetPath } };

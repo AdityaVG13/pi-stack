@@ -141,8 +141,8 @@ it("an ignored failed checkpoint fails the program with its original cause", asy
   const f = await engineFixture(t);
   await f.write("state.txt", "original");
   await assert.rejects(f.execute(`
-    await write("outer.txt", "pending");
     await edit(async () => {
+      await write("outer.txt", "pending");
       await write("state.txt", "candidate");
       throw Error("required document missing");
     });
@@ -203,13 +203,13 @@ it("exact-symbol usage evidence excludes generic calls, definitions and prefix m
   }
 });
 
-it("missing argv data identifies the offending argument without running or committing", async t => {
+it("missing argv data identifies the offending argument without running or undoing saved work", async t => {
   const f = await engineFixture(t);
   await assert.rejects(f.tool.execute("missing-data", {
     code:'await write("report.md",data.report); return await bash({command:process.execPath,args:["-e",data.records]});',
     data:{report:"pending report"},
   }, undefined, undefined, {cwd:f.root}), /args\[1\].*undefined.*data/s);
-  await assert.rejects(fs.stat(path.join(f.root, "report.md")), {code:"ENOENT"});
+  assert.equal(await fs.readFile(path.join(f.root, "report.md"),"utf8"), "pending report");
 
   const ok = await f.tool.execute("nested-data", {
     code:'await write("report.md",data.report); return await bash({command:process.execPath,args:["-e",data.records]});',
@@ -226,7 +226,7 @@ it("oversized returned image sets fail with aggregate sizes instead of losing at
   const fits = await f.execute('return await read(Array(16).fill("small.png"));');
   assert.equal(fits.content.filter(x => x.type === "image").length, 16);
   await assert.rejects(f.execute('await write("receipt.txt","pending"); return await read(Array(17).fill("small.png"));'), /17 images.*1156 bytes.*16.*20 MiB/s);
-  await assert.rejects(fs.stat(path.join(f.root, "receipt.txt")), {code:"ENOENT"});
+  assert.equal(await fs.readFile(path.join(f.root, "receipt.txt"),"utf8"), "pending");
   // Valid 4 MiB PNG: insert a checksummed ancillary text chunk before IEND.
   const padding = Buffer.alloc(4 * 1024 * 1024 - pixel.length,32);
   padding.writeUInt32BE(padding.length-12); padding.write("tEXt",4); padding.write("Comment\0",8);
@@ -319,7 +319,7 @@ it("outside-workspace writes identify the rejected path and preserve confinement
   assert.equal(await fs.readFile(path.join(f.root,"artifacts/result.log"),"utf8"),"kept");
 });
 
-it("unsupported image formats fail before model delivery and roll back pending writes", async t => {
+it("unsupported image formats fail before model delivery without undoing saved writes", async t => {
   const f = await engineFixture(t);
   // A valid uncompressed 1x1, 24-bit BMP, not a corrupt-image test.
   const bmp = Buffer.alloc(58);
@@ -338,7 +338,7 @@ it("unsupported image formats fail before model delivery and roll back pending w
   };
 
   await assert.rejects(f.execute('await write("pending.txt","not committed"); return await read("screen.bmp");'), noImages);
-  await assert.rejects(fs.stat(path.join(f.root,"pending.txt")),{code:"ENOENT"});
+  assert.equal(await fs.readFile(path.join(f.root,"pending.txt"),"utf8"), "not committed");
 
   const images = [
     {type:"image",mimeType:"image/png",data:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="},
@@ -346,7 +346,7 @@ it("unsupported image formats fail before model delivery and roll back pending w
   ];
 
   await assert.rejects(f.tool.execute("returned-bmp", {code:'await write("pending.txt","not committed"); return data;',data:images}, undefined, undefined, {cwd:f.root}), noImages);
-  await assert.rejects(fs.stat(path.join(f.root,"pending.txt")),{code:"ENOENT"});
+  assert.equal(await fs.readFile(path.join(f.root,"pending.txt"),"utf8"), "not committed");
   assert.deepEqual(await fs.readFile(path.join(f.root,"screen.bmp")),bmp,"source image must remain unchanged");
   assert.doesNotMatch(f.tool.description,/PNG\/JPEG\/GIF\/WebP\/BMP/);
 });
@@ -354,7 +354,7 @@ it("unsupported image formats fail before model delivery and roll back pending w
 it("optional reads retain successful siblings explicitly, without weakening uncaught-error rollback", async t => {
   const f = await engineFixture(t);
   await f.write("small.txt","complete sibling\n");
-  await assert.rejects(f.execute('await write("pending.txt","not committed"); return {ok:await read("small.txt"),missing:await read("missing.txt")};'), /Promise\.allSettled/);
+  await assert.rejects(f.execute('return await edit(async()=>{await write("pending.txt","not committed"); return {ok:await read("small.txt"),missing:await read("missing.txt")};});'), /Promise\.allSettled/);
   await assert.rejects(fs.stat(path.join(f.root,"pending.txt")),{code:"ENOENT"});
   const result = await f.execute('return await Promise.allSettled(["small.txt","missing.txt"].map(path=>read(path)));');
   assert.deepEqual(result.details.result[0],{status:"fulfilled",value:"complete sibling\n"});
@@ -654,6 +654,46 @@ it("bash, write and edit reject unknown options instead of ignoring them", async
   assert.equal(await fs.readFile(path.join(f.root,"note.txt"),"utf8"),"1\n");
 });
 
+it("nested edit options reject before any replacement even when errors are caught", async t => {
+  const f = await engineFixture(t);
+  const original = "one\ntwo\n";
+  await f.write("multi.txt",original);
+  await f.write("other.txt","untouched");
+  const calls = ['edit("multi.txt",edits)','edit("multi.txt",{edits})','edit({path:"multi.txt",edits})'];
+
+  for (const call of calls) {
+    for (const option of [["dryRun",true],["all",false],["path","other.txt"]]) {
+      const result = await f.tool.execute("nested-options",{
+        code:'await write("kept.txt","kept");const edits=[{oldText:"one",newText:"ONE"},{oldText:"two",newText:"TWO",[data[0]]:data[1]}];return await '+call+'.then(()=>null,error=>error.message);',
+        data:option,timeoutMs:2000,
+      },undefined,undefined,{cwd:f.root});
+
+      assert.equal(await fs.readFile(path.join(f.root,"multi.txt"),"utf8"),original);
+      assert.equal(await fs.readFile(path.join(f.root,"other.txt"),"utf8"),"untouched");
+      assert.equal(await fs.readFile(path.join(f.root,"kept.txt"),"utf8"),"kept");
+      assert.match(result.details.result,/edit 2 of 2 does not accept option/);
+      assert.ok(result.details.result.includes(JSON.stringify(option[0])));
+    }
+  }
+
+  await f.execute('await edit("multi.txt",[{oldText:"one",newText:"ONE"},{oldText:"two",newText:"TWO"}]);');
+  assert.equal(await fs.readFile(path.join(f.root,"multi.txt"),"utf8"),"ONE\nTWO\n");
+});
+
+it("unsupported checkpoint arguments reject before the callback can mutate files", async t => {
+  const f = await engineFixture(t);
+
+  for (const extra of ['{dryRun:true}','undefined,{dryRun:true}']) {
+    const result = await f.execute('await write("kept.txt","kept");return await edit(async()=>{await write("checkpoint.txt","unexpected");},'+extra+').then(()=>null,error=>error.message);');
+    await assert.rejects(fs.stat(path.join(f.root,"checkpoint.txt")),{code:"ENOENT"});
+    assert.equal(await fs.readFile(path.join(f.root,"kept.txt"),"utf8"),"kept");
+    assert.match(result.details.result,/invalid edit signature/);
+  }
+
+  await f.execute('await edit(async()=>{await write("checkpoint.txt","accepted");},undefined,undefined);');
+  assert.equal(await fs.readFile(path.join(f.root,"checkpoint.txt"),"utf8"),"accepted");
+});
+
 it("multi-edit failures name the failing entry", async t => {
   const f = await engineFixture(t);
   await f.write("multi.txt","one\ntwo\nthree\n");
@@ -841,7 +881,7 @@ it("session regression: positional write options preserve append and explicit re
   assert.equal(await fs.readFile(path.join(f.root,"state.txt"),"utf8"),"replacement\nkept-tail\n");
 
   for (const options of ['{append:"true"}','{path:"other.txt"}','{content:"other"}','{append:true,unknown:1}','[]']) {
-    await assert.rejects(f.execute('await write("staged.txt","not committed");await write("state.txt","bad",'+options+');'),/write .*options|write .*option|write append must be a boolean/);
+    await assert.rejects(f.execute('await edit(async()=>{await write("staged.txt","not committed");await write("state.txt","bad",'+options+');});'),/write .*options|write .*option|write append must be a boolean/);
     await assert.rejects(fs.stat(path.join(f.root,"staged.txt")),{code:"ENOENT"});
     assert.equal(await fs.readFile(path.join(f.root,"state.txt"),"utf8"),"replacement\nkept-tail\n");
   }
@@ -865,7 +905,7 @@ it("raw read text used as an edit path gets bounded guidance without echoing sou
   await f.write("document.txt",source);
 
   for (const call of ['await edit(text,"anchor = old","anchor = new");','await edit({path:text,patch:"@@ -1,1 +1,1 @@\\n-before\\n+after\\n"});']) {
-    await assert.rejects(f.execute('await write("staged.txt","must roll back");const text=await read("document.txt",{complete:true});'+call), error => {
+    await assert.rejects(f.execute('await edit(async()=>{await write("staged.txt","must roll back");const text=await read("document.txt",{complete:true});'+call+'});'), error => {
       assert.match(error.message,/path exceeds.*filesystem limit/);
       assert.match(error.message,/read.*returns text/);
       assert.match(error.message,/edit\(path|resolve:true/);
@@ -887,7 +927,7 @@ it("multi-line edit mismatch does not invent whitespace drift or change exact-ma
   const f = await engineFixture(t);
   const source = "prefix\nconst keep = 1;\nconst actual = 2;\nrepeat\nrepeat\n";
   await f.write("state.txt",source);
-  await assert.rejects(f.execute('await write("staged.txt","must roll back");await edit("state.txt","const keep = 1;\\nconst actual = 3;","changed");'), error => {
+  await assert.rejects(f.execute('await edit(async()=>{await write("staged.txt","must roll back");await edit("state.txt","const keep = 1;\\nconst actual = 3;","changed");});'), error => {
     assert.match(error.message,/edit target not found/);
     assert.match(error.message,/oldText anchor near line 2/);
     assert.doesNotMatch(error.message,/only after trimming/);

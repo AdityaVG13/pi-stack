@@ -20,14 +20,16 @@ it("edit(view, text) replaces one resolve window when the same substring appears
   assert.equal(await fs.readFile(path.join(f.root, "note.txt"), "utf8"), "keep-A\nVIEW-NEW\nkeep-B\nVIEW-OLD\nkeep-C\n");
 });
 
-it("a stale view refuses to write and rolls back the program", async t => {
+it("a stale view refuses to write and rolls back its explicit checkpoint", async t => {
   const f = await engineFixture(t);
   const original = "keep-A\nVIEW-OLD\nkeep-B\n";
   await f.write("note.txt", original);
   await assert.rejects(f.execute(`
-    const v = await read({path:"note.txt", offset:2, limit:1, resolve:true});
-    await write({path:"note.txt",content:"keep-A\\nCHANGED\\nkeep-B\\n",replace:true});
-    await edit(v, "VIEW-NEW");
+    await edit(async()=>{
+      const v = await read({path:"note.txt", offset:2, limit:1, resolve:true});
+      await write({path:"note.txt",content:"keep-A\\nCHANGED\\nkeep-B\\n",replace:true});
+      await edit(v, "VIEW-NEW");
+    });
   `), /edit view is stale/);
   assert.equal(await fs.readFile(path.join(f.root, "note.txt"), "utf8"), original);
 });

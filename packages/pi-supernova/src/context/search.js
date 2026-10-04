@@ -1,5 +1,5 @@
 import {textResult} from '../shared/result.js';
-import {pendingInScope,overlaySearchEntry} from './search-files.js';
+import {pendingInScope,overlaySearchEntry,overlaySnapshot} from './search-files.js';
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isString } from "../shared/decode.js";
@@ -36,7 +36,9 @@ function applyMatchRecord(record, root, overlayText, add) {
   if (overlayText(file) === undefined) add(file, record.data.line_number, record.data.lines.text);
 }
 
-function ingestRgMatches(records, result, signal, root, overlayText, add) {
+async function ingestRgMatches(records, result, signal, root, overlayText, add, pendingPaths) {
+  const matches = [];
+
   for (let i = 0; i < records.length; i++) {
     signal?.throwIfAborted();
     const parsed = parseMatchRecord(records[i], result.outputTruncated, i === records.length - 1);
@@ -44,8 +46,15 @@ function ingestRgMatches(records, result, signal, root, overlayText, add) {
     if (parsed.stop) break;
 
     if (parsed.skip) continue;
-    applyMatchRecord(parsed.record, root, overlayText, add);
+
+    if (isRgMatch(parsed.record)) matches.push(parsed.record);
   }
+
+  const snapshot = await overlaySnapshot([...pendingPaths, ...matches.map(record => path.resolve(root, record.data.path.text))], overlayText, signal);
+
+  for (const record of matches) applyMatchRecord(record, root, snapshot, add);
+
+  return snapshot;
 }
 
 function ingestPendingRefs(root, pendingPaths, overlayText, add) {
@@ -75,8 +84,8 @@ export async function referencesForNames({ root, names, excludePath, overlayText
     { cwd: root, signal, timeoutMs: 5000, maxOutputChars: 65536 });
 
   if (result.exitCode !== 0 && result.exitCode !== 1) throw new Error(result.stderr.trim() || "reference search failed");
-  ingestRgMatches(result.stdout.split("\n"), result, signal, root, overlayText, add);
-  ingestPendingRefs(root, pendingPaths, overlayText, add);
+  const snapshot = await ingestRgMatches(result.stdout.split("\n"), result, signal, root, overlayText, add, pendingPaths);
+  ingestPendingRefs(root, pendingPaths, snapshot, add);
 
   return { references, incomplete: result.outputTruncated === true };
 }
@@ -87,6 +96,8 @@ function grepCaseSensitive(pattern, params) {
 
 function pushGrepFlags(args, pattern, params) {
   if (!grepCaseSensitive(pattern, params)) args.push("--ignore-case");
+
+  if (params?.literal === true) args.push("--fixed-strings");
 
   if (params?.glob) args.push("--glob", String(params.glob));
   const limit = params?.limit;
@@ -120,7 +131,7 @@ function listDirectRows(stat, searchDir, cwd, pending, matcher) {
 }
 
 function mergeListStdout(stdout, cwd, pendingMerged) {
-  const diskRows = String(stdout || "").split("\n").filter(Boolean)
+  const diskRows = String(stdout || "").split("\0").filter(Boolean)
     .map(row => relativeSlash(cwd, path.isAbsolute(row) ? row : path.resolve(cwd, row)));
 
   const rows = [...new Set([...diskRows, ...pendingMerged])];
@@ -129,7 +140,7 @@ function mergeListStdout(stdout, cwd, pendingMerged) {
 }
 
 async function listDisk(searchDir, pattern, cwd, signal) {
-  const args = ["--files"];
+  const args = ["--files", "--null"];
 
   if (pattern) args.push("-g", pattern);
   const res = await runCommand(["rg", ...args, searchDir], { cwd, timeoutMs: 30_000, signal }).catch(() => null);
@@ -138,6 +149,7 @@ async function listDisk(searchDir, pattern, cwd, signal) {
   const findArgs = [searchDir];
 
   if (pattern) findArgs.push("-name", pattern);
+  findArgs.push("-print0");
   const findRes = await runCommand(["find", ...findArgs], { cwd, timeoutMs: 30_000, signal });
 
   return { stdout: findRes.stdout, via: "find", outputTruncated: findRes.outputTruncated === true };
@@ -156,7 +168,7 @@ export async function listWithTools(searchDir, pattern, cwd, signal, pendingPath
     return textResult(rows.length ? rows.join("\n") + "\n" : "", { via: pending.length ? "vfs" : "file" });
   }
 
-  const pendingMerged = pendingAbs.filter((_, i) => !matcher || matcher.test(pending[i]));
+  const pendingMerged = pending.filter(file => !matcher || matcher.test(file));
   const listed = await listDisk(searchDir, pattern, cwd, signal);
 
   return textResult(mergeListStdout(listed.stdout, cwd, pendingMerged), { via: listed.via, outputTruncated: listed.outputTruncated });
@@ -213,10 +225,11 @@ export async function grepIndexed(index, pattern, params, searchPath, cwd, overl
 
   if (!index.canScan(files)) return null;
   files = applyGlob(files, params, cwd);
+  overlayText = await overlaySnapshot(files, overlayText);
 
   if (!filesReadable(index, files, overlayText)) return null;
   const rows = index.grepRows(files, regex, cwd, overlayText);
-  const fallback = rows.length === 0 && /^[\w$.-]{4,}$/.test(pattern) ? fuzzyGrepRows(index, files, pattern, cwd, caseSensitive, overlayText) : rows;
+  const fallback = rows.length === 0 && params?.literal !== true && /^[\w$.-]{4,}$/.test(pattern) ? fuzzyGrepRows(index, files, pattern, cwd, caseSensitive, overlayText) : rows;
 
   return formatGrepRows(fallback, grepLimit(params));
 }
@@ -227,9 +240,10 @@ function grepLimit(params) {
 
 function grepRegex(pattern, params) {
   const caseSensitive = params?.caseSensitive === true || (params?.caseSensitive !== false && smartCase(pattern));
+  const source = params?.literal === true ? pattern.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&") : pattern;
 
   try {
-    return { regex: new RegExp(pattern, caseSensitive ? "" : "i"), caseSensitive };
+    return { regex: new RegExp(source, caseSensitive ? "" : "i"), caseSensitive };
   } catch {
     return null;
   }

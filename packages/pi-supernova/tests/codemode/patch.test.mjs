@@ -74,8 +74,10 @@ it("patch hunks cannot consume earlier output or move behind it", async t => {
     const f = await engineFixture(t);
     await f.write("target.txt", original);
     await assert.rejects(f.execute(`
-      await write("must-rollback.txt", "not committed");
-      return await edit({path:"target.txt", patch:${JSON.stringify(patch)}});
+      return await edit(async()=>{
+        await write("must-rollback.txt", "not committed");
+        return await edit({path:"target.txt", patch:${JSON.stringify(patch)}});
+      });
     `), /patch hunk 2.*rejected/);
     assert.equal(await patchedFile(f, "target.txt"), original);
     await assert.rejects(fs.stat(path.join(f.root, "must-rollback.txt")), { code: "ENOENT" });
@@ -87,4 +89,85 @@ it("adjacent deletion and insertion hunks may start at the frozen boundary", asy
   await f.write("target.txt", "a\nb\nc\nd\n");
   await f.execute(`return await edit({path:"target.txt", patch:${JSON.stringify("@@ -1,1 +0,0 @@\n-a\n@@ -2,1 +0,0 @@\n-b\n@@ -2,0 +1,1 @@\n+NEW\n")}});`);
   assert.equal(await patchedFile(f, "target.txt"), "NEW\nc\nd\n");
+});
+
+it("large patch hunks grow and shrink without losing following hunks or file endings", async t => {
+  const f = await engineFixture(t);
+  const count = 200_000;
+  await f.write("large.txt", "head\r\nold\r\nkeep\r\nlast\r\nend");
+
+  const apply = async patch => {
+    await f.write("change.patch", patch);
+
+    return f.tool.execute("large-patch", {
+      code: 'return await edit({path:"large.txt",patch:await read("change.patch",{complete:true})});',
+      timeoutMs: 10_000,
+    }, undefined, undefined, { cwd: f.root });
+  };
+
+  await apply("@@ -2,1 +2," + count + " @@\n-old\n" + "+row\n".repeat(count)
+    + "@@ -4,1 +" + (count + 3) + ",1 @@\n-last\n+LAST\n");
+  assert.equal(await patchedFile(f, "large.txt"), "head\r\n" + "row\r\n".repeat(count) + "keep\r\nLAST\r\nend");
+
+  await apply("@@ -2," + count + " +2,1 @@\n" + "-row\n".repeat(count) + "+small\n"
+    + "@@ -" + (count + 3) + ",1 +4,1 @@\n-LAST\n+done\n");
+  assert.equal(await patchedFile(f, "large.txt"), "head\r\nsmall\r\nkeep\r\ndone\r\nend");
+});
+
+it("patches preserve literal carriage returns on lines without a final newline", async t => {
+  const f = await engineFixture(t);
+  const marker = "\\ No newline at end of file\n";
+
+  for (const original of ["before", "before\r"]) {
+    await f.write("tail.txt", original);
+    const patch = "@@ -1 +1 @@\n-" + original + "\n" + marker + "+after\r\n" + marker;
+    await f.execute(`return await edit({path:"tail.txt",patch:${JSON.stringify(patch)}});`);
+    assert.deepEqual(await fs.readFile(path.join(f.root, "tail.txt")), Buffer.from("after\r"));
+  }
+
+  await f.write("tail.txt", "before\r\n");
+  await f.execute('return await edit({path:"tail.txt",patch:"@@ -1 +1 @@\\n-before\\r\\n+after\\r\\n"});');
+  assert.deepEqual(await fs.readFile(path.join(f.root, "tail.txt")), Buffer.from("after\r\n"));
+});
+
+it("patch reference lookups scan source linearly and retain late declarations in both versions", async t => {
+  const f = await engineFixture(t);
+  const marker = "// reference-scan-fixture\n";
+  const count = 2500;
+  const body = letter => ("// " + letter.repeat(216) + "\n").repeat(count);
+  const before = marker + body("a") + "export function oldApi() { return 1; }\n// tail\r\nEOF";
+  const after = marker + body("b") + "export function newApi() { return 2; }\n// tail\r\nEOF";
+
+  const patch = "@@ -2," + (count + 1) + " +2," + (count + 1) + " @@\n"
+    + before.split("\n").slice(1, -2).map(line => "-" + line + "\n").join("")
+    + after.split("\n").slice(1, -2).map(line => "+" + line + "\n").join("");
+
+  await f.write("api.js", before);
+  await f.write("change.patch", patch);
+  await f.write(".ignore", "change.patch\n");
+  const indexOf = String.prototype.indexOf;
+  let scanned = 0, result;
+
+  String.prototype.indexOf = function (needle, start = 0) {
+    const found = indexOf.call(this, needle, start);
+
+    if (needle === "\n" && (this.length === before.length || this.length === after.length) && this.startsWith(marker)) {
+      scanned += (found < 0 ? this.length : found + 1) - Math.min(this.length, Math.max(0, start));
+    }
+
+    return found;
+  };
+
+  try {
+    result = await f.tool.execute("patch-references", {
+      code: 'await write("callers.js","oldApi(); newApi();\\n"); return await edit({path:"api.js",patch:await read("change.patch",{complete:true})});',
+      timeoutMs: 10_000,
+    }, undefined, undefined, { cwd: f.root });
+  } finally { String.prototype.indexOf = indexOf; }
+
+  assert.equal(await patchedFile(f, "api.js"), after);
+  assert.match(result.details.result, /oldApi also referenced in callers\.js:1/);
+  assert.match(result.details.result, /newApi also referenced in callers\.js:1/);
+  assert.ok(scanned > before.length, "the source scan budget must observe the real path");
+  assert.ok(scanned < 8 * (before.length + after.length), "source characters scanned: " + scanned);
 });

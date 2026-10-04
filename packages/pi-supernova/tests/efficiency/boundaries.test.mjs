@@ -197,3 +197,23 @@ it("dense line statistics stop repeated native probes without changing preview o
     assert.deepEqual(contentLineInfo(value,limit),expected);
   }
 });
+
+
+it("read storage limits stop before unbudgeted fields including nested containers", () => {
+  const rows = ["1234567890"], record = {a:"1234567890"};
+  const unseen = {enumerable:true,get() { throw new Error("unbudgeted field was evaluated"); }};
+  Object.defineProperty(rows,1,unseen);
+  Object.defineProperty(record,"tail",unseen);
+
+  for (const [value,limit] of [[rows,40],[[rows],80],[record,64]]) {
+    assert.throws(()=>readValueBytes(value,limit),/exceeds .*remaining storage budget/);
+  }
+
+  const shared = {k:"λ😀"}, repeated = [shared,shared];
+  repeated.length = 3;
+  assert.equal(readValueBytes(repeated,128),128);
+  assert.throws(()=>readValueBytes(repeated,127),/remaining storage budget/);
+  Object.setPrototypeOf(repeated,Object.create(Array.prototype,{2:{value:shared}}));
+  assert.equal(readValueBytes(repeated,136),136);
+  assert.throws(()=>readValueBytes(repeated,135),/remaining storage budget/);
+});

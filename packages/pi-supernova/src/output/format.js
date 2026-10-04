@@ -195,11 +195,16 @@ const IDENT_KEY = /^[A-Za-z_$][\w$]*$/;
 const FORMAT_WIDTH = 120;
 
 function formatKey(key) {
+  // Computed spelling retains an own data key instead of setting the prototype.
+  if (key === "__proto__") return '["__proto__"]';
+
   return IDENT_KEY.test(key) ? key : JSON.stringify(key);
 }
 
 function formatPrimitive(value) {
   if (value === undefined) return "undefined";
+
+  if (Object.is(value, -0)) return "-0";
 
   if (Number.isNaN(value) || value === Infinity || value === -Infinity) return String(value);
 

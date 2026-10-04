@@ -57,9 +57,9 @@ function parseRgFiles(res, root) {
 
   if (res.exitCode !== 0 && res.exitCode !== 1) error = res.stderr.trim() || "rg exited with status " + res.exitCode;
   const truncated = res.outputTruncated === true;
-  const output = truncated && !res.stdout.endsWith("\n") ? res.stdout.slice(0, res.stdout.lastIndexOf("\n") + 1) : res.stdout;
+  const output = truncated && !res.stdout.endsWith("\0") ? res.stdout.slice(0, res.stdout.lastIndexOf("\0") + 1) : res.stdout;
 
-  return { files: output.split("\n").flatMap(f => f ? [path.resolve(root, f)] : []).sort(), error, truncated, missing: false };
+  return { files: output.split("\0").flatMap(f => f ? [path.resolve(root, f)] : []).sort(), error, truncated, missing: false };
 }
 
 function addPorcelainRow(rows, i, set) {
@@ -228,7 +228,7 @@ export class WorkspaceIndex {
   }
 
   async listFilesWithRg(root, includeHidden, signal) {
-    const args = ["rg", "--files"];
+    const args = ["rg", "--files", "--null"];
 
     if (includeHidden) args.push("--hidden");
     args.push("-g", "!.git/**", "-g", "!**/.git/**", "--", root);

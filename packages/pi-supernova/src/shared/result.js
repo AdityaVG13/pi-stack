@@ -34,16 +34,20 @@ export const READ_FILES = Symbol("native disk reads");
 
 export const MAX_READ_VALUE_BYTES = 64 * 1024 * 1024;
 
-function containerBytes(value, pending, seen) {
+function containerBytes(value, pending, seen, remaining) {
   if (seen.has(value)) return 8;
   seen.add(value);
   let bytes = 32;
-  const array = Array.isArray(value);
-  const keys = array ? value.keys() : Object.keys(value);
 
-  for (const key of keys) {
+  if (bytes > remaining) return bytes;
+  const array = Array.isArray(value);
+  const keys = array ? null : Object.keys(value);
+
+  for (let i = 0; i < (array ? value.length : keys.length); i++) {
+    const key = array ? i : keys[i];
     bytes += array ? 8 : 24 + 2 * key.length;
 
+    if (bytes > remaining) break;
     // Charge scalar strings at their owning edge; only containers need
     // a deferred visit for alias tracking and child traversal.
     const item = value[key];
@@ -64,7 +68,7 @@ export function readValueBytes(value, limit = Infinity, seen = new WeakSet()) {
     const item = pending.pop();
 
     if (isString(item)) bytes += 2*item.length;
-    else if (isObject(item) || Array.isArray(item)) bytes += containerBytes(item,pending,seen);
+    else if (isObject(item) || Array.isArray(item)) bytes += containerBytes(item,pending,seen,limit-bytes);
     else bytes += 8;
 
     if (bytes > limit) throw new Error("read value exceeds " + limit + " bytes of remaining storage budget; select fewer fields or smaller slices");

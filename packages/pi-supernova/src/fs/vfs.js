@@ -1,10 +1,11 @@
 import {textSignature,sameSignature,sameFileVersion,fileSignature,tooLargeRead,overlayOrThrow,assertReadableFile,readLimitedBytes,remapReadError} from './file-io.js';
-import {canonicalNewPath,resolveCommitTarget,assertExpectedSignature,collectMissingAncestors,makeStageEntry,stageReplacement,installStaged,failCommit,cleanupStaged} from './commit.js';
+import {resolveFileIdentity,resolveCommitTarget,assertExpectedSignature,collectMissingAncestors,makeStageEntry,stageReplacement,installStaged,failCommit,cleanupStaged} from './commit.js';
 
 export {resolveCommitTarget} from './commit.js';
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { isString } from "../shared/decode.js";
 import { decodeUtf8Strict } from "../shared/utf8.js";
 
@@ -52,10 +53,13 @@ export class CausalVfs {
     this.validateWrite = validateWrite;
     this.assertCurrent = assertCurrent;
     // No body cache: every read hits disk (or its overlay) so observed bytes
-    // are never stale. CAS baselines in `expected` are the only retained
-    // per-file state, cleared only at external-mutation boundaries.
+    // are never stale. CAS signatures and observed logical-to-physical bindings
+    // survive between operations, but clear at external-mutation boundaries.
     this.overlays = [];
     this.expected = new Map();
+    this.observedPaths = new Map();
+    this.pathScope = new AsyncLocalStorage();
+    this.bestEffort = false;
     this.pendingSignatures = new Map();
     this.onNewFile = onNewFile;
     this.closed = false;
@@ -70,24 +74,86 @@ export class CausalVfs {
     this.signal?.throwIfAborted();
   }
 
-  getOverlay(target) {
+  // Reuse identity only within one native operation. Commit resolution is
+  // always fresh, and no path/body cache survives into the next operation.
+  withPathScope(fn) { return this.pathScope.run({paths:new Map()}, fn); }
+
+  bindMutationRecord(record) {
+    const scope = this.pathScope.getStore();
+
+    if (scope) scope.record = record;
+  }
+
+  async resolvePath(target, allowMissing = true) {
+    const scope = this.pathScope.getStore()?.paths;
+    let pending = scope?.get(target);
+
+    if (!pending) {
+      pending = resolveFileIdentity(target);
+      scope?.set(target, pending);
+    }
+
+    const identity = await pending;
+
+    if (!allowMissing && identity.missing) throw identity.missing;
+
+    return identity.path;
+  }
+
+  #assertWriteAlias(logicalPath, entry) {
+    if (entry && entry.logicalPath !== logicalPath) throw new Error("conflicting write aliases: " + logicalPath);
+  }
+
+  #overlay(target) {
     for (let i = this.overlays.length - 1; i >= 0; i--) {
-      if (this.overlays[i].has(target)) return this.overlays[i].get(target);
+      const entry = this.overlays[i].get(target);
+
+      if (entry) return entry;
     }
   }
 
-  getOverlayPaths() {
-    return [...new Set(this.overlays.flatMap(overlay => [...overlay.keys()]))];
+  async getOverlay(target) {
+    this.signal?.throwIfAborted();
+
+    if (!this.overlays.some(layer => layer.size)) return undefined;
+
+    return this.#overlay(await this.resolvePath(target))?.content;
+  }
+
+  async getOverlayPaths(scope) {
+    const entries = new Map(this.overlays.flatMap(overlay => [...overlay]));
+
+    if (!scope || !entries.size) return [...entries.values()].map(entry => entry.logicalPath);
+    const canonical = await this.resolvePath(scope);
+
+    // Expose the caller's scope spelling, including directories not yet on disk.
+    const paths = [];
+
+    for (const target of entries.keys()) {
+      if (scopeContains(canonical, target)) paths.push(path.resolve(scope, path.relative(canonical, target)));
+    }
+
+    return paths;
+  }
+
+  #assertIdentity(logicalPath, target) {
+    const observed = this.observedPaths.get(logicalPath);
+
+    if (observed !== undefined && observed !== target) throw new Error("write conflict: path target changed since it was read: " + logicalPath + "; read it again before retrying");
+  }
+
+  #observe(logicalPath, target, signature, preserveRead = false) {
+    if (preserveRead) this.#assertIdentity(logicalPath, target);
+
+    if (!preserveRead || !this.expected.has(target)) this.expected.set(target, signature);
+    this.observedPaths.set(logicalPath, target);
   }
 
   async readRevision(scope) {
     let canonical;
 
-    try { canonical = await fs.realpath(scope); }
-    catch (error) {
-      if (error.code !== "ENOENT") await remapReadError(error, scope);
-      canonical = await canonicalNewPath(scope).catch(failure => remapReadError(failure, scope));
-    }
+    try { canonical = await this.resolvePath(scope); }
+    catch (error) { await remapReadError(error, scope); }
 
     const read = { scope: canonical, changed: [...(installingPaths ?? [])].some(target => scopeContains(canonical, target)) };
     readScopes.add(read);
@@ -106,18 +172,20 @@ export class CausalVfs {
     } finally { this.releaseRead(read); }
   }
 
-  async read(target, { preserveRead = false, maxBytes, label = "read input", strict = true } = {}) {
-    const overlay = this.getOverlay(target);
-
-    if (overlay !== undefined) return overlayOrThrow(overlay, maxBytes, label, target);
-
+  async read(target, { preserveRead = false, forWrite = false, maxBytes, label = "read input", strict = true } = {}) {
+    this.signal?.throwIfAborted();
     let revision;
 
     // External editors and captured tools can change a file between any two reads.
     // Open once with O_NONBLOCK so a FIFO or device cannot park a host I/O worker.
     try {
       revision = await this.readRevision(target);
-      const file = await fs.open(target, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+      const overlay = this.#overlay(revision.scope);
+
+      if (forWrite) this.#assertWriteAlias(target, overlay);
+
+      if (overlay) return overlayOrThrow(overlay.content, maxBytes, label, target);
+      const file = await fs.open(revision.scope, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
       let bytes;
 
       try {
@@ -133,7 +201,7 @@ export class CausalVfs {
       await this.assertReadCommitted(revision);
 
       // Hash the actual bytes, not a lossy UTF-8 decode/re-encode.
-      if (!preserveRead || !this.expected.has(target)) this.expected.set(target, textSignature(bytes));
+      this.#observe(target, revision.scope, textSignature(bytes), preserveRead || forWrite);
 
       return strict ? decodeUtf8Strict(bytes, target) : bytes.toString("utf8");
     } catch (err) {
@@ -151,53 +219,55 @@ export class CausalVfs {
   }
 
   async captureExpected(target) {
-    if (this.getOverlay(target) !== undefined || this.expected.has(target)) return;
+    const canonical = await this.resolvePath(target);
+    await this.#captureExpected(target, canonical);
+  }
 
-    this.expected.set(target, await this.#diskSignature(target));
+  async #captureExpected(logicalPath, target) {
+    this.#assertIdentity(logicalPath, target);
+
+    if (!this.#overlay(target) && !this.expected.has(target)) this.expected.set(target, await this.#diskSignature(target));
+    this.observedPaths.set(logicalPath, target);
   }
 
   async recordExpected(target, observed, bytes) {
-
-    if (this.getOverlay(target) !== undefined) return;
-
-    if (!observed) {
-      this.expected.set(target, await this.#diskSignature(target));
-
-      return;
-    }
-
-    // Windows timestamps can alias same-size rewrites, so loaded bytes still
-    // require a content check there. Other hosts can reuse a whole-file read.
-    if (bytes !== undefined && (!Buffer.isBuffer(bytes) || bytes.length !== observed.size)) throw new Error("file changed while reading: " + target + "; expected complete bytes");
     this.signal?.throwIfAborted();
-
-    const revision = await this.readRevision(target);
-
-    // Share only an in-flight hash of this exact observed file version. Never
-    // retain a completed digest as a read cache or mix different snapshots.
-    let job = this.pendingSignatures.get(target);
-
-    if (!job || !sameFileVersion(job.observed, observed)) {
-      job = { observed, promise: bytes === undefined || process.platform === "win32"
-        ? fileSignature(target, this.signal, observed)
-        : Promise.resolve(textSignature(bytes)) };
-      this.pendingSignatures.set(target, job);
-    }
+    const revision = await this.readRevision(target), canonical = revision.scope;
+    let job;
 
     try {
+      if (this.#overlay(canonical)) return;
+
+      if (!observed) {
+        this.#observe(target, canonical, await this.#diskSignature(canonical));
+
+        return;
+      }
+
+      // Windows timestamps can alias same-size rewrites; loaded bytes must
+      // still agree with disk. Other hosts can reuse a complete byte snapshot.
+      if (bytes !== undefined && (!Buffer.isBuffer(bytes) || bytes.length !== observed.size)) throw new Error("file changed while reading: " + target + "; expected complete bytes");
+      job = this.pendingSignatures.get(canonical);
+
+      if (!job || !sameFileVersion(job.observed, observed)) {
+        job = { observed, promise: bytes === undefined || process.platform === "win32"
+          ? fileSignature(canonical, this.signal, observed)
+          : Promise.resolve(textSignature(bytes)) };
+        this.pendingSignatures.set(canonical, job);
+      }
+
       const signature = await job.promise;
 
       if (bytes !== undefined && process.platform === "win32" && !sameSignature(signature, textSignature(bytes))) throw new Error("file changed while reading: " + target);
       await this.assertReadCommitted(revision);
 
-      // Each window may finish at a different time. Its own post-read version
-      // check must survive sharing the hash with an earlier reader.
-      if (!sameFileVersion(observed, await fs.stat(target))) throw new Error("file changed while reading: " + target);
-      this.expected.set(target, signature);
+      // Each window retains its own post-read check even when hashing overlaps.
+      if (!sameFileVersion(observed, await fs.stat(canonical))) throw new Error("file changed while reading: " + target);
+      this.#observe(target, canonical, signature);
     } finally {
       this.releaseRead(revision);
 
-      if (this.pendingSignatures.get(target) === job) this.pendingSignatures.delete(target);
+      if (job && this.pendingSignatures.get(canonical) === job) this.pendingSignatures.delete(canonical);
     }
   }
 
@@ -208,25 +278,49 @@ export class CausalVfs {
 
     if (!content.isWellFormed()) throw new Error("write requires well-formed Unicode text: unpaired UTF-16 surrogate in " + target + "; avoid splitting a Unicode character");
 
-    try {
-      if ((await fs.stat(target)).isDirectory()) throw new Error("cannot write to a directory: " + target);
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
+    const canonical = await this.resolvePath(target);
+    const previous = this.#overlay(canonical);
+
+    this.#assertWriteAlias(target, previous);
+
+    if (!previous) {
+      try {
+        if ((await fs.stat(canonical)).isDirectory()) throw new Error("cannot write to a directory: " + target);
+      } catch (err) {
+        if (err.code !== "ENOENT") throw err;
+      }
     }
 
     this.assertWritable();
 
-    await this.captureExpected(target);
+    await this.#captureExpected(target, canonical);
 
     this.assertWritable();
+    const latest = this.#overlay(canonical);
 
-    if (this.overlays.length) {
-      this.overlays.at(-1).set(target, content);
+    // Concurrent aliases may have staged while signature capture awaited I/O.
+    this.#assertWriteAlias(target, latest);
+
+    const record = this.pathScope.getStore()?.record;
+
+    // The host retains an empty outer layer for program lifecycle bookkeeping.
+    // Best-effort mode stages only inside an explicit inner checkpoint.
+    if (this.overlays.length && (!this.bestEffort || this.overlays.length > 1)) {
+      this.overlays.at(-1).set(canonical, { logicalPath: target, content });
+
+      if (record) { record.mutationState = "pending"; record.mutationDepth = this.overlays.length; }
 
       return { speculative: true };
     }
 
-    await this.flush(new Map([[target, content]]));
+    try {
+      await this.flush(new Map([[target, content]]), new Map([[target, canonical]]));
+
+      if (record) record.mutationState = "saved";
+    } catch (error) {
+      if (record && this.mutations.recoveryFailed) record.mutationState = "uncertain";
+      throw error;
+    }
 
     return { speculative: false };
   }
@@ -239,20 +333,32 @@ export class CausalVfs {
   }
 
   /** Stage every file and its backup before replacing any destination. */
-  async flush(writes) {
+  async #flushOverlay(overlay) {
+    const writes = new Map(), targets = new Map();
+
+    for (const [target, entry] of overlay) {
+      writes.set(entry.logicalPath, entry.content);
+      targets.set(entry.logicalPath, target);
+    }
+
+    return this.flush(writes, targets);
+  }
+
+  async flush(writes, pinnedTargets = new Map()) {
     this.assertCurrent?.();
     this.signal?.throwIfAborted();
 
     if (!writes.size) return;
     this.mutations.pendingCommits++;
     const signal = this.signal;
-    let started = false, cancelled = false, pendingWrites = writes;
+    let started = false, cancelled = false, pendingWrites = writes, pendingTargets = pinnedTargets;
 
     return new Promise((resolve, reject) => {
       const abort = () => {
         if (started || cancelled) return;
         cancelled = true;
         pendingWrites = null;
+        pendingTargets = null;
         this.mutations.pendingCommits--;
         signal.removeEventListener("abort", abort);
         reject(signal.reason);
@@ -269,9 +375,9 @@ export class CausalVfs {
 
         for (const target of pendingWrites.keys()) noteCommitPath(target);
 
-        try { resolve(await this.flushWrites(pendingWrites)); }
+        try { resolve(await this.flushWrites(pendingWrites, pendingTargets)); }
         catch (error) { reject(error); }
-        finally { installingPaths = null; pendingWrites = null; this.mutations.pendingCommits--; }
+        finally { installingPaths = null; pendingWrites = null; pendingTargets = null; this.mutations.pendingCommits--; }
       });
 
       commitTail = work.catch(() => {});
@@ -281,7 +387,7 @@ export class CausalVfs {
     });
   }
 
-  async flushWrites(writes) {
+  async flushWrites(writes, pinnedTargets = new Map()) {
     const staged = [];
     const targets = new Set();
     const createdDirs = [];
@@ -294,8 +400,12 @@ export class CausalVfs {
       for (const [logicalPath, content] of writes) {
         this.signal?.throwIfAborted();
         const { target, stat } = await resolveCommitTarget(logicalPath);
+        // Validation may wait or cancel; publish the physical read hazard first.
         noteCommitPath(target);
         await this.validateWrite?.(logicalPath);
+        this.#assertIdentity(logicalPath, target);
+
+        if (pinnedTargets.has(logicalPath) && pinnedTargets.get(logicalPath) !== target) throw new Error("write conflict: path target changed while staged: " + logicalPath);
 
         if (targets.has(target)) throw new Error("conflicting write aliases: " + logicalPath);
         targets.add(target);
@@ -323,12 +433,12 @@ export class CausalVfs {
     if (!this.overlays.length) return { committed: 0, depth: 0 };
     const top = this.overlays.at(-1);
 
-    if (this.overlays.length > 1) {
+    if (this.overlays.length > 1 && !(this.bestEffort && this.overlays.length === 2)) {
       const parent = this.overlays[this.overlays.length - 2];
 
       for (const [key, value] of top) parent.set(key, value);
     } else {
-      await this.flush(top);
+      await this.#flushOverlay(top);
     }
 
     this.overlays.pop();
@@ -360,7 +470,7 @@ export class CausalVfs {
  return false; }
 
     const pending = this.overlays[0];
-    await this.flush(pending);
+    await this.#flushOverlay(pending);
     // Committed writes no longer belong to the speculative rollback set.
     this.overlays[0] = new Map();
     this.assertWritable();
@@ -370,15 +480,15 @@ export class CausalVfs {
   }
 
   /** External-mutation boundary: drop CAS baselines so the next access re-observes disk. */
-  invalidateObserved() { this.expected.clear(); }
+  invalidateObserved() { this.expected.clear(); this.observedPaths.clear(); this.pathScope.getStore()?.paths.clear(); }
   getOverlayDepth() { return this.overlays.length; }
   describeOverlays() {
     let files = 0, bytes = 0;
 
     for (const layer of this.overlays) {
-      for (const content of layer.values()) {
+      for (const entry of layer.values()) {
         files++;
-        bytes += Buffer.byteLength(content, "utf8");
+        bytes += Buffer.byteLength(entry.content, "utf8");
       }
     }
 
