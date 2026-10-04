@@ -15,13 +15,24 @@ import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { loadConfig, type Config } from "./lib/config.ts";
 import { isRecord, type JsonObject, type JsonValue } from "./lib/decode.ts";
-import { compactSession, liveFromEntries, type CliffDetails, type HookEntry } from "./lib/pi-hook.ts";
+import {
+  compactSession,
+  liveFromEntries,
+  resolveCompactReason,
+  type CliffDetails,
+  type CompactReason,
+  type HookEntry,
+} from "./lib/pi-hook.ts";
 
 type LastCliff = {
   reason: string;
   at: string;
   details: CliffDetails;
 };
+
+function eventReason(event: object): unknown {
+  return Object.prototype.hasOwnProperty.call(event, "reason") ? (event as { reason?: unknown }).reason : undefined;
+}
 
 function jsonObjectFrom(value: JsonValue): JsonObject {
   // SAFETY: LLM Message is JSON-serializable; reparse to JsonObject.
@@ -57,6 +68,15 @@ function hookEntriesFromBranch(branchEntries: readonly SessionEntry[]): HookEntr
         id: entry.id,
         kind: "message",
         message: { role: "user", content: isRecord(content) || Array.isArray(content) ? JSON.parse(JSON.stringify(content)) : content },
+      });
+      continue;
+    }
+
+    if (entry.type === "branch_summary" && entry.summary) {
+      out.push({
+        id: entry.id,
+        kind: "branch_summary",
+        summary: entry.summary,
       });
       continue;
     }
@@ -102,6 +122,7 @@ function formatStatus(cfg: Config, last: LastCliff | null): string {
 export default function registerCliffCompaction(pi: ExtensionAPI) {
   let cfg = loadConfig();
   let last: LastCliff | null = null;
+  let pendingReason: CompactReason = "manual";
 
   pi.registerCommand("cliff", {
     description: "CliffCompaction status and config (mechanical autocompaction)",
@@ -125,12 +146,24 @@ export default function registerCliffCompaction(pi: ExtensionAPI) {
     },
   });
 
+  // session_before_compact has no reason. Auto-compaction emits this first.
+  pi.on("auto_compaction_start", (event) => {
+    pendingReason = resolveCompactReason(eventReason(event));
+  });
+
+  pi.on("auto_compaction_end", () => {
+    pendingReason = "manual";
+  });
+
   pi.on("session_before_compact", async (event, ctx) => {
     if (!cfg.enabled) {
       return;
     }
 
-    const { preparation, branchEntries, reason } = event;
+    const { preparation, branchEntries } = event;
+    const fromEvent = resolveCompactReason(eventReason(event));
+    const reason = fromEvent !== "manual" ? fromEvent : pendingReason;
+    pendingReason = "manual";
 
     try {
       const entries = hookEntriesFromBranch(branchEntries);
@@ -180,6 +213,6 @@ export default function registerCliffCompaction(pi: ExtensionAPI) {
       return;
     }
 
-    ctx.ui.setStatus("cliff", "cliff · compacted (" + event.reason + ")");
+    ctx.ui.setStatus("cliff", "cliff · compacted (" + (last?.reason ?? "done") + ")");
   });
 }

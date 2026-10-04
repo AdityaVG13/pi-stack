@@ -18,7 +18,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../decode.ts";
-import { digestObj } from "../hashing.ts";
+import { digestBytes, digestObj } from "../hashing.ts";
 import { canonicalJson } from "../json.ts";
 import {
   makeDialect,
@@ -32,7 +32,15 @@ const MODEL_ITEM_TYPES = new Set([
   "reasoning",
   "function_call",
   "custom_tool_call",
+  "apply_patch_call",
+  "computer_call",
+  "code_interpreter_call",
+  "mcp_call",
+  "mcp_list_tools",
+  "mcp_approval_request",
   "local_shell_call",
+  "shell_call",
+  "file_search_call",
   "web_search_call",
   "tool_search_call",
   "image_generation_call",
@@ -55,6 +63,11 @@ function isModelOutput(item: JsonObject): boolean {
     return asString(item.role) === "assistant";
   }
 
+  // Server discovery is part of the model run; a client reply closes it.
+  if (t === "tool_search_output") {
+    return asString(item.execution) === "server";
+  }
+
   return MODEL_ITEM_TYPES.has(t);
 }
 
@@ -75,6 +88,8 @@ function contentText(content: JsonValue | undefined): string {
 
       if (t === "input_text" || t === "output_text" || t === "text") {
         parts.push(asString(p.text));
+      } else if (t === "refusal") {
+        parts.push(asString(p.refusal));
       }
     }
 
@@ -86,6 +101,48 @@ function contentText(content: JsonValue | undefined): string {
   }
 
   return String(content);
+}
+
+function callArgs(item: JsonObject, type: string): JsonValue | undefined {
+  if (type === "custom_tool_call") return item.input;
+
+  if (type === "apply_patch_call") return item.operation;
+
+  if (type === "computer_call") return item.actions ?? item.action;
+
+  if (type === "local_shell_call" || type === "shell_call" || type === "web_search_call") return item.action;
+
+  if (type === "file_search_call") return item.queries;
+
+  if (type === "code_interpreter_call") return item.code;
+
+  if (type === "image_generation_call") return item.revised_prompt;
+
+  return item.arguments;
+}
+
+function codeLogs(outputs: JsonValue | undefined): string {
+  const parts: string[] = [];
+
+  for (const output of asArray(outputs)) {
+    if (isRecord(output) && asString(output.type) === "logs") {
+      parts.push(asString(output.logs));
+    }
+  }
+
+  return parts.join("\n");
+}
+
+function fileSearchText(results: JsonValue | undefined): string {
+  const parts: string[] = [];
+
+  for (const result of asArray(results)) {
+    if (isRecord(result) && isString(result.text)) {
+      parts.push(result.text);
+    }
+  }
+
+  return parts.join("\n");
 }
 
 function canonContent(content: JsonValue | undefined): JsonArray {
@@ -128,6 +185,7 @@ export function digestMessage(item: JsonObject): string {
       "reasoning",
       asString(item.encrypted_content),
       canonicalJson(item.summary ?? []),
+      canonicalJson(item.content ?? []),
     ]);
   }
 
@@ -138,17 +196,29 @@ export function digestMessage(item: JsonObject): string {
       out = canonicalJson(out ?? null);
     }
 
-    return digestObj(["function_call_output", asString(item.call_id), out]);
+    // Textual JSON and content blocks have different recap semantics.
+    return digestObj(["function_call_output", asString(item.call_id), isString(item.output), out]);
   }
 
   if (t.endsWith("_call") || t === "function_call") {
-    let args = item.arguments;
+    let args = callArgs(item, t);
 
     if (!isString(args)) {
       args = canonicalJson(args ?? "");
     }
 
-    return digestObj([t, asString(item.call_id), asString(item.name), args]);
+    const fields: JsonArray = [t, asString(item.call_id), asString(item.name), args];
+
+    if (t === "mcp_call") fields.push(asString(item.output), asString(item.error));
+
+    if (t === "code_interpreter_call") fields.push(canonicalJson(item.outputs ?? []));
+
+    if (t === "file_search_call") fields.push(canonicalJson(item.results ?? []));
+
+    // Image changes can invalidate the cliff's trigger even without textual excerpts.
+    if (t === "image_generation_call") fields.push(isString(item.result) ? digestBytes(item.result) : null);
+
+    return digestObj(fields);
   }
 
   const stripped: JsonObject = {};
@@ -263,7 +333,7 @@ export function summarizeMessage(item: JsonObject, cfg: Config): string[] {
 
     const bits: string[] = [];
 
-    for (const p of asArray(item.summary)) {
+    for (const p of asArray(item.summary).concat(asArray(item.content))) {
       if (isRecord(p)) {
         bits.push(asString(p.text));
       }
@@ -278,11 +348,15 @@ export function summarizeMessage(item: JsonObject, cfg: Config): string[] {
     return ["thinking: " + truncate(text, cfg.thinkingMaxChars)];
   }
 
-  if (t === "function_call_output") {
+  if (t === "function_call_output" || t === "custom_tool_call_output" || t === "local_shell_call_output" || t === "shell_call_output" || t === "apply_patch_call_output") {
     let out = item.output;
 
-    if (!isString(out)) {
-      out = contentText(out) || canonicalJson(out ?? null);
+    if (t === "shell_call_output") {
+      // Native shell arrays contain command results, not content attachments.
+      out = canonicalJson(out ?? []);
+    } else if (!isString(out)) {
+      // Attachment-only content arrays must not become textual JSON excerpts.
+      out = contentText(out) || (isArray(out) ? "" : canonicalJson(out ?? null));
     }
 
     out = out.trim();
@@ -295,7 +369,7 @@ export function summarizeMessage(item: JsonObject, cfg: Config): string[] {
   }
 
   if (t.endsWith("_call")) {
-    let args = item.arguments;
+    let args = callArgs(item, t);
 
     if (!isString(args)) {
       args = canonicalJson(args ?? "");
@@ -303,7 +377,22 @@ export function summarizeMessage(item: JsonObject, cfg: Config): string[] {
 
     const name = asString(item.name) || t;
 
-    return ["[" + name + "] " + truncate(args, cfg.cmdMaxChars)];
+    const lines = ["[" + name + "] " + truncate(args, cfg.cmdMaxChars)];
+
+    if (t === "mcp_call" || t === "code_interpreter_call" || t === "file_search_call") {
+      const outputs = t === "mcp_call" ? [asString(item.output), asString(item.error)]
+        : [t === "file_search_call" ? fileSearchText(item.results) : codeLogs(item.outputs)];
+
+      for (const result of outputs) {
+        const output = result.trim();
+
+        if (output && output.length <= cfg.resultMaxChars) {
+          lines.push("result: " + output);
+        }
+      }
+    }
+
+    return lines;
   }
 
   return [];

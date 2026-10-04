@@ -5,13 +5,15 @@
  * from firstKeptEntryId. There is no separate head slot, so the verbatim
  * head (task) is folded into the summary text. Previous compaction
  * entries are skipped so we never compact a compaction: each pass
- * compresses only original live-session messages (Lt).
+ * compresses only original live-session messages (Lt), with the original
+ * head retained across cliffs. Multimodal heads fall back to Pi because a
+ * text summary cannot preserve them.
  */
 
-import { compact } from "./cliff.ts";
+import { compact, type CompactResult } from "./cliff.ts";
 import { replaceConfig, type Config } from "./config.ts";
 import { isRecord, isString, type JsonObject } from "./decode.ts";
-import { SUMMARY_HEADER } from "./dialects/base.ts";
+import { BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, fitSummary, SUMMARY_HEADER } from "./dialects/base.ts";
 import { DIALECT as piDialect } from "./dialects/pi.ts";
 import { estimateTokens } from "./engine.ts";
 
@@ -20,13 +22,32 @@ export type SessionMessageRef = {
   message: JsonObject;
 };
 
+export type CompactReason = "manual" | "threshold" | "overflow";
+
 export type CompactSessionInput = {
   live: SessionMessageRef[];
   tokensBefore: number;
   fallbackFirstKeptEntryId: string;
-  reason: "manual" | "threshold" | "overflow";
+  reason: CompactReason;
   cfg: Config;
 };
+
+/**
+ * Pi's session_before_compact event has no reason field. Auto-compaction
+ * emits auto_compaction_start first with threshold | overflow | idle |
+ * incomplete. Manual `/compact` never fires that start event.
+ */
+export function resolveCompactReason(raw: unknown): CompactReason {
+  if (raw === "overflow" || raw === "incomplete") {
+    return "overflow";
+  }
+
+  if (raw === "threshold" || raw === "idle") {
+    return "threshold";
+  }
+
+  return "manual";
+}
 
 export type CliffDetails = {
   version: number;
@@ -39,6 +60,7 @@ export type CliffDetails = {
   liveMessages: number;
   keptMessages: number;
   estTokensOut: number;
+  overBudget: boolean;
 };
 
 export type CompactSessionOutput = {
@@ -77,27 +99,35 @@ function summaryBody(summary: JsonObject): string {
   return "";
 }
 
-function foldHeadIntoSummary(resultMessages: JsonObject[], headLen: number, body: string, cfg: Config): string {
+function headText(message: JsonObject): string | null {
+  if (message.role !== "user" && message.role !== "system") return null;
+
+  if (isString(message.content)) return message.content;
+
+  if (!Array.isArray(message.content)) return null;
   const parts: string[] = [];
-  const headCfg = replaceConfig(cfg, { thoughtMaxChars: 0, thinkingMaxChars: 0, humanMaxChars: cfg.humanMaxChars });
+
+  for (const block of message.content) {
+    if (!isRecord(block) || block.type !== "text" || !isString(block.text)) return null;
+    parts.push(block.text);
+  }
+
+  return parts.join("\n");
+}
+
+function foldHeadIntoSummary(resultMessages: JsonObject[], headLen: number, body: string): string {
+  const parts: string[] = [];
 
   for (let i = 0; i < headLen; i++) {
-    const piece = piDialect.summarizeMessage(resultMessages[i], headCfg);
+    const text = headText(resultMessages[i]);
 
-    for (const p of piece) {
-      parts.push(p);
-    }
+    if (text === null) throw new Error("protected head cannot be represented in a text summary");
+    parts.push(String(resultMessages[i].role) + ": " + text);
   }
 
-  if (body) {
-    parts.push(body);
-  }
+  if (body) parts.push(body);
 
-  if (parts.length === 0) {
-    return SUMMARY_HEADER;
-  }
-
-  return SUMMARY_HEADER + "\n\n" + parts.join("\n\n---\n\n");
+  return parts.length === 0 ? SUMMARY_HEADER : SUMMARY_HEADER + "\n\n" + parts.join("\n\n---\n\n");
 }
 
 /**
@@ -116,71 +146,85 @@ export function compactSession(input: CompactSessionInput): CompactSessionOutput
     return null;
   }
 
+  const headLen = msgs.findIndex(msg => piDialect.isAssistant(msg));
+
+  if (headLen < 0) return null;
+  const head = msgs.slice(0, headLen);
+
+  // Pi stores a text summary plus one contiguous suffix. Let its default
+  // summarizer handle protected multimodal heads instead of dropping images.
+  if (head.some(message => headText(message) === null)) return null;
+
+  const compactLive = (knobs: Config): CompactResult | null => {
+    const value = compact(msgs.slice(headLen), piDialect, knobs);
+
+    if (value === null) return null;
+
+    return { ...value, messages: [...head, ...value.messages], headLen, cut: headLen + value.cut };
+  };
+
   const force = input.reason === "overflow";
+  const threshold = input.cfg.thresholdTokens;
   let rung = 0;
   let cfg = input.cfg;
-  let result = compact(msgs, piDialect, cfg);
+  let result = compactLive(cfg);
 
-  if (result === null && (force || input.reason === "threshold")) {
-    rung = 1;
-    cfg = replaceConfig(input.cfg, { keepRecent: 1 });
-    result = compact(msgs, piDialect, cfg);
-  }
+  const render = (value: CompactResult): string =>
+    foldHeadIntoSummary(value.messages, value.headLen, summaryBody(value.summary));
 
-  if (result === null && force) {
-    rung = 2;
+  const tokens = (value: CompactResult, summary: string): number =>
+    estimateTokens({ messages: [piDialect.userMessage(summary), ...value.messages.slice(value.headLen + 1)] });
+
+  for (let step = 1; step <= 2; step++) {
+    const missing = result === null && (force || (step === 1 && input.reason === "threshold"));
+    // Overflow already failed the provider window. Do not wait for the library
+    // thresholdTokens (200k default) before tightening keepRecent / thoughts.
+    const oversized = result !== null && (force || (input.cfg.strict && tokens(result, render(result)) > threshold));
+
+    if (!missing && !oversized) {
+      break;
+    }
+
     const cap = input.cfg.thoughtMaxChars;
-    cfg = replaceConfig(input.cfg, {
-      keepRecent: 1,
+
+    const keepRecent = Math.min(input.cfg.keepRecent, 1);
+    const knobs = replaceConfig(input.cfg, step === 1 ? { keepRecent } : {
+      keepRecent,
       thoughtMaxChars: cap <= 0 ? 300 : Math.min(cap, 300),
       keepThinking: false,
     });
-    result = compact(msgs, piDialect, cfg);
+
+    const candidate = compactLive(knobs);
+
+    if (candidate !== null && (result === null || tokens(candidate, render(candidate)) <= tokens(result, render(result)))) {
+      result = candidate;
+      cfg = knobs;
+      rung = step;
+    }
   }
 
   if (result === null) {
     return null;
   }
 
-  const body = summaryBody(result.summary);
-  let summary = foldHeadIntoSummary(result.messages, result.headLen, body, input.cfg);
-  const kept = result.messages.length - result.headLen - 1;
-  const cut = result.cut;
-  let firstKeptEntryId = input.fallbackFirstKeptEntryId;
+  let summary = render(result);
+  let est = tokens(result, summary);
 
-  if (cut >= 0 && cut < input.live.length) {
-    firstKeptEntryId = input.live[cut].entryId;
-  }
-
-  const outgoing: JsonObject = { messages: result.messages };
-  let est = estimateTokens(outgoing);
-
-  if (input.cfg.strict && est > input.cfg.thresholdTokens && rung < 3) {
+  if (input.cfg.strict && est > threshold) {
+    const prefix = foldHeadIntoSummary(result.messages, result.headLen, "");
+    const body = summaryBody(result.summary);
+    const parts = body ? body.split("\n\n---\n\n") : [];
+    const protectedResult = result;
+    summary = fitSummary(prefix, parts, (text) => tokens(protectedResult, text) <= threshold);
+    est = tokens(result, summary);
     rung = 3;
-    const header = SUMMARY_HEADER;
-    const rest = summary.slice(header.length).trim();
-    const parts = rest.length > 0 ? rest.split("\n\n---\n\n") : [];
-    const budget = input.cfg.thresholdTokens * 4 - 64 - header.length;
-    const keptParts: string[] = [];
-    let used = 0;
-
-    for (let i = parts.length - 1; i >= 0; i--) {
-      if (used + parts[i].length > Math.max(budget, 0)) {
-        break;
-      }
-
-      keptParts.push(parts[i]);
-      used += parts[i].length + 9;
-    }
-
-    keptParts.reverse();
-    summary = keptParts.length > 0 ? header + "\n\n" + keptParts.join("\n\n---\n\n") : header;
-    est = estimateTokens({ messages: [piDialect.userMessage(summary), ...result.messages.slice(result.headLen + 1)] });
   }
 
   return {
     summary,
-    firstKeptEntryId,
+    // cut === live.length means keepRecent 0: no suffix. A found fallback id
+    // (Pi's preparation cut, often the head) would revive the compacted middle.
+    firstKeptEntryId: input.live[result.cut]?.entryId ?? "",
     tokensBefore: input.tokensBefore,
     rung,
     details: {
@@ -188,27 +232,47 @@ export function compactSession(input: CompactSessionInput): CompactSessionOutput
       method: "cliffcompaction",
       reason: input.reason,
       headLen: result.headLen,
-      cut,
-      keepRecent: input.cfg.keepRecent,
+      cut: result.cut,
+      keepRecent: cfg.keepRecent,
       rung,
       liveMessages: msgs.length,
-      keptMessages: kept,
+      keptMessages: result.messages.length - result.headLen - 1,
       estTokensOut: est,
+      overBudget: est > threshold,
     },
   };
 }
 
 export type HookEntry = {
   id: string;
-  kind: "message" | "compaction" | "other";
+  kind: "message" | "compaction" | "branch_summary" | "other";
   message?: JsonObject;
   firstKeptEntryId?: string;
+  summary?: string;
 };
 
+function liveRefFromEntry(entry: HookEntry): SessionMessageRef | null {
+  if (entry.kind === "message" && entry.message) {
+    return { entryId: entry.id, message: entry.message };
+  }
+
+  // Pi puts /tree branch_summary entries in model context. Dropping them here
+  // would omit that text from both the mechanical recap and the kept suffix.
+  if (entry.kind === "branch_summary" && entry.summary) {
+    return {
+      entryId: entry.id,
+      message: { role: "user", content: BRANCH_SUMMARY_PREFIX + entry.summary + BRANCH_SUMMARY_SUFFIX },
+    };
+  }
+
+  return null;
+}
+
 /**
- * Live session Lt: original messages from the previous cliff's
- * firstKeptEntryId (or the start of the session) forward. Compaction
- * entries themselves are skipped so prior summaries are discarded.
+ * Live session Lt: the original head plus original messages from the previous
+ * cliff's firstKeptEntryId forward, without duplicating overlap. Compaction
+ * entries themselves are skipped so prior summaries are discarded. /tree
+ * branch_summary entries stay, matching Pi's model context.
  */
 export function liveFromEntries(entries: HookEntry[]): SessionMessageRef[] {
   let start = 0;
@@ -239,13 +303,20 @@ export function liveFromEntries(entries: HookEntry[]): SessionMessageRef[] {
     start = idx >= 0 ? idx : i + 1;
   }
 
+  const firstAssistant = entries.findIndex((e) => {
+    const ref = liveRefFromEntry(e);
+
+    return ref !== null && piDialect.isAssistant(ref.message);
+  });
+  const headEnd = firstAssistant < 0 ? entries.length : firstAssistant;
   const live: SessionMessageRef[] = [];
 
-  for (let i = start; i < entries.length; i++) {
-    const e = entries[i];
+  for (let i = 0; i < entries.length; i++) {
+    if (i >= headEnd && i < start) continue;
+    const ref = liveRefFromEntry(entries[i]);
 
-    if (e.kind === "message" && e.message) {
-      live.push({ entryId: e.id, message: e.message });
+    if (ref) {
+      live.push(ref);
     }
   }
 

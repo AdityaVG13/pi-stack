@@ -11,7 +11,14 @@ import type { Dialect } from "./base.ts";
 
 export type { Dialect } from "./base.ts";
 
-export { SUMMARY_HEADER, PI_COMPACTION_PREFIX, truncate, stripTaskNotifications } from "./base.ts";
+export {
+  SUMMARY_HEADER,
+  PI_COMPACTION_PREFIX,
+  BRANCH_SUMMARY_PREFIX,
+  BRANCH_SUMMARY_SUFFIX,
+  truncate,
+  stripTaskNotifications,
+} from "./base.ts";
 
 export { DIALECT as anthropicDialect } from "./anthropic.ts";
 

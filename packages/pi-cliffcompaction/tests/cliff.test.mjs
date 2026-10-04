@@ -5,6 +5,8 @@ import { makeConfig } from "../lib/config.ts";
 import { DIALECT as ANTHROPIC } from "../lib/dialects/anthropic.ts";
 import { SUMMARY_HEADER } from "../lib/dialects/base.ts";
 import { DIALECT as OPENAI } from "../lib/dialects/openai-chat.ts";
+import { DIALECT as RESPONSES } from "../lib/dialects/openai-responses.ts";
+import { DIALECT as PI } from "../lib/dialects/pi.ts";
 import { aAssistant, aResult, aSession, aUser, oSession } from "./util.mjs";
 
 function cfg(patch) {
@@ -47,15 +49,82 @@ describe("structure", () => {
   it("returns null when there is no assistant yet", () => {
     assert.equal(compact([aUser("task")], ANTHROPIC, cfg({ keepRecent: 1 })), null);
   });
+
+  it("keepRecent 0 recaps a single giant assistant turn when caps shrink it", () => {
+    const giant = "Y".repeat(4000);
+    const msgs = [aUser("task"), { role: "assistant", content: giant }];
+
+    assert.equal(compact(msgs, ANTHROPIC, cfg({ keepRecent: 0 })), null);
+
+    const res = compact(msgs, ANTHROPIC, cfg({ keepRecent: 0, thoughtMaxChars: 300 }));
+
+    assert.ok(res);
+    assert.equal(res.cut, msgs.length);
+    assert.equal(res.messages.length, 2);
+    assert.equal(String(res.messages[1].content).includes(giant), false);
+    assert.ok(String(res.messages[1].content).includes("Y".repeat(300) + "..."));
+  });
 });
 
 describe("content classes", () => {
+  it("retains Chat Completions refusals as capped assistant text", () => {
+    const refusal = "I cannot perform that action.";
+
+    for (const [assistant, text] of [
+      [{ role: "assistant", content: null, refusal }, refusal],
+      [{ role: "assistant", content: [{ type: "refusal", refusal }] }, refusal],
+      [{ role: "assistant", content: "Here is a safe alternative.", refusal }, "Here is a safe alternative.\n" + refusal],
+    ]) {
+      const msgs = [
+        { role: "user", content: "task" }, assistant,
+        { role: "user", content: "Please use the safe alternative." },
+        { role: "assistant", content: "recent response" },
+      ];
+
+      const full = compact(msgs, OPENAI, cfg({ keepRecent: 1, keepThinking: false }));
+
+      const capped = compact(msgs, OPENAI, cfg({ keepRecent: 1, thoughtMaxChars: 10 }));
+
+      assert.ok(full.summary.content.includes("assistant: " + text));
+      assert.ok(capped.summary.content.includes("assistant: " + text.slice(0, 10) + "..."));
+      assert.deepEqual(full.messages.slice(-1), msgs.slice(-1));
+    }
+  });
+
   it("drops long tool results and keeps short ones", () => {
     const res = compact(aSession(10, 3000), ANTHROPIC, cfg({ keepRecent: 1 }));
     const summary = res.messages[1].content;
 
     assert.equal(summary.includes("X".repeat(600)), false);
     assert.ok(summary.includes("result: test_1 passed (short output)"));
+  });
+
+  it("retains legacy Chat Completions function results within resultMaxChars", () => {
+    const short = "status: READY";
+    const boundary = "boundary result".padEnd(40, ".");
+    const oversized = "oversized result".padEnd(41, ".");
+    const recentCall = { role: "assistant", content: null, function_call: { name: "recent", arguments: "{}" } };
+    const recentResult = { role: "function", name: "recent", content: "recent result" };
+    const msgs = [{ role: "user", content: "task" }];
+
+    for (const [name, content] of [["short", " \n" + short + "\n "], ["boundary", boundary], ["oversized", oversized]]) {
+      msgs.push({ role: "assistant", content: null, function_call: { name, arguments: "{}" } });
+      msgs.push({ role: "function", name, content });
+    }
+
+    msgs.push(recentCall, recentResult);
+    const res = compact(msgs, OPENAI, cfg({ keepRecent: 1, resultMaxChars: 40 }));
+
+    assert.ok(res);
+    assert.equal(res.summary.content, SUMMARY_HEADER + "\n\n" + [
+      "[short] {}", "result: " + short,
+      "[boundary] {}", "result: " + boundary,
+      "[oversized] {}",
+    ].join("\n\n---\n\n"));
+    assert.equal(res.messages[0], msgs[0]);
+    assert.equal(res.messages.at(-2), recentCall);
+    assert.equal(res.messages.at(-1), recentResult);
+    assert.equal(res.cut, msgs.length - 2);
   });
 
   it("truncates tool signatures to cmdMaxChars plus ellipsis", () => {
@@ -282,6 +351,48 @@ describe("speaker tags and stripping", () => {
 });
 
 describe("re-compaction", () => {
+  it("drops a prior summary before follow-up user messages", () => {
+    for (const dialect of [ANTHROPIC, OPENAI, RESPONSES, PI]) {
+      const head = dialect.userMessage("original task");
+
+      const first = compact([
+        head,
+        { role: "assistant", content: "obsolete assistant excerpt" },
+        dialect.userMessage("previous continuation"),
+      ], dialect, cfg({ keepRecent: 0 }));
+
+      assert.ok(first, dialect.name);
+
+      const recent = { role: "assistant", content: "recent answer" };
+
+      const grown = [
+        ...first.messages,
+        dialect.userMessage("follow-up request"),
+        { role: "assistant", content: "live older answer" },
+        dialect.userMessage("live correction"),
+        recent,
+      ];
+
+      for (const keepRecent of [0, 1]) {
+        const result = compact(grown, dialect, cfg({ keepRecent }));
+
+        assert.ok(result, dialect.name);
+        assert.equal(result.headLen, 1, dialect.name);
+        assert.equal(result.messages[0], head);
+        assert.equal(result.messages.filter(dialect.isSummaryMessage).length, 1, dialect.name);
+        const text = JSON.stringify(result.summary);
+
+        assert.ok(text.includes("user: follow-up request"), dialect.name);
+        assert.ok(text.includes("assistant: live older answer"), dialect.name);
+        assert.ok(text.includes("user: live correction"), dialect.name);
+        assert.equal(JSON.stringify(result.messages).includes("obsolete assistant excerpt"), false, dialect.name);
+        assert.equal(result.cut, grown.length - keepRecent, dialect.name);
+
+        if (keepRecent === 1) assert.equal(result.messages.at(-1), recent);
+      }
+    }
+  });
+
   it("stays flat and does not merge the previous summary forward", () => {
     const msgs = aSession(10);
     const res1 = compact(msgs, ANTHROPIC, cfg({ keepRecent: 1 }));

@@ -70,9 +70,15 @@ function envInt(name: string, fallback: number): number {
     return fallback;
   }
 
-  const n = Number.parseInt(raw, 10);
+  const trimmed = raw.trim();
 
-  if (!Number.isFinite(n)) {
+  if (!/^[+-]?\d+$/.test(trimmed)) {
+    return fallback;
+  }
+
+  const n = Number.parseInt(trimmed, 10);
+
+  if (!Number.isSafeInteger(n) || n < 0) {
     return fallback;
   }
 
@@ -116,7 +122,7 @@ export function replaceConfig(cfg: Config, patch: ConfigPatch): Config {
 function intField(obj: JsonObject, snake: string, camel: string, fallback: number): number {
   const raw = obj[snake] ?? obj[camel];
 
-  if (isNumber(raw) && Number.isInteger(raw)) {
+  if (isNumber(raw) && Number.isInteger(raw) && raw >= 0) {
     return raw;
   }
 
@@ -181,6 +187,12 @@ export function defaultConfigPath(): string {
 
   if (explicit) {
     return explicit;
+  }
+
+  const configDir = envRaw("PI_CONFIG_DIR") || envRaw("OMP_CONFIG_DIR");
+
+  if (configDir) {
+    return join(configDir, "cliffcompaction.json");
   }
 
   const home = homedir();

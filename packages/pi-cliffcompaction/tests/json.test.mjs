@@ -48,3 +48,10 @@ describe("canonicalJson is compact sorted JSON", () => {
     assert.equal(canonicalJson(null), "null");
   });
 });
+
+it("documents local number, key-order and Unicode-count semantics", () => {
+  assert.equal(canonicalJson({ "！": 1, "😀": 2 }), '{"😀":2,"！":1}');
+  assert.equal(canonicalJson([1.0, -0, 1e-7]), "[1,0,1e-7]");
+  assert.equal(dumpsCount("😀"), 4);
+  assert.equal(Buffer.byteLength(dumpsDefault("😀"), "utf8"), 6);
+});

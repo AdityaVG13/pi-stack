@@ -15,6 +15,12 @@ export const SUMMARY_HEADER =
 export const PI_COMPACTION_PREFIX =
   "The conversation history before this point was compacted into the following summary:";
 
+/** Match Pi's convertToLlm wrapping of /tree branch_summary entries. */
+export const BRANCH_SUMMARY_PREFIX =
+  "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
+
+export const BRANCH_SUMMARY_SUFFIX = "</summary>";
+
 const TASK_NOTIFICATION_RE = /<task-notification>[\s\S]*?<\/task-notification>\s*/g;
 
 export function stripTaskNotifications(text: string): string {
@@ -34,6 +40,28 @@ export function truncate(text: string, maxChars: number): string {
 
 export function startsWithSummaryHeader(text: string): boolean {
   return text.startsWith(SUMMARY_HEADER) || text.startsWith(PI_COMPACTION_PREFIX);
+}
+
+/** Keep the newest contiguous summary parts that fit the caller's wire budget.
+ * The protected prefix survives even when it alone cannot fit.
+ */
+export function fitSummary(prefix: string, parts: string[], fits: (text: string) => boolean): string {
+  let text = prefix;
+  // Header-only prefixes need a blank line before the first part. A prefix that
+  // already holds protected parts (folded Pi head) must keep the --- delimiter.
+  const glue = prefix.includes("\n\n") ? "\n\n---\n\n" : "\n\n";
+
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const candidate = prefix + glue + parts.slice(i).join("\n\n---\n\n");
+
+    if (!fits(candidate)) {
+      break;
+    }
+
+    text = candidate;
+  }
+
+  return text;
 }
 
 export type Dialect = {

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0
+
+Tests live in `tests/`. Public docs use `--`. `bench/` stays local.
+
 ## 0.1.0
 
 First release. Port of CliffCompaction (Nguyen, Cho, Chen & Dettmers,

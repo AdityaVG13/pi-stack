@@ -41,6 +41,8 @@ function resultText(content: JsonValue | undefined): string {
     for (const p of content) {
       if (isRecord(p) && asString(p.type) === "text") {
         parts.push(asString(p.text));
+      } else if (isRecord(p) && asString(p.type) === "search_result") {
+        parts.push(resultText(p.content));
       } else if (isString(p)) {
         parts.push(p);
       }
@@ -68,12 +70,25 @@ function canonBlock(block: JsonObject): JsonArray {
   }
 
   if (t === "tool_result") {
-    return [
+    const result: JsonArray = [
       "tool_result",
       asString(block.tool_use_id),
       resultText(block.content),
       asBoolean(block.is_error, false),
     ];
+
+    const attachments: JsonArray = [];
+
+    for (const part of asArray(block.content)) {
+      if (isRecord(part) && (asString(part.type) === "image" || asString(part.type) === "document")) {
+        attachments.push(canonBlock(part));
+      }
+    }
+
+    // Dropped attachment bytes still determine whether the original turn triggers a cliff.
+    if (attachments.length > 0) result.push(attachments);
+
+    return result;
   }
 
   if (t === "thinking") {
@@ -86,6 +101,19 @@ function canonBlock(block: JsonObject): JsonArray {
 
   if (t === "image" || t === "document") {
     const src = asObject(block.source) ?? {};
+
+    if (t === "document" && asString(src.type) === "content") {
+      const blocks: JsonArray = [];
+
+      for (const part of asArray(src.content)) {
+        if (isRecord(part)) {
+          blocks.push(canonBlock(part));
+        }
+      }
+
+      return [t, "content", digestObj(isString(src.content) ? src.content : blocks)];
+    }
+
     const payload = asString(src.data) || asString(src.url);
     const h = digestBytes(payload);
 
@@ -207,9 +235,28 @@ function summarizeAssistant(msg: JsonObject, cfg: Config): string[] {
         if (cfg.keepThinking) {
           thinkings.push(asString(b.thinking));
         }
-      } else if (t === "tool_use") {
+      } else if (t === "tool_use" || t === "server_tool_use" || t === "mcp_tool_use") {
         const args = canonicalJson(b.input ?? {});
         sigs.push("[" + asString(b.name, "?") + "] " + truncate(args, cfg.cmdMaxChars));
+      } else if (t === "mcp_tool_result" || t === "bash_code_execution_tool_result" || t === "code_execution_tool_result"
+        || t === "text_editor_code_execution_tool_result"
+        || (t === "web_search_tool_result" && asString(asObject(b.content)?.type) === "web_search_tool_result_error")
+        || (t === "web_fetch_tool_result" && asString(asObject(b.content)?.type) === "web_fetch_tool_result_error")
+        || (t === "tool_search_tool_result" && asString(asObject(b.content)?.type) === "tool_search_tool_result_error")) {
+        const content = asObject(b.content);
+
+        if (t === "text_editor_code_execution_tool_result"
+          && asString(content?.type) === "text_editor_code_execution_view_result"
+          && asString(content?.file_type) !== "text") {
+          continue;
+        }
+
+        const text = t === "mcp_tool_result"
+          ? resultText(b.content).trim() : canonicalJson(b.content ?? null);
+
+        if (text && text.length <= cfg.resultMaxChars) {
+          sigs.push("result: " + text);
+        }
       }
     }
   }
@@ -293,7 +340,7 @@ function summarizeUser(msg: JsonObject, cfg: Config): string[] {
       }
 
       parts.push("user: " + truncate(text.trim(), cfg.humanMaxChars));
-    } else if (t === "tool_result") {
+    } else if (t === "tool_result" || t === "search_result") {
       const text = resultText(b.content).trim();
 
       if (text && text.length <= cfg.resultMaxChars) {

@@ -53,8 +53,14 @@ export function contentText(content: JsonValue | undefined): string {
     const parts: string[] = [];
 
     for (const p of content) {
-      if (isRecord(p) && asString(p.type) === "text") {
-        parts.push(asString(p.text));
+      if (isRecord(p)) {
+        const type = asString(p.type);
+
+        if (type === "text") {
+          parts.push(asString(p.text));
+        } else if (type === "refusal") {
+          parts.push(asString(p.refusal));
+        }
       }
     }
 
@@ -66,6 +72,17 @@ export function contentText(content: JsonValue | undefined): string {
   }
 
   return String(content);
+}
+
+function toolCallsOf(msg: JsonObject): JsonArray {
+  const calls = asArray(msg.tool_calls).slice();
+  const legacy = asObject(msg.function_call);
+
+  if (legacy !== null) {
+    calls.push({ function: legacy });
+  }
+
+  return calls;
 }
 
 export function digestMessage(msg: JsonObject): string {
@@ -86,15 +103,23 @@ export function digestMessage(msg: JsonObject): string {
     blocks = out;
   }
 
+  // Refusal-only completions have null content but still carry assistant text.
+  const refusal = asString(msg.refusal);
+
+  if (refusal) {
+    blocks.push(["refusal", refusal]);
+  }
+
   const toolCalls: JsonArray = [];
 
-  for (const tc of asArray(msg.tool_calls)) {
+  for (const tc of toolCallsOf(msg)) {
     if (!isRecord(tc)) {
       continue;
     }
 
-    const fn = asObject(tc.function) ?? {};
-    toolCalls.push([asString(tc.id), asString(fn.name), asString(fn.arguments)]);
+    const custom = asString(tc.type) === "custom";
+    const fn = asObject(custom ? tc.custom : tc.function) ?? {};
+    toolCalls.push([asString(tc.id), asString(fn.name), asString(custom ? fn.input : fn.arguments)]);
   }
 
   return digestObj([
@@ -103,6 +128,8 @@ export function digestMessage(msg: JsonObject): string {
     toolCalls,
     asString(msg.tool_call_id),
     asString(msg.name),
+    // Reasoning is summary content, not volatile transport metadata.
+    asString(msg.reasoning_content ?? msg.reasoning),
   ]);
 }
 
@@ -129,16 +156,18 @@ function summarizeAssistant(msg: JsonObject, cfg: Config): string[] {
     }
   }
 
-  const thought = truncate(contentText(msg.content).trim(), cfg.thoughtMaxChars);
+  const text = [contentText(msg.content).trim(), asString(msg.refusal).trim()].filter(Boolean).join("\n");
+  const thought = truncate(text, cfg.thoughtMaxChars);
   const sigs: string[] = [];
 
-  for (const tc of asArray(msg.tool_calls)) {
+  for (const tc of toolCallsOf(msg)) {
     if (!isRecord(tc)) {
       continue;
     }
 
-    const fn = asObject(tc.function) ?? {};
-    let args = fn.arguments;
+    const custom = asString(tc.type) === "custom";
+    const fn = asObject(custom ? tc.custom : tc.function) ?? {};
+    let args = custom ? fn.input : fn.arguments;
 
     if (!isString(args)) {
       args = canonicalJson(args ?? "");
@@ -171,7 +200,7 @@ export function summarizeMessage(msg: JsonObject, cfg: Config): string[] {
     return summarizeAssistant(msg, cfg);
   }
 
-  if (role === "tool") {
+  if (role === "tool" || role === "function") {
     const text = contentText(msg.content).trim();
 
     if (text && text.length <= cfg.resultMaxChars) {

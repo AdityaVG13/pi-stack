@@ -5,9 +5,11 @@
  * request extending prefix S (|S| = cut) is msgs[:headLen] + [summary] +
  * msgs[cut:]. Head bytes come from the CURRENT request. The store is a
  * cache: the compactor is deterministic, so lost entries are recomputed.
+ * Engine entries also carry the dialect and budget/configuration policy.
+ * The byte cap charges serialized UTF-8 summaries, not JavaScript heap overhead.
  */
 
-import { dumpsLen } from "./json.ts";
+import { dumpsDefault } from "./json.ts";
 import type { JsonObject } from "./decode.ts";
 
 export type Entry = {
@@ -15,6 +17,8 @@ export type Entry = {
   summary: JsonObject;
   cut: number;
   size: number;
+  policy?: string;
+  dialect?: object;
 };
 
 export function makeEntry(headLen: number, summary: JsonObject, cut: number): Entry {
@@ -22,7 +26,11 @@ export function makeEntry(headLen: number, summary: JsonObject, cut: number): En
 }
 
 export function entrySize(summary: JsonObject): number {
-  return dumpsLen(summary);
+  try {
+    return Buffer.byteLength(dumpsDefault(summary), "utf8");
+  } catch {
+    return 0;
+  }
 }
 
 export class PrefixStore {
@@ -48,7 +56,12 @@ export class PrefixStore {
   }
 
   put(chainHash: string, entry: Entry): void {
-    entry.size = entrySize(entry.summary);
+    const size = entrySize(entry.summary);
+
+    if (this.maxEntries <= 0 || this.maxBytes <= 0 || size > this.maxBytes) {
+      return;
+    }
+
     const old = this.data.get(chainHash);
 
     if (old !== undefined) {
@@ -56,10 +69,11 @@ export class PrefixStore {
       this.bytes -= old.size;
     }
 
+    entry.size = size;
     this.data.set(chainHash, entry);
     this.bytes += entry.size;
 
-    while (this.data.size > 1 && (this.data.size > this.maxEntries || this.bytes > this.maxBytes)) {
+    while (this.data.size > 0 && (this.data.size > this.maxEntries || this.bytes > this.maxBytes)) {
       const first = this.data.keys().next().value;
 
       if (first === undefined) {

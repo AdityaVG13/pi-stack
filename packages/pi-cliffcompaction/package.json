@@ -1,6 +1,6 @@
 {
   "name": "pi-cliffcompaction",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "CliffCompaction for Pi/OMP: mechanical autocompaction. Truncate or drop, never rephrase, never compact a compaction. Port of arXiv:2609.26779.",
   "type": "module",
   "author": "AdityaVG13",
@@ -36,7 +36,7 @@
     "config.example.json"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test tests/*.test.mjs",
     "prepublishOnly": "npm test && node ../../scripts/preflight.mjs"
   },
   "pi": {

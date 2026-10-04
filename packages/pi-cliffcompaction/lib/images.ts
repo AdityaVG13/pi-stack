@@ -22,7 +22,7 @@ export const PATCH_PX = 28;
 
 export const MAX_IMAGE_TOKENS = 4_784;
 
-export const DEFAULT_IMAGE_TOKENS = 1_568;
+export const DEFAULT_IMAGE_TOKENS = MAX_IMAGE_TOKENS;
 
 const HEADER_B64_CHARS = 8192;
 
@@ -94,6 +94,12 @@ function jpegDimensions(raw: Uint8Array): [number, number] | null {
 
     const marker = raw[i + 1];
 
+    // JPEG permits repeated 0xff fill bytes before a marker code.
+    if (marker === 0xff) {
+      i += 1;
+      continue;
+    }
+
     if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) {
       i += 2;
       continue;
@@ -122,20 +128,20 @@ function webpDimensions(raw: Uint8Array): [number, number] | null {
   const riff = [0x52, 0x49, 0x46, 0x46];
   const webp = [0x57, 0x45, 0x42, 0x50];
 
-  if (!startsWith(raw, riff) || !startsWith(raw, webp, 8) || raw.length < 30) {
+  if (!startsWith(raw, riff) || !startsWith(raw, webp, 8) || raw.length < 25) {
     return null;
   }
 
   const fmt = String.fromCharCode(raw[12], raw[13], raw[14], raw[15]);
 
-  if (fmt === "VP8X") {
+  if (fmt === "VP8X" && raw.length >= 30) {
     const w = (raw[24] | (raw[25] << 8) | (raw[26] << 16)) + 1;
     const h = (raw[27] | (raw[28] << 8) | (raw[29] << 16)) + 1;
 
     return [w, h];
   }
 
-  if (fmt === "VP8 ") {
+  if (fmt === "VP8 " && raw.length >= 30) {
     return [readUInt16LE(raw, 26) & 0x3fff, readUInt16LE(raw, 28) & 0x3fff];
   }
 
@@ -188,10 +194,6 @@ function ceilDiv(n: number, d: number): number {
 }
 
 export function tokensForPayload(payload: string): number {
-  if (!payload.startsWith("data:")) {
-    return DEFAULT_IMAGE_TOKENS;
-  }
-
   const raw = headerBytes(payload);
   const dims = raw ? dimensions(raw) : null;
 
@@ -207,6 +209,10 @@ export function tokensForPayload(payload: string): number {
 export function imagePayloadFromNode(obj: JsonObject): string | null {
   const kind = asString(obj.type);
 
+  if (kind === "image_generation_call") {
+    return isString(obj.result) ? obj.result : null;
+  }
+
   if (kind === "image") {
     const source = asObject(obj.source);
 
@@ -214,10 +220,18 @@ export function imagePayloadFromNode(obj: JsonObject): string | null {
       return source.data;
     }
 
-    return null;
+    if (source && isString(source.url)) {
+      return source.url;
+    }
+
+    if (isString(obj.data)) {
+      return obj.data;
+    }
+
+    return isString(obj.url) ? obj.url : null;
   }
 
-  if (kind === "input_image" || kind === "image_url") {
+  if (kind === "input_image" || kind === "image_url" || kind === "computer_screenshot") {
     const urlField = obj.image_url;
 
     if (isString(urlField)) {
@@ -228,6 +242,11 @@ export function imagePayloadFromNode(obj: JsonObject): string | null {
 
     if (nested && isString(nested.url)) {
       return nested.url;
+    }
+
+    // Uploaded image references have no local dimensions, like hosted URLs.
+    if ((kind === "input_image" || kind === "computer_screenshot") && isString(obj.file_id)) {
+      return obj.file_id;
     }
 
     return null;

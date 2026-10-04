@@ -1,10 +1,9 @@
 /**
- * JSON serializers matching CPython json.dumps used by the reference
- * implementation: canonical (sorted, compact) for hashing, default
- * (insertion-order, ", "/": " separators, ensure_ascii=False) for
- * billable character counts.
+ * JavaScript-local JSON serializers. Canonical hashes use UTF-16 key order
+ * and ECMAScript numbers; they are not generally interchangeable with Python
+ * json.dumps hashes. Default formatting uses Python-style separators only.
  *
- * dumpsLen counts without building the string (same length as dumpsDefault).
+ * dumpsLen counts UTF-16 code units, not UTF-8 bytes or tokenizer tokens.
  */
 
 import {
@@ -103,7 +102,7 @@ function pushCanonical(value: JsonValue, parts: { push(chunk: string): void }): 
   parts.push("}");
 }
 
-/** json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False) */
+/** Sorted compact JSON for local digest identity; not a full JCS validator. */
 export function canonicalJson(value: JsonValue): string {
   const parts: string[] = [];
   pushCanonical(value, parts);
@@ -173,7 +172,7 @@ function pushDefault(value: JsonValue, parts: string[]): void {
   parts.push("}");
 }
 
-/** json.dumps(obj, ensure_ascii=False) -- default separators. */
+/** Insertion-order JSON with ", " / ": " separators and JS number/string semantics. */
 export function dumpsDefault(value: JsonValue): string {
   const parts: string[] = [];
   pushDefault(value, parts);
@@ -244,13 +243,9 @@ export function dumpsLen(value: JsonValue): number {
 }
 
 export function objectWithoutKey(obj: JsonObject, key: string): JsonObject {
-  const out: JsonObject = {};
-
-  for (const k of Object.keys(obj)) {
-    if (k !== key) {
-      out[k] = obj[k];
-    }
-  }
+  // Object spread creates data properties, including an own "__proto__" key.
+  const out: JsonObject = { ...obj };
+  delete out[key];
 
   return out;
 }

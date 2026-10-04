@@ -64,23 +64,49 @@ describe("PrefixStore", () => {
     assert.ok(store.get("h19"));
   });
 
-  it("keeps an oversized entry rather than evicting to empty", () => {
+  it("rejects oversized admissions without evicting useful entries", () => {
     const store = new PrefixStore(4096, 100);
+    const small = anEntry(10);
+    store.put("small", small);
     store.put("big", anEntry(50_000));
+    store.put("small", anEntry(50_000));
 
     assert.equal(store.size, 1);
-    assert.ok(store.get("big"));
-    assert.ok(store.nbytes > 100);
+    assert.equal(store.get("big"), undefined);
+    assert.equal(store.get("small"), small);
+    assert.equal(store.nbytes, entrySize(small.summary));
+    assert.ok(store.nbytes <= store.maxBytesLimit);
   });
 
-  it("a second oversized put drops the first", () => {
-    const store = new PrefixStore(4096, 100);
-    store.put("big1", anEntry(50_000));
-    store.put("big2", anEntry(50_000));
+  it("zero entry or byte capacity disables admission", () => {
+    for (const store of [new PrefixStore(0, 1000), new PrefixStore(10, 0)]) {
+      store.put("entry", anEntry(1));
 
-    assert.equal(store.size, 1);
-    assert.equal(store.get("big1"), undefined);
-    assert.ok(store.get("big2"));
+      assert.equal(store.size, 0);
+      assert.equal(store.nbytes, 0);
+      assert.equal(store.get("entry"), undefined);
+    }
+  });
+
+  it("charges UTF-8 bytes for non-ASCII entries before admission", () => {
+    const store = new PrefixStore(4, 120);
+    const entry = makeEntry(0, { role: "user", content: "😀".repeat(40) }, 1);
+    store.put("unicode", entry);
+
+    assert.ok(entrySize(entry.summary) > 120);
+    assert.equal(store.size, 0);
+    assert.equal(store.nbytes, 0);
+  });
+
+  it("admits an exact byte fit but refuses one byte over", () => {
+    const entry = anEntry(50);
+    const store = new PrefixStore(1, entrySize(entry.summary));
+    store.put("exact", entry);
+    store.put("over", anEntry(51));
+
+    assert.equal(store.get("exact"), entry);
+    assert.equal(store.get("over"), undefined);
+    assert.equal(store.nbytes, store.maxBytesLimit);
   });
 
   it("entrySize never throws on unserializable summaries", () => {

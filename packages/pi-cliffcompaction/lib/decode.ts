@@ -2,9 +2,9 @@
  * Boundary decoders (anti-slop). JSON request bodies are untyped at the
  * I/O edge; everything inside the engine consumes these predicates.
  *
- * Hot-path checks use constructor identity: JSON.parse and object
- * literals never box primitives. Null-prototype objects still count as
- * records (Object.create(null).constructor is undefined).
+ * Primitive checks use constructor identity: JSON data never boxes
+ * primitives. Records use prototype identity so an own constructor field
+ * remains data. Null-prototype objects also count as records.
  */
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -45,9 +45,9 @@ export function isObject(value: JsonValue | undefined | null): value is JsonObje
     return false;
   }
 
-  const ctor = value.constructor;
+  const proto = Object.getPrototypeOf(value);
 
-  return ctor === Object || ctor === undefined;
+  return proto === Object.prototype || proto === null;
 }
 
 export function isRecord(value: JsonValue | undefined | null): value is JsonObject {

@@ -41,15 +41,18 @@ export {
   piDialect,
   SUMMARY_HEADER,
   PI_COMPACTION_PREFIX,
+  BRANCH_SUMMARY_PREFIX,
+  BRANCH_SUMMARY_SUFFIX,
   truncate,
   stripTaskNotifications,
 } from "./dialects/index.ts";
 
 export type { Dialect } from "./dialects/index.ts";
 
-export { compactSession, liveFromEntries } from "./pi-hook.ts";
+export { compactSession, liveFromEntries, resolveCompactReason } from "./pi-hook.ts";
 
 export type {
+  CompactReason,
   CompactSessionInput,
   CompactSessionOutput,
   SessionMessageRef,

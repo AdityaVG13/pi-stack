@@ -107,10 +107,7 @@ const stages = {
   }, Math.max(8, Math.trunc(repeats / 2))),
 };
 
-let growNs = 0;
-
-{
-  const t0 = process.hrtime.bigint();
+stages.engineGrow = timeNs(() => {
   const eng = new Engine(cfg);
   let grown = aSession(4, 3000);
 
@@ -130,11 +127,7 @@ let growNs = 0;
     ]);
     eng.prepare(aBody(grown), ANTHROPIC);
   }
-
-  growNs = Number(process.hrtime.bigint() - t0);
-}
-
-stages.engineGrow = { n: 1, p50: growNs, p95: growNs, p99: growNs, min: growNs, max: growNs };
+}, repeats);
 
 const rows = Object.keys(stages).map((name) => {
   const s = stages[name];

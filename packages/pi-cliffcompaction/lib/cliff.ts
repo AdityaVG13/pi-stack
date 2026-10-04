@@ -70,6 +70,15 @@ export function compact(
 
   let headLen = firstAssistant;
 
+  // A cliff followed by another user prompt is no longer the final head item.
+  // Only the original prefix before that cliff remains protected on a recap.
+  for (let i = 0; i < firstAssistant; i++) {
+    if (dialect.isSummaryMessage(messages[i])) {
+      headLen = i;
+      break;
+    }
+  }
+
   while (
     headLen > 0 &&
     (dialect.isSummaryMessage(messages[headLen - 1]) ||
@@ -124,11 +133,32 @@ export function compact(
     newMessages.push(msg);
   }
 
-  if (newMessages.length >= messages.length) {
+  const cut = messages.length - kept.length;
+
+  if (newMessages.length > messages.length) {
     return null;
   }
 
-  const cut = messages.length - kept.length;
+  // keepRecent 0 replaces a one-message body with one summary. Message count
+  // stays the same; thought/result caps can still shrink the payload.
+  // Do not treat "drop the previous summary, keep the same tail" as gain:
+  // that is a same-length rewrite that throws away compacted history.
+  if (newMessages.length === messages.length) {
+    let onlySummaries = true;
+    let oldChars = 0;
+
+    for (let i = headLen; i < cut; i++) {
+      if (!dialect.isSummaryMessage(messages[i])) {
+        onlySummaries = false;
+      }
+
+      oldChars += JSON.stringify(messages[i]).length;
+    }
+
+    if (onlySummaries || JSON.stringify(summary).length >= oldChars) {
+      return null;
+    }
+  }
 
   return { messages: newMessages, headLen, summary, cut };
 }

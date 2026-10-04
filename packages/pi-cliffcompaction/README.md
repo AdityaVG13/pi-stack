@@ -23,7 +23,7 @@ After install, **fully restart** Pi/OMP. `/reload` can keep old JavaScript modul
 
 ---
 
-## Why use it
+## Compared to Pi compact
 
 Default Pi compact asks a model to write a structured memo (`Goal`, `Progress`, `Key Decisions`, file lists). Tool dumps are truncated for that summarizer, then rewritten. The last ~20k tokens stay verbatim. The previous memo is fed into the next one.
 
@@ -48,11 +48,6 @@ This package keeps the same *when* (token window, overflow, `/compact`) and repl
 ---
 
 ## Install
-
-```bash
-pi install npm:pi-cliffcompaction
-omp install npm:pi-cliffcompaction
-```
 
 From a clone of [AdityaVG13/pi-stack](https://github.com/AdityaVG13/pi-stack), inside the repo:
 
@@ -201,7 +196,7 @@ Override path: `PI_CLIFF_CONFIG` / `OMP_CLIFF_CONFIG`, or `PI_CONFIG_DIR` / `OMP
 | `keepThinking` | `true` | Fold thinking as text; `false` drops it |
 | `cmdMaxChars` | `150` | Tool-call signature budget |
 | `resultMaxChars` | `500` | Longer tool results are dropped |
-| `humanMaxChars` | `20000` | Sanity cap on user text in the summary |
+| `humanMaxChars` | `20000` | Cap on summarized middle user text; not the protected live head |
 | `shadow` | `false` | Cancel compaction; log what would have happened |
 | `strict` | `false` | Walk summary truncation (rung 3) when still over the library threshold |
 | `thresholdTokens` | `200000` | Engine/library trigger (chars/4). Pi's own trigger is separate |
@@ -235,7 +230,9 @@ The Pi extension is a thin adapter. The algorithm is importable with no Pi host:
 | `Engine.reactive(ctx)` | Context-length error ladder. |
 | Dialects | `anthropic`, `openai` (Chat Completions), `openai-responses`, `pi` |
 
-Token estimate is chars/4 on `json.dumps`-style serialization, except images which are priced from PNG/JPEG/GIF/WebP dimensions (Anthropic 28x28 patches, cap 4784).
+Token estimates use the floor of serialized UTF-16 code units / 4, with Python-style separators but JavaScript number/string semantics. This is not a tokenizer. Images use PNG/JPEG/GIF/WebP dimensions (28x28 patches, capped at 4784); raw base64, data URLs and Pi image blocks are recognized. Unknown dimensions conservatively cost 4784 without fetching remote URLs.
+
+Digests are implementation-local: key ordering, floating-point formatting and Unicode counts can differ from CPython. The shared ASCII reference fixtures do not establish general cross-language hash compatibility. Library inputs must be JSON data.
 
 ---
 
@@ -244,15 +241,20 @@ Token estimate is chars/4 on `json.dumps`-style serialization, except images whi
 - Summaries contain only excerpts of original text, never a paraphrase.
 - Exactly one summary header after compaction; re-compaction does not nest.
 - Head messages and kept tail messages are identity-equal to the input objects (library `compact` / `Engine`).
-- A mutated history fails to match the prefix store and is forwarded verbatim.
+- `Engine.prepare` validates every message against its current serialized content, including nested in-place edits. Only identical content can reuse a digest/cost; hash-chain prefixes are reused only while canonical digests agree. The engine retains snapshots for its latest request, not every visited branch.
+- Cached summaries are scoped to the dialect, configuration and fixed request budget. Emergency escalation/truncation stays request-local. Changed canonical content cannot reuse a summary covering the old content.
+- Prefix-store entry and serialized UTF-8 byte caps are hard admission limits. Oversized entries are not cached and do not evict useful entries; zero capacity disables admission. These are not total heap limits.
+- OpenAI Chat summary keys include the effective `reasoning_content` / `reasoning` text so reasoning redactions invalidate old summaries.
 - Image token cost does not track base64 length.
 
 ## Error model
 
 - `compact` returns `null` when there is no assistant turn, not enough turns to keep, or the rewrite would not shrink the list.
 - `Engine.prepare` never throws on a well-formed body; store misses and inconsistent entries fail-open to passthrough.
-- The Pi hook catches handler errors and returns undefined (Pi default compaction).
-- `strict: true` on the engine marks `overBudget` after the ladder; the Pi hook uses rung 3 truncation when `strict` is set.
+- The Pi hook catches handler errors and returns undefined (Pi default compaction). Protected heads containing images or other non-text content also use this fallback, rather than silently losing attachments. The fallback may use an LLM and does not preserve image bytes verbatim.
+- Pi compaction keeps the original head across successive cliffs, without recycling an old summary or retaining the discarded middle. Protected head text is not trimmed, truncated or interpreted as a summary marker.
+- Strict truncation packs against the actual local billable estimate, including escaping and the kept tail. Library head messages and the Pi hook's folded live head text are protected, even when that floor cannot fit.
+- The engine exposes `overBudget`; the Pi hook persists `details.overBudget` with its estimate. Neither silently drops the protected task or tail to force a fit.
 
 ## Tests
 
@@ -260,16 +262,15 @@ Token estimate is chars/4 on `json.dumps`-style serialization, except images whi
 npm test --prefix packages/pi-cliffcompaction
 ```
 
-119 tests, including `test/reference-gold.test.mjs`: bit-level checks against the Python reference on shared fixtures (compact output, hash chains, billable chars, `Engine.prepare` cuts/estimates, published image-token table).
+Tests cover content-validated caching/redaction, warm/cold equivalence, escaped budget boundaries, cache admission, image accounting and protected Pi task text. `tests/reference-gold.test.mjs` checks the shared reference fixtures; `tests/json.test.mjs` records the JavaScript-local compatibility boundaries.
 
 ## No-claim boundaries
 
 - This package does **not** claim the paper's SWE-bench / Terminal-Bench / KernelBench scores. Those were measured on other scaffolds with this algorithm.
 - Trigger timing is Pi's (`compaction.reserveTokens`). The GitHub proxy default of 200k tokens is a library default, not what Pi uses unless you set Pi's reserve so the remaining window matches.
 - Selector / Soft Group Verification from the paper is out of scope.
-
-## Gotchas
-
+- Model-level hash identity is conditional on collision freedom for the compared inputs. No global fixed-length hash injectivity, SHA-256 collision proof, or Lean-to-TypeScript refinement proof is claimed.
+- Redacting a request prevents stale-summary reuse for that history; it does not securely erase older prefix-store entries from memory before eviction.
 - Other extensions that also handle `session_before_compact` will race. Load one.
 - `/compact` with extra instructions is ignored.
 - Shadow mode on overflow cancels recovery compaction; the overflowing request is left as-is (fail-open).

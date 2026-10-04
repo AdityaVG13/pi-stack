@@ -7,7 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { compact, type CompactResult } from "./cliff.ts";
+import { compact, groupTurns, type CompactResult } from "./cliff.ts";
 import { replaceConfig, type Config, type ConfigPatch } from "./config.ts";
 import {
   isArray,
@@ -16,9 +16,9 @@ import {
   type JsonObject,
   type JsonValue,
 } from "./decode.ts";
-import { SUMMARY_HEADER, type Dialect } from "./dialects/base.ts";
+import { fitSummary, SUMMARY_HEADER, type Dialect } from "./dialects/base.ts";
 import { digestBytes } from "./hashing.ts";
-import { dumpsCount, dumpsDefault, dumpsLen, objectWithoutKey } from "./json.ts";
+import { canonicalJson, dumpsCount, dumpsDefault, objectWithoutKey } from "./json.ts";
 import { imagePayloadFromNode, tokensForPayload } from "./images.ts";
 import { makeEntry, PrefixStore } from "./store.ts";
 
@@ -67,6 +67,8 @@ export type RequestCtx = {
   dialect: Dialect;
   msgs: JsonObject[];
   chain: string[];
+  cacheChain: string[];
+  policy: string;
   baseCut: number;
   baseHead: number;
   substituted: JsonObject[];
@@ -86,12 +88,8 @@ function outgoingBody(ctx: RequestCtx): JsonObject {
     return ctx.body;
   }
 
-  const out: JsonObject = {};
-
-  for (const key of Object.keys(ctx.body)) {
-    out[key] = ctx.body[key];
-  }
-
+  // Spread creates own data properties even for JSON keys like __proto__.
+  const out: JsonObject = { ...ctx.body };
   out[ctx.dialect.messagesKey] = ctx.substituted;
 
   return out;
@@ -116,6 +114,18 @@ function messagesOf(body: JsonObject, dialect: Dialect): JsonObject[] {
   }
 
   return out;
+}
+
+function turnEnds(msgs: JsonObject[], dialect: Dialect): Set<number> {
+  const ends = new Set<number>();
+  let end = 0;
+
+  for (const turn of groupTurns(msgs, dialect)) {
+    end += turn.length;
+    ends.add(end);
+  }
+
+  return ends;
 }
 
 function summaryText(msg: JsonObject): string {
@@ -144,93 +154,86 @@ export function messageChars(msg: JsonObject): number {
   return msgChars(msg);
 }
 
-type PrefixDigestState = {
-  digests: string[];
-  chain: string[];
-  shared: number;
+type MessageObservation = {
+  snapshot: string;
+  digest: string;
+  chain: string;
+  cacheChain: string;
+  chars: number;
 };
 
 export class Engine {
   readonly cfg: Config;
   readonly store: PrefixStore;
-  private prefixMsgs: JsonObject[] = [];
-  private prefixDigests: string[] = [];
-  private prefixChain: string[] = [];
-  private prefixDialect: Dialect | null = null;
-  private prefixArrayBillable = 0;
+  private observations: MessageObservation[] = [];
+  private observedDialect: Dialect | null = null;
 
   constructor(cfg: Config, store?: PrefixStore) {
     this.cfg = cfg;
     this.store = store ?? new PrefixStore(cfg.storeMaxEntries, cfg.storeMaxBytes);
   }
 
-  private digestGrowingPrefix(msgs: JsonObject[], dialect: Dialect): PrefixDigestState {
-    let shared = 0;
+  private observe(msgs: JsonObject[], dialect: Dialect): MessageObservation[] {
+    const prior = this.observedDialect === dialect ? this.observations : [];
+    const observed: MessageObservation[] = [];
+    let prefix = "";
+    let cachePrefix = "";
+    let samePrefix = true;
+    let sameCachePrefix = true;
 
-    if (this.prefixDialect === dialect) {
-      const limit = Math.min(msgs.length, this.prefixMsgs.length);
-
-      while (shared < limit && msgs[shared] === this.prefixMsgs[shared]) {
-        shared += 1;
-      }
+    for (let i = 0; i < msgs.length; i++) {
+      // Inputs are JSON data. Compare current serialized content, never object
+      // identity; nested edits and noncanonical budget metadata remain visible.
+      const snapshot = JSON.stringify(msgs[i]);
+      const old = prior[i];
+      const unchanged = old !== undefined && old.snapshot === snapshot;
+      const digest = unchanged ? old.digest : dialect.digestMessage(msgs[i]);
+      samePrefix = samePrefix && old !== undefined && old.digest === digest;
+      prefix = samePrefix ? old.chain : digestBytes(prefix + digest);
+      const chars = unchanged ? old.chars : billableChars(msgs[i]);
+      // Encoding overhead can move an earlier cliff without changing canonical identity.
+      sameCachePrefix = sameCachePrefix && samePrefix && old !== undefined && old.chars === chars;
+      cachePrefix = sameCachePrefix ? old.cacheChain : digestBytes(cachePrefix + digest + ":" + chars);
+      observed.push({
+        snapshot: unchanged ? old.snapshot : snapshot,
+        digest,
+        chain: prefix,
+        cacheChain: cachePrefix,
+        chars,
+      });
     }
 
-    const digests = this.prefixDigests.slice(0, shared);
+    // Retain only the latest request's observations, not every branch visited.
+    this.observations = observed;
+    this.observedDialect = dialect;
 
-    for (let i = shared; i < msgs.length; i++) {
-      digests.push(dialect.digestMessage(msgs[i]));
-    }
-
-    const chain = this.prefixChain.slice(0, shared);
-    let prev = shared > 0 ? chain[shared - 1] : "";
-
-    for (let i = shared; i < msgs.length; i++) {
-      prev = digestBytes(prev + digests[i]);
-      chain.push(prev);
-    }
-
-    this.prefixMsgs = msgs;
-    this.prefixDigests = digests;
-    this.prefixChain = chain;
-    this.prefixDialect = dialect;
-
-    return { digests, chain, shared };
-  }
-
-  private messagesArrayBillable(msgs: JsonObject[], shared: number, prevLen: number, prevBillable: number): number {
-    if (shared > 0 && shared === prevLen && prevBillable > 0) {
-      let n = prevBillable;
-
-      for (let i = shared; i < msgs.length; i++) {
-        n += 2 + billableChars(msgs[i]);
-      }
-
-      this.prefixArrayBillable = n;
-
-      return n;
-    }
-
-    const n = billableChars(msgs);
-    this.prefixArrayBillable = n;
-
-    return n;
+    return observed;
   }
 
   prepare(body: JsonObject, dialect: Dialect): RequestCtx {
     const msgs = messagesOf(body, dialect);
-    const prevLen = this.prefixMsgs.length;
-    const prevBillable = this.prefixArrayBillable;
-    const { chain, shared } = this.digestGrowingPrefix(msgs, dialect);
+    const observed = this.observe(msgs, dialect);
+    const chain = observed.map((entry) => entry.chain);
+    const cacheChain = observed.map((entry) => entry.cacheChain);
     const emptyBody = objectWithoutKey(body, dialect.messagesKey);
     emptyBody[dialect.messagesKey] = [];
-    const msgsBillable = this.messagesArrayBillable(msgs, shared, prevLen, prevBillable);
-    const estTokensIn = Math.trunc(Math.max(billableChars(emptyBody) - 2 + msgsBillable, 0) / 4);
+    const fixedChars = billableChars(emptyBody);
+    const raw = body[dialect.messagesKey];
+
+    // Array punctuation belongs to the request, not to individual messages.
+    const inputChars = fixedChars + observed.reduce((sum, entry) => sum + entry.chars, 0)
+      + Math.max(0, msgs.length - 1) * 2;
+
+    const estTokensIn = isArray(raw) && raw.length === msgs.length
+      ? Math.trunc(inputChars / 4) : estimateTokens(body);
 
     const ctx: RequestCtx = {
       body,
       dialect,
       msgs,
       chain,
+      cacheChain,
+      policy: canonicalJson([this.cfg, fixedChars]),
       baseCut: 0,
       baseHead: 0,
       substituted: msgs,
@@ -244,10 +247,23 @@ export class Engine {
       outMsgs: 0,
     };
 
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const entry = this.store.get(chain[i]);
+    // Canonical-equivalent encodings can cross the trigger without changing
+    // the chain. Cached cliffs must not replace an already-fitting request.
+    if (ctx.estTokensIn <= this.cfg.thresholdTokens) {
+      ctx.estTokensOut = ctx.estTokensIn;
 
-      if (entry === undefined) {
+      return ctx;
+    }
+
+    // With no protected tail, a cached final call can become an interior
+    // item when a later request appends its result or another model-run item.
+    const safeCuts = this.cfg.keepRecent === 0 ? turnEnds(msgs, dialect) : null;
+
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const entry = this.store.get(cacheChain[i]);
+
+      if (entry === undefined || entry.policy !== ctx.policy || entry.dialect !== dialect
+        || (safeCuts !== null && !safeCuts.has(entry.cut))) {
         continue;
       }
 
@@ -261,7 +277,8 @@ export class Engine {
         substituted.push(msgs[h]);
       }
 
-      substituted.push(entry.summary);
+      // Outgoing JSON belongs to this request, not to the shared prefix cache.
+      substituted.push(structuredClone(entry.summary));
 
       for (let t = entry.cut; t < msgs.length; t++) {
         substituted.push(msgs[t]);
@@ -331,7 +348,8 @@ export class Engine {
 
   private rungCfg(rung: number): Config {
     const patch: ConfigPatch = {
-      keepRecent: 1,
+      // Never raise keepRecent: 0 means "summarize the tail too".
+      keepRecent: Math.min(this.cfg.keepRecent, 1),
     };
 
     if (rung >= 2) {
@@ -344,7 +362,7 @@ export class Engine {
   }
 
   private truncateSummary(ctx: RequestCtx, reason = "reactive"): boolean {
-    if (!ctx.compacted || ctx.baseCut <= 0) {
+    if (ctx.baseCut <= 0) {
       return false;
     }
 
@@ -364,35 +382,15 @@ export class Engine {
       }
     }
 
-    const bodyCopy: JsonObject = {};
-
-    for (const key of Object.keys(ctx.body)) {
-      bodyCopy[key] = ctx.body[key];
-    }
-
+    const bodyCopy: JsonObject = { ...ctx.body };
     bodyCopy[ctx.dialect.messagesKey] = others;
-    const fixed = dumpsLen(bodyCopy);
-    const budget = this.cfg.thresholdTokens * 4 - fixed - SUMMARY_HEADER.length - 64;
+    const fixed = billableChars(bodyCopy) + (others.length > 0 ? 2 : 0);
     const rest = text.slice(SUMMARY_HEADER.length).trim();
     const parts = rest.length > 0 ? rest.split("\n\n---\n\n") : [];
-    const kept: string[] = [];
-    let used = 0;
 
-    for (let i = parts.length - 1; i >= 0; i--) {
-      const part = parts[i];
-
-      if (used + part.length > Math.max(budget, 0)) {
-        break;
-      }
-
-      kept.push(part);
-      used += part.length + 9;
-    }
-
-    kept.reverse();
-
-    const newText =
-      kept.length > 0 ? SUMMARY_HEADER + "\n\n" + kept.join("\n\n---\n\n") : SUMMARY_HEADER;
+    const newText = fitSummary(SUMMARY_HEADER, parts, (candidate) =>
+      Math.trunc((fixed + billableChars(ctx.dialect.userMessage(candidate))) / 4) <= this.cfg.thresholdTokens,
+    );
 
     if (newText.length >= text.length) {
       return false;
@@ -414,10 +412,7 @@ export class Engine {
     ctx.substituted = substituted;
     ctx.modified = true;
     ctx.estTokensOut = estimateTokens(outgoingBody(ctx));
-    this.store.put(
-      ctx.chain[ctx.baseCut - 1],
-      makeEntry(ctx.baseHead, newSummary, ctx.baseCut),
-    );
+    ctx.overBudget = ctx.estTokensOut > this.cfg.thresholdTokens;
     void reason;
 
     return true;
@@ -435,14 +430,15 @@ export class Engine {
     const emptyBody = objectWithoutKey(ctx.body, ctx.dialect.messagesKey);
     emptyBody[ctx.dialect.messagesKey] = [];
     const fixedChars = billableChars(emptyBody);
-    const thresholdChars = cfg.thresholdTokens * 4;
 
     let working: JsonObject[];
     let headLen: number;
     let origCut: number;
     let haveSummary: boolean;
 
-    if (ctx.baseCut > 0) {
+    // Escalation knobs must recap the original history. Reusing the previous
+    // summary cannot apply thought caps: compact() refuses a same-length rewrite.
+    if (ctx.baseCut > 0 && compactCfg === null) {
       working = ctx.substituted.slice(0, ctx.baseHead + 1);
       headLen = ctx.baseHead;
       origCut = ctx.baseCut;
@@ -511,11 +507,19 @@ export class Engine {
       return true;
     };
 
+    // keepRecent 0 consumes the newest turn too. Wait for its entire run
+    // before rewriting, otherwise its following tool result becomes orphaned.
+    const safeCuts = knobs.keepRecent === 0 ? turnEnds(msgs, ctx.dialect) : null;
+
     for (let i = origCut; i < msgs.length; i++) {
       working.push(msgs[i]);
       chars += cachedMsgChars(msgs[i]);
 
-      if (chars > thresholdChars) {
+      if (safeCuts !== null && !safeCuts.has(i + 1)) {
+        continue;
+      }
+
+      if (Math.trunc((chars - (working.length > 0 ? 2 : 0)) / 4) > cfg.thresholdTokens) {
         const result = compact(working, ctx.dialect, knobs);
 
         if (result === null) {
@@ -551,7 +555,15 @@ export class Engine {
     ctx.chainSteps = nCompactions;
     ctx.summaryFp = lastSummary ? summaryFingerprint(lastSummary) : "";
     ctx.outMsgs = working.length;
-    this.store.put(ctx.chain[origCut - 1], makeEntry(headLen, lastSummary ?? {}, origCut));
+    ctx.overBudget = ctx.estTokensOut > cfg.thresholdTokens;
+
+    // Only deterministic proactive compaction is reusable by sibling requests.
+    if (!force && compactCfg === null) {
+      const entry = makeEntry(headLen, structuredClone(lastSummary ?? {}), origCut);
+      entry.policy = ctx.policy;
+      entry.dialect = ctx.dialect;
+      this.store.put(ctx.cacheChain[origCut - 1], entry);
+    }
 
     return true;
   }
