@@ -16,9 +16,10 @@ export function pickFailover(slots, isCooling, current) {
 
 export function pickRoundRobin(slots, isCooling, lastIndex) {
   const total = slots.length;
+  const last = Number.isSafeInteger(lastIndex) && total > 0 ? ((lastIndex % total) + total) % total : -1;
 
   for (let step = 1; step <= total; step += 1) {
-    const index = (lastIndex + step) % total;
+    const index = (last + step) % total;
     const id = slots[index];
 
     if (!isCooling(id)) return { id, index };

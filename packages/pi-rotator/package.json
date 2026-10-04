@@ -5,12 +5,14 @@
   },
   "description": "Multi-account rotation for Pi: every provider family, failover or round-robin or balanced, tiny UX.",
   "exports": "./index.js",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "files": [
     "index.js",
     "lib/",
     "README.md",
     "LAYERING.md",
-    "BENCHMARK.md",
     "LICENSE"
   ],
   "homepage": "https://github.com/AdityaVG13/pi-stack/tree/main/packages/pi-rotator#readme",
@@ -46,8 +48,12 @@
   },
   "scripts": {
     "prepublishOnly": "npm test && node ../../scripts/preflight.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --import ./tests/host-modules.mjs --test tests/*.test.mjs"
   },
   "type": "module",
-  "version": "0.2.2"
+  "version": "0.3.0",
+  "dependencies": {
+    "@bufbuild/protobuf": "2.16.0",
+    "proper-lockfile": "4.1.2"
+  }
 }

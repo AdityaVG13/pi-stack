@@ -1,14 +1,10 @@
-// Wire-prefix fingerprints: content hashes of the provider request payload.
-//
-// The fingerprint is what lets analysis PROVE prefix identity: the same turn
-// served on two slots must hash equal, because rotation ships identical
-// bytes. The projection strips volatile envelope keys (chain pointers, ids,
-// timestamps) and keeps everything else, so schema drift can only add
-// content, never silently drop it. Projection version is journaled with
-// every hash so analysis never compares across projections.
+// Canonical projected-request fingerprints, not proofs of identical wire bytes.
+// v2 drops volatile keys only at the request root and preserves all transcript
+// and schema keys. Compare hashes only within the same projection version;
+// cryptographic collision freedom is an assumption, not established here.
 import { createHash } from "node:crypto";
 
-export const PROJECTION = "v1";
+export const PROJECTION = "v2";
 
 // Pointer-shaped keys: per-request/per-slot envelope, never prompt content.
 // Transcript content (roles, text, tool names, arguments — including model-
@@ -30,36 +26,33 @@ export const VOLATILE_KEYS = new Set([
   "id",
 ]);
 
-export function stableStringify(value) {
-  if (value === null || value === undefined) return "null";
+function canonicalJson(value, stripEnvelope) {
+  if (value === null) return "null";
 
-  if (value instanceof Function) return "null";
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item, false)).join(",")}]`;
 
-  // Explicit lambda: passing stableStringify bare would inherit map's
-  // (element, index, array) arguments if the signature ever grows.
-  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  if (value instanceof Object) {
+    const keys = Object.keys(value).filter((key) => !stripEnvelope || !VOLATILE_KEYS.has(key)).sort();
 
-  // instanceof misses null-prototype objects, which are still dictionaries.
-  if (value instanceof Object || Object.getPrototypeOf(value) === null) {
-    const keys = Object.keys(value).filter((k) => !VOLATILE_KEYS.has(k)).sort();
-
-    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key], false)}`).join(",")}}`;
   }
 
-  // Total: BigInt and other unstringifiable values fall back to String
-  // instead of throwing the fingerprint (and the turn's warmth) away.
-  try {
-    return JSON.stringify(value) ?? "null";
-  } catch {
-    return String(value);
-  }
+  return JSON.stringify(value);
+}
+
+export function stableStringify(value, stripEnvelope = true) {
+  // Match JSON's omitted fields, sparse arrays and toJSON behavior. Cycles
+  // and BigInt fail explicitly instead of colliding with fabricated content.
+  const wire = JSON.stringify(value) ?? "null";
+
+  return canonicalJson(JSON.parse(wire), stripEnvelope);
 }
 
 export function fingerprintPayload(payload) {
   const text = stableStringify(payload ?? null);
   const fp = createHash("sha256").update(text, "utf8").digest("hex");
 
-  return { fp, len: text.length, projection: PROJECTION };
+  return { fp, len: Buffer.byteLength(text, "utf8"), projection: PROJECTION };
 }
 
 // Compaction collapses the transcript: a sharp shrink of an already-sizable
@@ -90,7 +83,7 @@ export function messageSignatures(messages) {
   if (!Array.isArray(messages)) return [];
 
   return messages.map((message) =>
-    createHash("sha256").update(stableStringify(message), "utf8").digest("hex").slice(0, 16),
+    createHash("sha256").update(stableStringify(message, false), "utf8").digest("hex").slice(0, 16),
   );
 }
 

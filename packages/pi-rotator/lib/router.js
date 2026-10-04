@@ -5,7 +5,10 @@ import { pickBalanced } from "./balanced.js";
 // routing decision stays unit-testable and the Pi edge in index.js stays thin.
 export function routeTurn(slots, strategy, isCooling, current, lastActive, drained, rrIndex, now, ttlMs) {
   if (strategy === "round-robin") {
-    const pick = pickRoundRobin(slots, isCooling, rrIndex);
+    // A restored session or manual selection can disagree with the cursor.
+    // Advance from the account that actually served, including the first turn.
+    const currentIndex = slots.indexOf(current);
+    const pick = pickRoundRobin(slots, isCooling, currentIndex < 0 ? rrIndex : currentIndex);
 
     if (!pick) return null;
 

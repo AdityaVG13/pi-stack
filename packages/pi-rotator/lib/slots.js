@@ -25,7 +25,7 @@ export function parseSlotId(providerId) {
   if (!match) return { base: providerId, n: 1 };
   const n = Number.parseInt(match[1], 10);
 
-  if (!Number.isSafeInteger(n) || n < 2) return null;
+  if (!Number.isSafeInteger(n) || n < 2 || String(n) !== match[1] || match.index === 0) return null;
 
   return { base: providerId.slice(0, match.index), n };
 }
@@ -34,6 +34,18 @@ export function parseSlotId(providerId) {
 // Lone base keys (single login, nothing to rotate) stay out to keep status
 // lean. Numbered slots without a base key still form a family — cloning needs
 // the pi-ai factory, not a base credential.
+function compareFamilyNames(left, right) {
+  if (left.base < right.base) return -1;
+
+  return left.base > right.base ? 1 : 0;
+}
+
+function discoveredFamily(auth, [base, numbers]) {
+  const numbered = [...numbers].sort((a, b) => a - b).map(number => slotId(base, number));
+
+  return { base, slots: Object.hasOwn(auth, base) ? [base, ...numbered] : numbered };
+}
+
 export function discoverFamilies(auth) {
   const groups = new Map();
 
@@ -46,23 +58,7 @@ export function discoverFamilies(auth) {
     groups.get(slot.base).add(slot.n);
   }
 
-  const families = [];
-
-  for (const [base, numbers] of groups) {
-    const slots = [];
-
-    if (Object.hasOwn(auth, base)) slots.push(base);
-
-    for (const n of [...numbers].sort((a, b) => a - b)) {
-      slots.push(slotId(base, n));
-    }
-
-    families.push({ base, slots });
-  }
-
-  families.sort((a, b) => (a.base < b.base ? -1 : a.base > b.base ? 1 : 0));
-
-  return families;
+  return [...groups].map(group => discoveredFamily(auth, group)).sort(compareFamilyNames);
 }
 
 export function nextFreeSlot(auth, base) {

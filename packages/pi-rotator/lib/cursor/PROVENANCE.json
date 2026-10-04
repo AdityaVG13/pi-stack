@@ -1,0 +1,367 @@
+{
+  "sourcePackage": "pi-multi-account",
+  "sourceVersion": "1.23.2",
+  "sourceRepository": "git+https://github.com/Sarrius/pi-multi-account.git",
+  "sourceLocation": "Installed package inspected by user-approved Cursor extraction; SHA256 pins exact local source bytes",
+  "sourceDependency": {
+    "protobuf": "2.15.0"
+  },
+  "compiler": {
+    "node": "v26.7.0",
+    "jiti": "2.7.0"
+  },
+  "runtimeRequiresTypeScript": false,
+  "protocolChanges": "Wire formats and existing callable/export surfaces retained. Initial extraction removed types/compiled enums and changed module paths; later refactoring separates modules, shares formatting/checkpoint logic and uses table-driven protocol dispatch.",
+  "files": [
+    {
+      "source": "cursor-bridge.ts",
+      "destination": "cursor-bridge.js",
+      "sourceBytes": 8829,
+      "sourceSha256": "e7814cbf230ee9faef7735197cee728f6f7f45c0e9a5c866185bd01ad25e9347",
+      "outputBytes": 8829,
+      "outputSha256": "09b9565efa917c6511b909f92ebfdde86baf3cb6ba02e2d40d3e2c134b103139",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "aa480e5faa146bf3f0623015e5b480619d93568c3aacfdf43265c0db10b19b7f"
+    },
+    {
+      "source": "cursor-model-name.ts",
+      "destination": "cursor-model-name.js",
+      "sourceBytes": 538,
+      "sourceSha256": "40b561278fe5cc4a8d09931174ef410693450d33e24054c85fdda270dc19e99c",
+      "outputBytes": 538,
+      "outputSha256": "1c44e6c78da6ac016f3dfaa7ae53eeec6e18c0b95d17b8e98c50654caa31da45",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "1405729b08e6e25df0dd2a0220f9efa5a463a2922be696d709699de9d658495e"
+    },
+    {
+      "source": "provider-payload-stream.ts",
+      "destination": "provider-payload-stream.js",
+      "sourceBytes": 2461,
+      "sourceSha256": "ebe891309d398b42b4d4b148b37906a22162257b8b62f2d9830652d712115223",
+      "outputBytes": 2461,
+      "outputSha256": "d1d948dcd632ece3a3898260d532a1a85d478b8c411ebcbb2ff8f4bd2b6149b8",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "cb0f7a1e06171a98cb24915f1b4d125f35e0fde348b97d3672ab59d37bc5e725"
+    },
+    {
+      "source": "cursor/LICENSE",
+      "destination": "cursor/LICENSE",
+      "sourceBytes": 1072,
+      "sourceSha256": "3c3347b340b04366105b778630d6ea4f8ceb208cf858860fdc634289d205adc2",
+      "outputBytes": 1072,
+      "outputSha256": "3c3347b340b04366105b778630d6ea4f8ceb208cf858860fdc634289d205adc2",
+      "transform": "verbatim",
+      "shippedSha256": "3c3347b340b04366105b778630d6ea4f8ceb208cf858860fdc634289d205adc2"
+    },
+    {
+      "source": "cursor/NOTICE",
+      "destination": "cursor/NOTICE",
+      "sourceBytes": 201,
+      "sourceSha256": "73870aa2ea994407d01b76d0eee80af9978446e23795a2a5a9718473d0a36db2",
+      "outputBytes": 201,
+      "outputSha256": "73870aa2ea994407d01b76d0eee80af9978446e23795a2a5a9718473d0a36db2",
+      "transform": "verbatim",
+      "shippedSha256": "73870aa2ea994407d01b76d0eee80af9978446e23795a2a5a9718473d0a36db2"
+    },
+    {
+      "source": "cursor/auth.ts",
+      "destination": "cursor/auth.js",
+      "sourceBytes": 4313,
+      "sourceSha256": "1446b659473d64aa16e3378c30fbd4987f2561689c46770a0410a37ccab7f67a",
+      "outputBytes": 4313,
+      "outputSha256": "3649c8283232d2c40871f01b3b7f7fdf7d38415304590b4aaa2cc7b90d1097a9",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "c284744657272b862adc855a915ca4be5849e12a905fb50b00d76cff88b41ce9"
+    },
+    {
+      "source": "cursor/bridge-handle.ts",
+      "destination": "cursor/bridge-handle.js",
+      "sourceBytes": 5141,
+      "sourceSha256": "d67382995c115db1dccb1c6f9652f164751e20b085d1d98e67d25aef0934e7fa",
+      "outputBytes": 5141,
+      "outputSha256": "4cc270386192bc8a07321541d1d34fd88a7e9510c2b5216eaf4da385e5e5926b",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "0c639d3cc54ac0f17460811aaf7ce930d838e8e13e3c82d675daeaa2497455d8"
+    },
+    {
+      "source": "cursor/conversation-registry.ts",
+      "destination": "cursor/conversation-registry.js",
+      "sourceBytes": 4579,
+      "sourceSha256": "5b90606f5a7a35c2b5d013b3777e2cab42af0dcc3121bfedff14c948d90324a9",
+      "outputBytes": 4579,
+      "outputSha256": "7ef55dae6e3060437520e838ac8351e7a3576c288a7e639b2bec32677e9d0fec",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "2a711b20857e439600d20ffc42fdb90b630fcdbd2d4712ebcba82ee91a027779"
+    },
+    {
+      "source": "cursor/cursor-models-raw.json",
+      "destination": "cursor/cursor-models-raw.json",
+      "sourceBytes": 13121,
+      "sourceSha256": "25c3d759bde5de1a358a06100e66215c6abdfd3ae428f6944c07b113870eea72",
+      "outputBytes": 13121,
+      "outputSha256": "25c3d759bde5de1a358a06100e66215c6abdfd3ae428f6944c07b113870eea72",
+      "transform": "verbatim",
+      "shippedSha256": "25c3d759bde5de1a358a06100e66215c6abdfd3ae428f6944c07b113870eea72"
+    },
+    {
+      "source": "cursor/cursor-shared.ts",
+      "destination": "cursor/cursor-shared.js",
+      "sourceBytes": 7090,
+      "sourceSha256": "bd06723764ba64c9c21f903c48d2da63a678bb9f35bd83d363f96bcc34966710",
+      "outputBytes": 7090,
+      "outputSha256": "6fdb057bd4d4b975595c9c45375d2adcccbb1149790750f89a3bf1773964b440",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "0eabd1601134dc62ea2371d914d36de0f1a93e2e328c378c092c92a8abbb5dcf"
+    },
+    {
+      "source": "cursor/h2-bridge.mjs",
+      "destination": "cursor/h2-bridge.mjs",
+      "sourceBytes": 4691,
+      "sourceSha256": "8b45ab299becf9a71a5ee0002a06e990b2c3f27a2e7cd43985abfbdbf9085ce2",
+      "outputBytes": 4691,
+      "outputSha256": "8b45ab299becf9a71a5ee0002a06e990b2c3f27a2e7cd43985abfbdbf9085ce2",
+      "transform": "verbatim",
+      "shippedSha256": "67485c1b0ebfa0f50eeaf9277c4ea03b11ab1108c419ce5fbcf67f8300b0218b"
+    },
+    {
+      "source": "cursor/index.ts",
+      "destination": "cursor/index.js",
+      "sourceBytes": 22464,
+      "sourceSha256": "b2344ec86a51a9fc53fe3c53492242eda2963f6c1d2b64a6631f2d4142a213ef",
+      "outputBytes": 22464,
+      "outputSha256": "67339bed1164524f9aa9aba29716e7bfa6d2b358d072d8b7c863a5f05a527a6b",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "4a1176ee398ca549f7bb243d37db15bfb487f0ebe23af36fdb1a1e1d5ed9a138"
+    },
+    {
+      "source": "cursor/message-parsing.ts",
+      "destination": "cursor/message-parsing.js",
+      "sourceBytes": 11895,
+      "sourceSha256": "2feca9c5670fe0c6c6cb9e14b8c3c0bc8879f598b51a81777ee0bbd60ded939a",
+      "outputBytes": 11895,
+      "outputSha256": "8d9b7b258961159973c7b6634bb7255c43593ea288c370459412190541d766cd",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "fae8b746f859e47767999b3329ae7b531b378b6523555660da2db23fe15163f2"
+    },
+    {
+      "source": "cursor/prompt-usage.ts",
+      "destination": "cursor/prompt-usage.js",
+      "sourceBytes": 2149,
+      "sourceSha256": "5dde6a8b3c564f0b37cc76f643a698a8c0fb81537e52e7a7b67d1718b37b9a24",
+      "outputBytes": 2149,
+      "outputSha256": "c9e08f136522edf23408d66234e58201c5afc95f45405d1d683f7dbb4dc53b90",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "4c067fc42cb89d193eb4c2c1e21060d478cd81dc50525622727cc236f463a79f"
+    },
+    {
+      "source": "cursor/proto/agent_pb.ts",
+      "destination": "cursor/proto/agent_pb.cjs",
+      "sourceBytes": 483717,
+      "sourceSha256": "c2d5bfecb81c0e9bb4df61ad1d8d17f83456d85ee0f567c17d8469f631820a46",
+      "outputBytes": 302496,
+      "outputSha256": "fb78fbd2efa780dc58876b96b91fc85dd29cae57c5832b2500d4a31ccbbe039e",
+      "transform": "jiti enum-capable TypeScript compile to CommonJS",
+      "shippedSha256": "b0d74c36843763bcd54852e8acdb4027c27b183526eefeb98cd83daeea130676"
+    },
+    {
+      "source": "cursor/proxy.ts",
+      "destination": "cursor/proxy.js",
+      "sourceBytes": 87239,
+      "sourceSha256": "7bc5ee9d23da2ead93a0ed06fa8d8b61c14857ec380b7d297477ecda8b264156",
+      "outputBytes": 87240,
+      "outputSha256": "f7c814a928718bcf73de79483acf2e99e4dd7be9efe774037b44d38f71f4c5b9",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "56eb1e7c6fc215357cc8facf9794f1d639e4eec465054ca2fbc73af1e3a2cc4d"
+    },
+    {
+      "source": "cursor/session-lifecycle.ts",
+      "destination": "cursor/session-lifecycle.js",
+      "sourceBytes": 1854,
+      "sourceSha256": "b4817571d71923a329dfb2c6ce9a617bb7eecca3e01aa61b9b7bfb7a516c3aa8",
+      "outputBytes": 1782,
+      "outputSha256": "c3f5837c82e42024d81369f3ece513214f3cd4e1c03c03a55efe005c225a080d",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "c3f5837c82e42024d81369f3ece513214f3cd4e1c03c03a55efe005c225a080d"
+    },
+    {
+      "source": "cursor/sse-keepalive.ts",
+      "destination": "cursor/sse-keepalive.js",
+      "sourceBytes": 797,
+      "sourceSha256": "4e48294088d3b6dcc37fd07693000bb6a5afcfc3eeb94bca2bfbfc3f3a0eff17",
+      "outputBytes": 797,
+      "outputSha256": "fa6de4f474370e4979e9d0ecee2a70421555d48cdf42664a31f703bc0f9cea4f",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "a5d4c8de1d95d0ed3f140efe09067305630a8fa6598309b329c875112c701ffd"
+    },
+    {
+      "source": "cursor/stream-lifecycle.ts",
+      "destination": "cursor/stream-lifecycle.js",
+      "sourceBytes": 6953,
+      "sourceSha256": "368213a50673b8de1f33c32eff6dc34c532ff954c7ad15f8118c221d4cd25816",
+      "outputBytes": 6953,
+      "outputSha256": "7f1d797fc23990c8a6608da643bf9b717dc8c461468c6b1cc8d7fa71dd54fec6",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "9edcc8e64dc49d742c9349550faafd6bc8ba2c3e158efea60f159912be449f8a"
+    },
+    {
+      "source": "cursor/upstream-watchdog.ts",
+      "destination": "cursor/upstream-watchdog.js",
+      "sourceBytes": 3344,
+      "sourceSha256": "f22602e8f2206fc69c8381abdd0fe619154fe6853bff4275b9a12b06a5c90927",
+      "outputBytes": 3344,
+      "outputSha256": "243e9ca350d138ec31d2d73a6d24afa6a638f87e7a95f377e5a3fdebb3bf2e3b",
+      "transform": "Node stripTypeScriptTypes(mode:strip)",
+      "shippedSha256": "d2cd0723e31f7ba3375e93ce5fa4862ab376ecbc67e1d905d32e0c7314bd6ccb"
+    }
+  ],
+  "adaptations": {
+    "bridge": [
+      "offline preparation/startup: discover=false",
+      "once-per-host lifecycle WeakSet",
+      "skip already registered account definitions"
+    ],
+    "vendorLint": "Four scoped anti-slop spacing/naming/type style exemptions; ordinary correctness and syntax rules remain enabled",
+    "sourceSemanticVerification": {
+      "nonBridgeFiles": 19,
+      "astIdenticalExceptTypeRemovalEnumCompilationModulePathLiterals": true,
+      "appliesTo": "Initial extraction only; not a whole-file AST identity claim for subsequent refactoring."
+    },
+    "refactoring": {
+      "generatedProto": "Complete exports retained; redundant generated declarations/erased-type padding and unused local aliases removed; exact exported descriptor/enum initializer execution retained and schema/wire parity verified against the local baseline.",
+      "runtime": "Named acyclic module boundaries, role/exec/query dispatch, unified confirmation/catalog/usage helpers and shared completion/checkpoint operations.",
+      "verification": "Package suite plus old/new behavioral and byte-level comparisons. No upstream endpoint, entitlement or remote prompt-cache certification."
+    },
+    "runtimeCorrections": [
+      "Credential-scoped discovered catalogs and effort fallback; refreshed provider registrations retain their discovery callbacks.",
+      "Paused tool Runs resume only for the same credential/model and streaming format; changed scope rebuilds history under a new conversation generation.",
+      "Bridge completion follows child close/stdout drainage, including spawn failures; upstream failure is an error, not successful partial output.",
+      "Streaming and nonstreaming failure/cancellation terminate bridge children; nonstream responses use transport and useful-output watchdogs.",
+      "Intentional termination after turnEnded preserves successful checkpoints.",
+      "Cancellation/terminal failure advances conversation generation and invalidates partial checkpoints; paused SSE completion is not successful Run completion.",
+      "Checkpoint/blob commits are fenced to their captured conversation; late collectors and bridge cleanup cannot modify replacement Runs. Settled JSON ignores intentional-cancel terminal frames.",
+      "Runtime shutdown terminates all spawned bridge children, aborts owned OAuth workflows, and closes the proxy listener and HTTP connections; session transitions still use per-session cleanup.",
+      "Proxy startup is shared, cancellation/bind failures reject, and ensureCursorProxy rebinds after a stopped runtime rather than returning a dead cached port.",
+      "Unary deadlines settle without waiting for process close; AbortSignal propagates through login polling, refresh, and optional catalog RPC. OAuth HTTP requests/body reads are bounded to 15 seconds by default.",
+      "Transcript ownership includes canonical instructions/tools/completed-prefix identity and Pi-visible current-turn steps; only unchanged pending calls may receive new results. Edited/rewound history or abandoned pauses rebuild rather than resuming stale checkpoints.",
+      "Each fresh Run has a distinct collector owner while valid paused continuations retain their owner; overlapping collectors cannot overwrite newer checkpoint/blob state.",
+      "Cursor restoration preflights all requested provider IDs and rechecks foreign ownership at registration after async setup; only successful definitions enter the registered ownership set, permitting safe partial-setup retry.",
+      "Rebuilt current turns retain an immutable Pi-visible replay prefix separately from native Run steps; only results for current native pending calls may extend a pause.",
+      "Cursor ownership reconciles current SDK shallow-merged legacy definitions rather than treating previously registered IDs as perpetual ownership; late catalogs recheck current permission and released IDs can be primed again. Saved explicit transport/auth config protects offline bootstrap before the registry exists.",
+      "Coalesced native tool batches recheck conversation ownership at delivery; replaced/forgotten Runs fail without emitting queued tools or disturbing replacement state.",
+      "Partial result responses may repeat unresolved calls; parsing collapses only matching pending IDs/names/arguments, preserving existing results and leaving changed/completed calls distinct. Completed-prefix identity ignores historical call-ID normalization while retaining bound arguments/results.",
+      "Runtime dependency upgraded from inherited @bufbuild/protobuf 2.15.0 to 2.16.0; safe own-data argument maps preserve __proto__ and nested special keys through WKT tool schemas, native MCP delivery and serialized history. Original sourceDependency attribution remains unchanged.",
+      "Diagnostic serialization and file writes are best-effort with no stderr fallback; logger failures cannot skip lifecycle cleanup. Refresh failures discard their bodies and report HTTP status only. HTTP2 requests carry the required User-Agent. Native reads reject Pi Bash tail-truncation notices instead of reporting them as complete files.",
+      "The payload transport resolves its host Pi AI compat peer at module evaluation, not the first request, so the host extension loader can apply aliases in a clean install without a local runtime peer. A real-loader regression and packed SDK chat/tool/account-switch fixture cover this boundary. The Cursor bridge statically imports that adapter so native-import fast paths cannot bypass host aliases on its later module loads.",
+      "Streaming failures use OpenAI SSE error envelopes, not an invalid finish_reason or assistant content; the real Pi host regression preserves bridge and Connect error messages.",
+      "Non-streaming native tools are rejected and cannot renew the useful-output watchdog; only visible progress renews that clock.",
+      "Unhandled execs and failed native result encodings report through best-effort opt-in debug logs, never stderr.",
+      "Non-success HTTP2 responses become status-only Connect errors for streaming and nonzero unary exits with no retained body; streamed 401/402/403/429 failures retain account-recovery semantics."
+    ]
+  },
+  "shippedModules": [
+    {
+      "path": "auth.js",
+      "sha256": "c284744657272b862adc855a915ca4be5849e12a905fb50b00d76cff88b41ce9"
+    },
+    {
+      "path": "bridge-handle.js",
+      "sha256": "0c639d3cc54ac0f17460811aaf7ce930d838e8e13e3c82d675daeaa2497455d8"
+    },
+    {
+      "path": "completion.js",
+      "sha256": "9ec3042a7efee962bb36341df565a5f0eb5f85144d8a901886dd8aade106bccd"
+    },
+    {
+      "path": "conversation-registry.js",
+      "sha256": "2a711b20857e439600d20ffc42fdb90b630fcdbd2d4712ebcba82ee91a027779"
+    },
+    {
+      "path": "cursor-shared.js",
+      "sha256": "0eabd1601134dc62ea2371d914d36de0f1a93e2e328c378c092c92a8abbb5dcf"
+    },
+    {
+      "path": "debug.js",
+      "sha256": "37ff4bf5a9dae253b3bb7fcfc5670f872618817f0254bac14daaf434b94c659a"
+    },
+    {
+      "path": "diagnostics.js",
+      "sha256": "2e45450bc83ee3c8059c2b93d1d83ce3cf92077db5985cb3a4608faec1ce693c"
+    },
+    {
+      "path": "exec.js",
+      "sha256": "934530c5a49044710d7daf5c01324707083f40894fe5ca59f39192b4d91cb326"
+    },
+    {
+      "path": "frames.js",
+      "sha256": "61f960e9435920d805e1205b957c17e134be37427299f60a16836147c6ed15ec"
+    },
+    {
+      "path": "h2-bridge.mjs",
+      "sha256": "67485c1b0ebfa0f50eeaf9277c4ea03b11ab1108c419ce5fbcf67f8300b0218b"
+    },
+    {
+      "path": "index.js",
+      "sha256": "4a1176ee398ca549f7bb243d37db15bfb487f0ebe23af36fdb1a1e1d5ed9a138"
+    },
+    {
+      "path": "message-parsing.js",
+      "sha256": "fae8b746f859e47767999b3329ae7b531b378b6523555660da2db23fe15163f2"
+    },
+    {
+      "path": "models.js",
+      "sha256": "03fff52b23eb8c5d17382fb6d949b053abefeebeac3977c14ac183e323fdc8f3"
+    },
+    {
+      "path": "native-results.js",
+      "sha256": "9bb15e6c966da971f0c8980f817d1ba9ad9ebdeb36dbb1e41d26f14184c146ee"
+    },
+    {
+      "path": "prompt-usage.js",
+      "sha256": "4c067fc42cb89d193eb4c2c1e21060d478cd81dc50525622727cc236f463a79f"
+    },
+    {
+      "path": "proto/agent_pb.cjs",
+      "sha256": "b0d74c36843763bcd54852e8acdb4027c27b183526eefeb98cd83daeea130676"
+    },
+    {
+      "path": "proxy.js",
+      "sha256": "56eb1e7c6fc215357cc8facf9794f1d639e4eec465054ca2fbc73af1e3a2cc4d"
+    },
+    {
+      "path": "request.js",
+      "sha256": "435e2aeb79b329fb558e4c82a2c708c4991bb1da48379ba568454c97ce47c781"
+    },
+    {
+      "path": "responses.js",
+      "sha256": "7ac862a21c909d46c3f4b5db7bad2d69bf7bf7a8d4d164eecfa9f72a75cd88ea"
+    },
+    {
+      "path": "rpc.js",
+      "sha256": "8a2d6c6b92332384ae7b42847c2022a17a7000bc429a10a973078e670b6d99ce"
+    },
+    {
+      "path": "server-messages.js",
+      "sha256": "9d78effc0f6980768f3d3fb0b24a4cb46e2b3f9786ef0d4f1eb6df95d42168e0"
+    },
+    {
+      "path": "session-lifecycle.js",
+      "sha256": "c3f5837c82e42024d81369f3ece513214f3cd4e1c03c03a55efe005c225a080d"
+    },
+    {
+      "path": "sse-keepalive.js",
+      "sha256": "a5d4c8de1d95d0ed3f140efe09067305630a8fa6598309b329c875112c701ffd"
+    },
+    {
+      "path": "stream-lifecycle.js",
+      "sha256": "9edcc8e64dc49d742c9349550faafd6bc8ba2c3e158efea60f159912be449f8a"
+    },
+    {
+      "path": "stream.js",
+      "sha256": "847da72d66eafd32612acd40c5b9ddab52fc39ebdccf690f3b8df562cb3ff8d3"
+    },
+    {
+      "path": "upstream-watchdog.js",
+      "sha256": "d2cd0723e31f7ba3375e93ce5fa4862ab376ecbc67e1d905d32e0c7314bd6ccb"
+    }
+  ]
+}

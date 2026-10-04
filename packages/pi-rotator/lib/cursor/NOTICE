@@ -1,0 +1,2 @@
+Vendored into pi-multi-account from https://github.com/ndraiman/pi-cursor-provider (MIT, Netanel Draiman).
+This is not a separate Pi extension. Cursor subscription support is part of pi-multi-account.

@@ -1,0 +1,20 @@
+Cursor-only source reused in pi-rotator from pi-multi-account 1.23.2.
+The original Netanel Draiman MIT license/NOTICE and pi-multi-account contributors
+MIT license are retained alongside this notice. Original proxy/auth comments
+also retain their opencode-cursor attribution to Ephraim Duncan.
+
+TypeScript was structurally stripped to ESM JavaScript; the generated enum-bearing
+protobuf schema was compiled to CommonJS with existing Jiti. Module path literals
+were structurally updated. Source/compiler/output hashes are in PROVENANCE.json.
+Wire-protocol implementation was not redesigned.
+
+Rotator's bridge adaptations: offline registration/preparation, once-per-host
+cleanup registration, and preservation of already registered account definitions.
+The account adapter supplies duplicate-login protection and account IDs; Pi owns
+token persistence. This code is not a separately auto-loaded Pi extension.
+
+Four anti-slop naming/type/spacing style rules are explicitly exempted only in
+the licensed/generated copies, preserving upstream contracts and identifiers.
+Normal correctness/syntax lint remains enabled; all authored Rotator adapters
+use the full repository policy. Upstream unused-import/catch and stripped-type
+whitespace warnings remain visible rather than prompting protocol rewrites.

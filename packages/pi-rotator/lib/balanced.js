@@ -15,10 +15,13 @@
 //
 // lastActive: this session's slot -> last served time. current: the slot
 // that served the latest turn (null when unknown).
+function isWarmCurrent(slots, lastActive, isCooling, now, ttlMs, current) {
+  return current != null && slots.includes(current) && !isCooling(current) &&
+    now - (lastActive.get(current) || 0) < ttlMs;
+}
+
 export function pickBalanced(slots, lastActive, drained, isCooling, now, ttlMs, current) {
-  if (current != null && slots.includes(current) && !isCooling(current)) {
-    if (now - (lastActive.get(current) || 0) < ttlMs) return { id: current, warm: true };
-  }
+  if (isWarmCurrent(slots, lastActive, isCooling, now, ttlMs, current)) return { id: current, warm: true };
 
   let pick = null;
   let least = Infinity;

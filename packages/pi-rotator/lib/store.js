@@ -9,12 +9,17 @@ export function journalPath(agentDir) {
   return join(agentDir, "pi-rotator-journal.jsonl");
 }
 
-// Credential-free JSONL: ids, models, and truncated reasons only. Never log
-// auth entries, tokens, or request bodies through here.
-export function appendDebug(agentDir, kind, fields) {
-  const line = JSON.stringify({ t: new Date().toISOString(), kind, ...fields }) + "\n";
+// Provider error text can echo credentials. Shared logs retain event/account
+// metadata and controlled routing reasons, never raw exception or response text.
+function logFields(kind, fields) {
+  return Object.fromEntries(Object.entries(fields || {}).filter(([name]) =>
+    name !== "message" && !(kind === "cursor_catalog" && name === "reason")));
+}
 
+export function appendDebug(agentDir, kind, fields) {
   try {
+    const line = JSON.stringify({ t: new Date().toISOString(), kind, ...logFields(kind, fields) }) + "\n";
+
     appendFileSync(debugLogPath(agentDir), line);
   } catch {
     // The debug log is cosmetic; a failed write must not break rotation.
@@ -25,9 +30,9 @@ export function appendDebug(agentDir, kind, fields) {
 // wire-prefix fingerprint that lets analysis verify prefix identity and
 // cache behavior after the fact. Hashes and counts only — never bodies.
 export function appendJournal(agentDir, kind, fields) {
-  const line = JSON.stringify({ t: new Date().toISOString(), kind, ...fields }) + "\n";
-
   try {
+    const line = JSON.stringify({ t: new Date().toISOString(), kind, ...logFields(kind, fields) }) + "\n";
+
     appendFileSync(journalPath(agentDir), line);
   } catch {
     // Evidence loss must not break rotation.
@@ -41,7 +46,7 @@ export function isCooling(cooldowns, id, now) {
 }
 
 export function markCooling(cooldowns, id, until) {
-  cooldowns.set(id, until);
+  cooldowns.set(id, Math.max(cooldowns.get(id) ?? 0, until));
 }
 
 export function pruneCooldowns(cooldowns, now) {
@@ -57,7 +62,7 @@ export function recordTurn(drained, lastActive, id, now) {
 
 // Statuses that retire a slot mid-turn: rate/quota exhaustion plus the
 // billing and auth failures that mean this slot cannot serve at all.
-export const EXHAUSTED_STATUS = new Set([429, 402, 403]);
+export const EXHAUSTED_STATUS = new Set([429, 402, 401, 403]);
 
 // One decision per provider response, journaled by the caller. Only a real
 // 1xx-3xx status is evidence of service: 0/null/undefined mean the host

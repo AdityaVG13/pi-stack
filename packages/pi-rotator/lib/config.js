@@ -14,7 +14,7 @@ export function configPath(agentDir) {
 }
 
 function saneMs(value, fallback) {
-  if (value && Number.isFinite(value) && value > 0) return Math.floor(value);
+  if (value && Number.isFinite(value) && value >= 1) return Math.floor(value);
 
   return fallback;
 }
@@ -23,24 +23,31 @@ export function normalizeConfig(raw) {
   const strategy = raw && STRATEGIES.includes(raw.strategy) ? raw.strategy : DEFAULT_STRATEGY;
   const cooldownMs = saneMs(raw && raw.cooldownMs, DEFAULT_COOLDOWN_MS);
   const ttlMs = saneMs(raw && raw.ttlMs, DEFAULT_TTL_MS);
-  const enabled = !raw || raw.enabled !== false;
-  const debugLog = !raw || raw.debugLog !== false;
-  const announceSwitches = Boolean(raw) && raw.announceSwitches === true;
-  const ttlByFamily = {};
-  // Plain objects only: arrays are objects too, and their indices must
-  // never become family names.
-  const rawMap = raw && raw.ttlByFamily?.constructor === Object ? raw.ttlByFamily : null;
+  const flags = configFlags(raw);
+  const ttlByFamily = familyTtls(raw);
 
-  if (rawMap) {
-    // Object.entries keys are always strings; only emptiness is checked.
-    for (const [base, ms] of Object.entries(rawMap)) {
-      if (base && Number.isFinite(ms) && ms > 0) {
-        ttlByFamily[base] = Math.floor(ms);
-      }
-    }
-  }
+  return { enabled: flags.enabled, strategy, cooldownMs, ttlMs, ttlByFamily,
+    debugLog: flags.debugLog, announceSwitches: flags.announceSwitches, fastMode: flags.fastMode };
+}
 
-  return { enabled, strategy, cooldownMs, ttlMs, ttlByFamily, debugLog, announceSwitches };
+function configFlags(raw) {
+  return {
+    enabled: !raw || raw.enabled !== false,
+    debugLog: !raw || raw.debugLog !== false,
+    announceSwitches: Boolean(raw) && raw.announceSwitches === true,
+    fastMode: Boolean(raw) && raw.fastMode === true,
+  };
+}
+
+function familyTtls(raw) {
+  const rawMap = raw?.ttlByFamily;
+
+  // JSON keys are family IDs, not prototype metadata; array indices are not IDs.
+  if (!rawMap || Object.getPrototypeOf(rawMap) !== Object.prototype) return {};
+
+  return Object.fromEntries(Object.entries(rawMap)
+    .filter(([base, ms]) => base && Number.isFinite(ms) && ms >= 1)
+    .map(([base, ms]) => [base, Math.floor(ms)]));
 }
 
 export function loadConfig(agentDir) {
@@ -53,6 +60,17 @@ export function loadConfig(agentDir) {
   } catch {
     return normalizeConfig(null);
   }
+}
+
+// A command changes one preference, not a stale snapshot of other settings.
+// Invalid/unwritable config must fail before enabling a potentially paid tier.
+export function saveFastMode(agentDir, enabled) {
+  const path = configPath(agentDir);
+  const raw = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+
+  if (!raw || Object.getPrototypeOf(raw) !== Object.prototype) throw new Error("pi-rotator config must be a JSON object");
+  mkdirSync(join(agentDir, "config", "pi-rotator"), { recursive: true });
+  writeFileSync(path, JSON.stringify({ ...raw, fastMode: enabled === true }, null, 2) + "\n");
 }
 
 export function saveConfig(agentDir, config) {

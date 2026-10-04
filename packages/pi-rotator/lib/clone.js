@@ -2,88 +2,19 @@
 //
 // No family table: pi-ai's builtinProviders() yields every builtin family
 // (openai-codex, anthropic, xai, kimi-coding, ...), and Pi's
-// registerProvider(id, def) takes the alias id plus the cloned def. The
+// registerProvider(provider) preserves the complete native definition. The
 // alias shares the base transport/auth implementation while Pi resolves
 // credentials per provider id, so each alias authenticates as its own
 // auth.json entry. Families with no builtin factory (extension transports
 // like cursor/devin, custom providers like ollama) report unsupported —
 // honestly, in status — instead of guessing.
-import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { parseSlotId } from "./slots.js";
 
-const PI_AI_SPEC = "@earendil-works/pi-ai/providers/all";
+// Pi owns this module. Host peers must use "*" and runtime installations must
+// omit local peer copies so the extension loader can bind the host instance.
+export const nativeBuiltinModule = await import("@earendil-works/pi-ai/providers/all");
 
-export function findPiAiRoot(startDir) {
-  let dir = startDir;
-
-  for (let depth = 0; depth < 6; depth += 1) {
-    const root = join(dir, "node_modules", "@earendil-works", "pi-ai");
-
-    if (existsSync(root)) return root;
-    const parent = dirname(dir);
-
-    if (parent === dir) return null;
-    dir = parent;
-  }
-
-  return null;
-}
-
-function tryBareSpecifier(entryUrl) {
-  try {
-    return createRequire(entryUrl)(PI_AI_SPEC);
-  } catch {
-    return null;
-  }
-}
-
-function tryFilePath(entryUrl, startDir) {
-  const root = findPiAiRoot(startDir);
-
-  if (!root) return null;
-  const file = join(root, "dist", "providers", "all.js");
-
-  if (!existsSync(file)) return null;
-
-  try {
-    return createRequire(entryUrl)(file);
-  } catch {
-    return null;
-  }
-}
-
-// Path-installed checkouts (~/Developer/...) are not under the agent npm
-// tree, so neither the bare specifier nor the upward walk can see pi-ai.
-// The agent dir itself is the last resort.
-function tryAgentDirNpm(entryUrl) {
-  // Explicit override wins outright; otherwise the default agent dir. One
-  // directory, no silent chain — and testable via PI_AGENT_DIR.
-  const base = process.env.PI_AGENT_DIR || join(homedir(), ".pi", "agent");
-  const file = join(base, "npm", "node_modules", "@earendil-works", "pi-ai", "dist", "providers", "all.js");
-
-  if (!existsSync(file)) return null;
-
-  try {
-    return createRequire(entryUrl)(file);
-  } catch {
-    return null;
-  }
-}
-
-// The pi-ai builtin registry module, via bare specifier first (pi-ai's
-// exports map covers ./providers/*), then the filesystem walk, then the
-// agent npm tree.
-export function loadBuiltinModule(entryUrl, startDir) {
-  const mod = tryBareSpecifier(entryUrl) || tryFilePath(entryUrl, startDir) || tryAgentDirNpm(entryUrl);
-
-  if (!mod || !(mod.builtinProviders instanceof Function)) {
-    return { module: null, error: "pi-ai builtin registry unavailable" };
-  }
-
-  return { module: mod, error: null };
-}
+const BUILTIN_WIRE = Symbol("builtin wire identity");
 
 // A FRESH base instance per call: each alias gets its own top-level and
 // nested objects (function refs stay module singletons either way), so Pi
@@ -94,25 +25,81 @@ export function builtinBase(mod, baseId) {
   try {
     const found = mod.builtinProviders().find((p) => p && p.id === baseId);
 
+    if (found) found[BUILTIN_WIRE] = true;
+
     return found || null;
   } catch {
     return null;
   }
 }
 
+// Builtin APIs contain provider-id-specific auth and replay rules. Canonicalize
+// their wire view only; callbacks/results keep the serving account identity.
+// A package-supplied factory has no provenance marker and is never rewritten.
+function builtinWireStream(base, aliasId, stream) {
+  return (model, context, options = {}) => {
+    const wireModel = { ...model, provider: base.id };
+
+    const messages = context.messages.map(message => message.role === "assistant" &&
+      message.model === model.id && message.api === model.api && parseSlotId(message.provider)?.base === base.id
+      ? { ...message, provider: base.id } : message);
+
+    const native = stream(wireModel, { ...context, messages }, {
+      ...options,
+      onPayload: options.onPayload && (payload => options.onPayload(payload, model)),
+      onResponse: options.onResponse && (response => options.onResponse(response, model)),
+      onProviderStreamEvent: options.onProviderStreamEvent && (event => options.onProviderStreamEvent(event, model)),
+    });
+
+    return {
+      async *[Symbol.asyncIterator]() {
+        for await (const event of native) {
+          yield aliasStreamEvent(event, aliasId);
+        }
+      },
+      async result() {
+        return { ...await native.result(), provider: aliasId };
+      },
+    };
+  };
+}
+
 export function aliasDef(base, aliasId, n) {
   const def = { ...base, id: aliasId, name: `${base.name} (account ${n})` };
-  // pi 0.87.x: createProvider() attaches streamSimple to every builtin, and
-  // validateExtensionProvider rejects a registration that carries streamSimple
-  // without an api map. The host derives stream behavior from the api map, so
-  // drop the copied method from the alias. The base def is not mutated.
-  delete def.streamSimple;
+  // Native catalogs carry provider identity. Re-key every operation without
+  // mutating the factory's catalog; OAuth, refresh and wire implementations
+  // remain provider-owned. Never pass this object through legacy ProviderConfig.
+  const rekey = models => models.map(model => ({ ...model, provider: aliasId }));
+
+  def.getModels = () => rekey(base.getModels());
+
+  if (base.getAllModels) def.getAllModels = () => rekey(base.getAllModels());
+
+  if (base[BUILTIN_WIRE]) {
+    def.stream = builtinWireStream(base, aliasId, base.stream);
+
+    if (base.streamSimple) def.streamSimple = builtinWireStream(base, aliasId, base.streamSimple);
+  }
+
+  if (base.refreshModels) {
+    // A native factory restores its own id and emits base-shaped rows. The
+    // host's persistent catalog and publication generation must remain scoped
+    // to the alias; only its private restore input is translated back.
+    def.refreshModels = context => base.refreshModels({
+      ...context,
+      stored: context.stored && { ...context.stored, models: context.stored.models.map(model => ({ ...model, provider: base.id })) },
+      publish: change => context.publish({
+        ...change,
+        persist: change.persist && { ...change.persist, models: rekey(change.persist.models) },
+      }),
+    });
+  }
 
   return def;
 }
 
-export function registerAlias(pi, base, aliasId, n) {
-  pi.registerProvider(aliasId, aliasDef(base, aliasId, n));
+function aliasStreamEvent(event, aliasId) {
+  const field = ["partial", "message", "error"].find(key => event[key]);
 
-  return "alias";
+  return field ? { ...event, [field]: { ...event[field], provider: aliasId } } : event;
 }
