@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { buildThinking } from "../lib/thinking.js";
 
 const CONSERVATIVE_LEVELS = {
-  off: null,
   minimal: "minimal",
   low: "low",
   medium: "medium",
@@ -24,7 +23,7 @@ describe("thinking maps", () => {
     assert.deepEqual(buildThinking(true, ["none", "low", "medium", "xhigh"]), {
       reasoning: true,
       thinkingLevelMap: {
-        off: null,
+        off: "none",
         minimal: "low",
         low: "low",
         medium: "medium",
@@ -33,6 +32,10 @@ describe("thinking maps", () => {
         max: null,
       },
     });
+    // Pi hides a level when the map value is null. off:null would remove /thinking
+    // off; omit the key (unknown) or map an advertised none/off wire value.
+    assert.equal("off" in buildThinking(true, null).thinkingLevelMap, false);
+    assert.equal(buildThinking(true, ["off", "low"]).thinkingLevelMap.off, "off");
 
     // high sits equidistant between medium and xhigh.
     const map = buildThinking(true, ["medium", "xhigh"]).thinkingLevelMap;

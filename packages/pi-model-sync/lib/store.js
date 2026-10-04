@@ -1,16 +1,32 @@
 /**
  * pi-model-sync models.json merge.
  *
- * Ownership is by tag: entries stamped _managedBy are ours to update and
- * prune; everything else is the user's and is never touched. Pruning only
+ * Ownership is by tag and operation: stamped chat entries are ours to update
+ * and prune; non-chat entries are always preserved, even if tagged. Pruning only
  * happens for providers whose live discovery succeeded, so a dead token or
- * a failed request can never wipe a catalog. A corrupt models.json aborts
- * the run instead of being clobbered.
+ * a failed request can never wipe a catalog. A section that held only pruned
+ * chat entries is removed (Pi rejects `{ models: [] }` with no other keys).
+ * A corrupt models.json aborts the run instead of being clobbered. Reads
+ * accept Pi's JSONC dialect (BOM, // comments, trailing commas); writes are
+ * strict JSON.
  */
 
-import { isObject } from "./decode.js";
+import { randomUUID } from "node:crypto";
+import { isNonEmptyString, isObject } from "./decode.js";
 
 export const MANAGED_BY = "pi-model-sync";
+
+function stripBom(content) {
+  return content.startsWith("\uFEFF") ? content.slice(1) : content;
+}
+
+// Same dialect Pi uses for models.json: // comments and trailing commas,
+// with string literals left intact.
+function stripJsonComments(input) {
+  return input
+    .replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (m) => (m[0] === '"' ? m : ""))
+    .replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (m, tail) => tail ?? (m[0] === '"' ? m : ""));
+}
 
 function canonicalize(value) {
   if (Array.isArray(value)) {
@@ -44,8 +60,8 @@ function withoutTag(entry) {
   return copy;
 }
 
-function isModelEntry(value) {
-  return isObject(value) && "id" in value;
+function isChatEntry(value) {
+  return isObject(value) && "id" in value && (value.type === undefined || value.type === "chat");
 }
 
 export function readModelsFile(modelsPath, fs) {
@@ -64,7 +80,7 @@ export function readModelsFile(modelsPath, fs) {
   let doc;
 
   try {
-    doc = JSON.parse(text);
+    doc = JSON.parse(stripJsonComments(stripBom(text)));
   } catch {
     throw new Error(`models.json is corrupt (${modelsPath}); refusing to write`);
   }
@@ -81,7 +97,7 @@ export function readModelsFile(modelsPath, fs) {
 // residents and identical managed copies are kept as-is, changed managed
 // copies refresh in place.
 function carryEntry(existing, entry, consumed) {
-  const current = existing.find((item) => isModelEntry(item) && item.id === entry.id);
+  const current = existing.find((item) => isChatEntry(item) && item.id === entry.id);
 
   if (current === undefined) {
     return { model: { ...entry, _managedBy: MANAGED_BY }, tally: "added" };
@@ -107,8 +123,8 @@ function sweepStale(existing, consumed, succeeded, nextModels) {
   let kept = 0;
 
   for (const item of existing) {
-    if (!isModelEntry(item)) {
-      // Unrecognized shapes are preserved untouched, like user entries.
+    if (!isChatEntry(item)) {
+      // Chat discovery establishes nothing about another operation's catalog.
       nextModels.push(item);
       kept += 1;
 
@@ -132,7 +148,11 @@ function sweepStale(existing, consumed, succeeded, nextModels) {
 
 // One provider's plan: entries are built model definitions (untagged).
 // succeeded gates pruning: unknown state never deletes.
-export function planProviderUpdate(doc, providerId, entries, succeeded) {
+// residentIds are chat ids already composed outside this file (builtin /
+// extension seeds). Writing them as models.json overlays replaces Pi's
+// curated definition (compat, input, thinking maps). Refresh in place only
+// when the id is already a file resident.
+export function planProviderUpdate(doc, providerId, entries, succeeded, residentIds) {
   const section = doc.providers?.[providerId];
   const existing = Array.isArray(section?.models) ? section.models : [];
   const nextModels = [];
@@ -140,14 +160,19 @@ export function planProviderUpdate(doc, providerId, entries, succeeded) {
   // Existing objects already carried over. Identity, not id: duplicate
   // untagged entries share an id but each is user data to preserve.
   const consumed = new Set();
+  const residents = new Set(residentIds ?? []);
   const counts = { added: 0, updated: 0, removed: 0, kept: 0 };
 
   for (const entry of entries) {
-    if (seen.has(entry.id)) {
+    if (!isChatEntry(entry) || !isNonEmptyString(entry.id) || seen.has(entry.id)) {
       continue;
     }
 
     seen.add(entry.id);
+
+    if (residents.has(entry.id) && !existing.some((item) => isChatEntry(item) && item.id === entry.id)) {
+      continue;
+    }
 
     const carried = carryEntry(existing, entry, consumed);
     nextModels.push(carried.model);
@@ -159,10 +184,20 @@ export function planProviderUpdate(doc, providerId, entries, succeeded) {
   counts.kept += swept.kept;
 
   // Preserve provider-section keys the sync does not own (modelOverrides...).
+  // A section that held only pruned chat entries is removed, matching the
+  // orphan sweep: Pi composition-errors on `{ models: [] }` with no other keys.
   const nextProviders = { ...doc.providers };
 
-  if (nextModels.length > 0 || section !== undefined) {
+  if (nextModels.length > 0) {
     nextProviders[providerId] = { ...section, models: nextModels };
+  } else if (isObject(section)) {
+    const rest = Object.keys(section).filter((key) => key !== "models");
+
+    if (rest.length === 0) {
+      delete nextProviders[providerId];
+    } else {
+      nextProviders[providerId] = { ...section, models: nextModels };
+    }
   }
 
   return { next: { ...doc, providers: nextProviders }, ...counts };
@@ -198,7 +233,7 @@ export function planOrphanSweep(doc, knownIds) {
       continue;
     }
 
-    const kept = section.models.filter((item) => !isModelEntry(item) || item._managedBy !== MANAGED_BY);
+    const kept = section.models.filter((item) => !isChatEntry(item) || item._managedBy !== MANAGED_BY);
     const removed = section.models.length - kept.length;
 
     if (removed === 0) {
@@ -219,48 +254,73 @@ export function planOrphanSweep(doc, knownIds) {
   return { next: { ...doc, providers: nextProviders }, swept };
 }
 
-// Returns {backupPath} (null when there was no file to back up). Backups
-// never clobber: a same-second rerun gets a numeric suffix.
-export function writeModelsFile(modelsPath, doc, fs) {
-  let backupPath = null;
-
+function publicationTarget(modelsPath, fs) {
   try {
-    fs.accessSync(modelsPath);
-    backupPath = uniqueBackupPath(modelsPath, fs);
-    fs.copyFileSync(modelsPath, backupPath);
+    fs.lstatSync(modelsPath);
   } catch (error) {
-    if (error?.code !== "ENOENT") {
+    if (error?.code === "ENOENT") return { path: modelsPath, mode: 0o600 };
+
+    throw error;
+  }
+
+  // Follow existing symlinks rather than replacing the user's link. A dangling
+  // link is not a missing file: realpath must reject it before any publication.
+  const path = fs.realpathSync.native(modelsPath);
+  const info = fs.statSync(path);
+
+  if (!info.isFile()) throw new Error("models.json must be a regular file");
+
+  fs.accessSync(path, fs.constants.W_OK);
+
+  return { path, mode: info.mode & 0o777 };
+}
+
+function backUpModels(modelsPath, fs) {
+  const first = backupPathFor(modelsPath);
+
+  for (let suffix = 1; ; suffix += 1) {
+    const path = suffix === 1 ? first : `${first}-${suffix}`;
+
+    try {
+      fs.copyFileSync(modelsPath, path, fs.constants.COPYFILE_EXCL);
+
+      return path;
+    } catch (error) {
+      if (error?.code === "EEXIST") continue;
+
+      if (error?.code === "ENOENT") return null;
+
       throw error;
     }
   }
+}
 
-  fs.writeFileSync(modelsPath, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+// Synchronous merge callers cannot interleave in this process. Staging keeps
+// partial writes away from the live file; this is not external-writer CAS.
+export function writeModelsFile(modelsPath, doc, fs) {
+  const text = `${JSON.stringify(doc, null, 2)}\n`;
+  const target = publicationTarget(modelsPath, fs);
+  const backupPath = backUpModels(modelsPath, fs);
+  const stagedPath = `${target.path}.tmp-${randomUUID()}`;
+  let owned = false;
+
+  try {
+    const fd = fs.openSync(stagedPath, "wx", target.mode);
+    owned = true;
+
+    try {
+      fs.fchmodSync(fd, target.mode);
+      fs.writeFileSync(fd, text, "utf8");
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    fs.renameSync(stagedPath, target.path);
+    owned = false;
+  } finally {
+    if (owned) fs.unlinkSync(stagedPath);
+  }
 
   return { backupPath };
-}
-
-function existsSync(path, fs) {
-  try {
-    fs.accessSync(path);
-
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function uniqueBackupPath(modelsPath, fs) {
-  const first = backupPathFor(modelsPath);
-
-  if (!existsSync(first, fs)) {
-    return first;
-  }
-
-  let counter = 2;
-
-  while (existsSync(`${first}-${counter}`, fs)) {
-    counter += 1;
-  }
-
-  return `${first}-${counter}`;
 }

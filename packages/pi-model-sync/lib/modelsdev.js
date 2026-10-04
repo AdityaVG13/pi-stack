@@ -181,11 +181,30 @@ const COST_LEGS = [
   ["cacheWrite", ["cache_write", "cacheWrite"]],
 ];
 
-function costsOf(live, entry) {
-  const sources = [
-    asRecord(asRecord(live)?.pricing ?? asRecord(asRecord(live)?.cost)),
-    asRecord(entry?.cost),
-  ];
+// Gateway list prices are USD/token; Pi and models.dev use USD/million tokens.
+// Normalize only this known wire schema, never scale models.dev fallbacks.
+function gatewayCosts(pricing) {
+  const cost = {};
+
+  for (const [leg, field] of [
+    ["input", "input"], ["output", "output"],
+    ["cacheRead", "input_cache_read"], ["cacheWrite", "input_cache_write"],
+  ]) {
+    const value = finiteNumber(pricing[field]);
+
+    if (value !== undefined) cost[leg] = value * 1_000_000;
+  }
+
+  return cost;
+}
+
+function costsOf(live, entry, piProviderId) {
+  const pricing = asRecord(live?.pricing);
+
+  const liveCost = piProviderId === "vercel-ai-gateway" && pricing !== undefined
+    ? gatewayCosts(pricing) : asRecord(live?.pricing ?? asRecord(live?.cost));
+
+  const sources = [liveCost, asRecord(entry?.cost)];
 
   let known = false;
   const cost = {};
@@ -223,10 +242,14 @@ function firstPresent(sources, aliases) {
 function displayNameOf(modelId) {
   const bare = modelId.includes("/") ? modelId.slice(modelId.indexOf("/") + 1) : modelId;
 
-  return bare
+  const titled = bare
     .split(/[-_]/)
     .map((word) => (word === "" ? word : word[0].toUpperCase() + word.slice(1)))
-    .join(" ");
+    .join(" ")
+    .trim();
+
+  // Pi schema rejects name:"" (minLength 1) and would fail the whole file.
+  return titled !== "" ? titled : modelId;
 }
 
 // Output modalities when either source states them. Used to drop video,
@@ -251,8 +274,8 @@ function limitsOf(live, entry) {
   const entryLimit = asRecord(entry?.limit) ?? {};
 
   return {
-    contextWindow: positiveNumber(live.context_window ?? live.contextWindow ?? entryLimit.context),
-    maxTokens: positiveNumber(live.max_tokens ?? live.maxTokens ?? entryLimit.output),
+    contextWindow: positiveNumber(live.context_window ?? live.contextWindow ?? live.inputTokenLimit ?? entryLimit.context),
+    maxTokens: positiveNumber(live.max_tokens ?? live.maxTokens ?? live.outputTokenLimit ?? entryLimit.output),
   };
 }
 
@@ -285,6 +308,13 @@ export function enrichModel(catalog, piProviderId, modelId, liveMeta) {
   const entry = findEntry(catalog, piProviderId, modelId);
   const live = asRecord(liveMeta) ?? {};
   const output = outputModalities(live, entry);
+  // Google's list advertises API methods, not output modalities. Embedding
+  // and predict-only models cannot serve Pi's generateContent chat requests.
+  const methods = live.supportedGenerationMethods;
+
+  if (Array.isArray(methods) && methods.length > 0 && !methods.includes("generateContent")) {
+    return undefined;
+  }
 
   if (output !== undefined && !output.includes("text")) {
     return undefined;
@@ -297,7 +327,7 @@ export function enrichModel(catalog, piProviderId, modelId, liveMeta) {
     name: displayNameOfLive(live, entry, modelId),
     contextWindow: limits.contextWindow,
     maxTokens: limits.maxTokens,
-    cost: costsOf(live, entry),
+    cost: costsOf(live, entry, piProviderId),
     input: textImageInput(live.modalities) ?? textImageInput(entry?.modalities),
     reasoning: thinking.reasoning,
     explicitEfforts: thinking.explicitEfforts ?? undefined,

@@ -12,6 +12,13 @@
 
 import { isNonEmptyString, isObject, isString } from "./decode.js";
 
+// Only locally generated reasons may reach reports; transport errors can carry credentials.
+export class DiscoveryError extends Error {}
+
+// A later page failure must not trigger endpoint fallback and turn a partial
+// catalog into a successful list eligible for pruning.
+class IncompleteCatalogError extends DiscoveryError {}
+
 export const ANTHROPIC_VERSION = "2023-06-01";
 
 export const DISCOVERY_TIMEOUT_MS = 30000;
@@ -78,7 +85,7 @@ async function getJson(url, headers, fetchImpl) {
   const text = await response.text();
 
   if (!response.ok) {
-    throw new Error(`list failed (HTTP ${response.status})`);
+    throw new DiscoveryError(`list failed (HTTP ${response.status})`);
   }
 
   let body;
@@ -86,14 +93,26 @@ async function getJson(url, headers, fetchImpl) {
   try {
     body = JSON.parse(text);
   } catch {
-    throw new Error("list returned invalid JSON");
+    throw new DiscoveryError("list returned invalid JSON");
   }
 
   if (!isObject(body)) {
-    throw new Error("unexpected list shape");
+    throw new DiscoveryError("unexpected list shape");
   }
 
   return body;
+}
+
+function mergeHeaders(defaults, extra, userAgent) {
+  const fields = new Map();
+
+  for (const [name, value] of [...Object.entries(defaults), ...Object.entries(extra)]) {
+    fields.set(name.toLowerCase(), [name, value]);
+  }
+
+  fields.set("user-agent", ["User-Agent", userAgent]);
+
+  return Object.fromEntries(fields.values());
 }
 
 function bearerHeaders(apiKey, extra, userAgent) {
@@ -103,12 +122,12 @@ function bearerHeaders(apiKey, extra, userAgent) {
     headers.Authorization = ["Bearer", apiKey].join(" ");
   }
 
-  return { ...headers, ...extra };
+  return mergeHeaders(headers, extra, userAgent);
 }
 
 function openaiEntries(body) {
   if (!Array.isArray(body.data)) {
-    throw new Error("unexpected list shape");
+    throw new DiscoveryError("unexpected list shape");
   }
 
   const models = [];
@@ -122,13 +141,13 @@ function openaiEntries(body) {
   return models;
 }
 
-// Try the versioned list URL, then the bare one on 404 only (never for
-// other failures, never twice for the same URL).
+// Try the versioned list URL, then the bare one on an initial-request 404
+// only (never after accepting a page, never twice for the same URL).
 async function withBareFallback(baseUrl, family, listAt) {
   try {
     return await listAt(listUrl(baseUrl, family));
   } catch (error) {
-    if (!isNotFound(error) || bareListUrl(baseUrl) === listUrl(baseUrl, family)) {
+    if (error instanceof IncompleteCatalogError || !isNotFound(error) || bareListUrl(baseUrl) === listUrl(baseUrl, family)) {
       throw error;
     }
 
@@ -139,7 +158,15 @@ async function withBareFallback(baseUrl, family, listAt) {
 async function listOpenAI(baseUrl, apiKey, extra, fetchImpl, userAgent) {
   const headers = bearerHeaders(apiKey, extra, userAgent);
 
-  return withBareFallback(baseUrl, "openai", async (url) => openaiEntries(await getJson(url, headers, fetchImpl)));
+  return withBareFallback(baseUrl, "openai", async (url) => {
+    const body = await getJson(url, headers, fetchImpl);
+
+    if (body.has_more === true) {
+      throw new DiscoveryError("paginated catalog requires a paginating API family");
+    }
+
+    return openaiEntries(body);
+  });
 }
 
 async function listAnthropic(baseUrl, apiKey, extra, fetchImpl, userAgent) {
@@ -158,7 +185,7 @@ async function listAnthropic(baseUrl, apiKey, extra, fetchImpl, userAgent) {
     }
   }
 
-  const merged = { ...headers, ...extra };
+  const merged = mergeHeaders(headers, extra, userAgent);
 
   return withBareFallback(baseUrl, "anthropic", (url) =>
     collectPages(
@@ -178,13 +205,28 @@ async function collectPages(firstUrl, headers, fetchImpl, entriesOf, cursorOf) {
   let url = firstUrl;
 
   for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
-    const body = await getJson(url, headers, fetchImpl);
+    let next;
+    let recognized = false;
 
-    for (const entry of entriesOf(body)) {
-      models.push(entry);
+    try {
+      const body = await getJson(url, headers, fetchImpl);
+      const entries = entriesOf(body);
+      recognized = true;
+
+      for (const entry of entries) {
+        models.push(entry);
+      }
+
+      next = cursorOf(body, firstUrl);
+    } catch (error) {
+      if (page > 0 || recognized) {
+        // Once the shape is recognized, transport, page-shape and cursor failures
+        // establish incompleteness, not permission to probe a subset elsewhere.
+        throw new IncompleteCatalogError(error instanceof DiscoveryError ? error.message : "list request failed");
+      }
+
+      throw error;
     }
-
-    const next = cursorOf(body, firstUrl);
 
     if (next === undefined) {
       return models;
@@ -193,15 +235,19 @@ async function collectPages(firstUrl, headers, fetchImpl, entriesOf, cursorOf) {
     url = next;
   }
 
-  return models;
+  throw new IncompleteCatalogError("catalog pagination limit reached; catalog incomplete");
 }
 
 function anthropicCursor(body, firstUrl) {
   const data = body.data;
   const last = data[data.length - 1];
 
-  if (body.has_more !== true || !isObject(last) || !isNonEmptyString(last.id)) {
+  if (body.has_more !== true) {
     return undefined;
+  }
+
+  if (!isObject(last) || !isNonEmptyString(last.id)) {
+    throw new DiscoveryError("catalog has more pages but no usable cursor");
   }
 
   return withQuery(firstUrl, { limit: String(LIST_PAGE_LIMIT), after_id: last.id });
@@ -229,7 +275,7 @@ async function listOllama(baseUrl, apiKey, extra, fetchImpl, userAgent) {
 
 function ollamaEntries(body) {
   if (!Array.isArray(body.models)) {
-    throw new Error("unexpected list shape");
+    throw new DiscoveryError("unexpected list shape");
   }
 
   const models = [];
@@ -245,7 +291,7 @@ function ollamaEntries(body) {
 
 function googleEntries(body) {
   if (!Array.isArray(body.models)) {
-    throw new Error("unexpected list shape");
+    throw new DiscoveryError("unexpected list shape");
   }
 
   const models = [];
@@ -256,6 +302,10 @@ function googleEntries(body) {
     }
 
     const id = item.name.startsWith("models/") ? item.name.slice("models/".length) : item.name;
+
+    if (!isNonEmptyString(id)) {
+      continue;
+    }
 
     models.push({ id, meta: item });
   }
@@ -272,7 +322,7 @@ async function listGoogle(baseUrl, apiKey, extra, fetchImpl, userAgent) {
 
   return await collectPages(
     withQuery(listUrl(baseUrl, "google"), { pageSize: String(LIST_PAGE_LIMIT) }),
-    { ...headers, ...extra },
+    mergeHeaders(headers, extra, userAgent),
     fetchImpl,
     googleEntries,
     googleCursor,
@@ -323,11 +373,11 @@ export async function listModels(baseUrl, auth, family, fetchImpl, userAgent) {
   const { apiKey, extra } = authParts(auth);
 
   if (!isNonEmptyString(baseUrl)) {
-    throw new Error("provider has no base URL");
+    throw new DiscoveryError("provider has no base URL");
   }
 
   if (family !== "unknown" && !Object.hasOwn(LISTERS, family)) {
-    throw new Error(`unsupported API family ${family}`);
+    throw new DiscoveryError(`unsupported API family ${family}`);
   }
 
   const chain = family === "unknown" ? PROBE_ORDER : [family];
@@ -337,7 +387,11 @@ export async function listModels(baseUrl, auth, family, fetchImpl, userAgent) {
     try {
       return await LISTERS[name](baseUrl, apiKey, extra, fetchImpl, userAgent);
     } catch (error) {
-      last = error;
+      // A recognized catalog that failed mid-traversal is not a shape mismatch.
+      // Another API family may expose only a subset and cannot authorize pruning.
+      if (error instanceof IncompleteCatalogError) throw error;
+
+      last = error instanceof DiscoveryError ? error : new DiscoveryError("list request failed");
     }
   }
 

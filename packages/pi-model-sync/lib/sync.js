@@ -12,7 +12,7 @@
 
 import { cachePathFor, loadCatalog } from "./cache.js";
 import { defined, isFunction, isNonEmptyString, isObject, isString } from "./decode.js";
-import { discoveryFamily, listModels } from "./discover.js";
+import { DiscoveryError, discoveryFamily, listModels } from "./discover.js";
 import { enrichModel } from "./modelsdev.js";
 import { planOrphanSweep, planProviderUpdate, readModelsFile, writeModelsFile } from "./store.js";
 import { buildThinking } from "./thinking.js";
@@ -73,11 +73,15 @@ function hasUsableCredential(auth, baseUrl) {
   );
 }
 
-function buildEntry(live, enriched) {
+function buildEntry(live, enriched, target) {
   const thinking = buildThinking(enriched.reasoning, enriched.explicitEfforts ?? null);
+
+  const known = target.models.get(live.id);
 
   const entry = defined({
     id: live.id,
+    api: known?.api ?? target.api,
+    baseUrl: isNonEmptyString(known?.baseUrl) ? known.baseUrl : target.modelBaseUrl,
     name: enriched.name,
     reasoning: thinking.reasoning,
     input: enriched.input,
@@ -91,12 +95,12 @@ function buildEntry(live, enriched) {
 }
 
 function skipped(providerId, reason) {
-  return { providerId, skipped: reason, entries: [], liveCount: 0, dropped: 0, trainingNotes: [] };
+  return { providerId, skipped: reason, entries: [], liveCount: 0, dropped: 0, trainingNotes: [], residentIds: [] };
 }
 
-// Private control flow: provider-level skips unwind to discoverProvider,
-// which reports them as skip lines. The reason rides in message, so list
-// failures (plain Errors) and skips share one catch. Never escapes.
+// Private control flow: provider-level skips unwind to discoverProvider.
+// Only Skip and locally generated DiscoveryError messages reach reports;
+// raw provider exceptions can carry credentials.
 class Skip extends Error {}
 
 // Resolve where and how to list one provider. Throws Skip with the exact
@@ -108,18 +112,52 @@ async function listingTarget(deps, providerId, models) {
     throw new Skip("unknown to registry");
   }
 
+  const registration = isFunction(deps.registry.getRegisteredProviderConfig)
+    ? deps.registry.getRegisteredProviderConfig(providerId) : undefined;
+
+  if (Array.isArray(registration?.models)) {
+    throw new Skip("extension owns an explicit model list; models.json cannot extend it");
+  }
+
   let auth;
 
   try {
     auth = await deps.registry.getProviderAuth(providerId);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-
-    throw new Skip(`auth error: ${reason}`);
+  } catch {
+    throw new Skip("auth resolution failed");
   }
 
+  return listingTransport(provider, auth, providerId, models);
+}
+
+function listingTransport(provider, auth, providerId, models) {
+  const api = firstApiOf(models, providerId);
+  const knownModels = models.filter(model => isObject(model) && model.provider === providerId);
+  const families = [];
+
+  for (const model of knownModels) {
+    if (!isNonEmptyString(model.api)) {
+      continue;
+    }
+
+    const family = discoveryFamily(model.api);
+
+    if (!families.includes(family)) {
+      families.push(family);
+    }
+  }
+
+  // Copilot/Fireworks mix Anthropic and OpenAI wire APIs. Stamping firstApiOf
+  // on a new id makes Pi send the wrong request shape.
+  if (families.length > 1) {
+    throw new Skip("provider models use mixed APIs; models.json cannot assign a single api");
+  }
+
+  const reference = knownModels.find(model => model.api === api);
+  // Persist configured transport defaults, never the resolved credential-bearing request URL.
+  const modelBaseUrl = isNonEmptyString(reference?.baseUrl) ? reference.baseUrl : provider.baseUrl;
   const { apiKey, headers, baseUrl: authBaseUrl } = requestAuth(auth);
-  const baseUrl = authBaseUrl ?? provider.baseUrl;
+  const baseUrl = authBaseUrl ?? provider.baseUrl ?? modelBaseUrl;
 
   if (!isNonEmptyString(baseUrl)) {
     throw new Skip("no base URL to list");
@@ -129,10 +167,17 @@ async function listingTarget(deps, providerId, models) {
     throw new Skip("not logged in");
   }
 
-  return { baseUrl, apiKey, headers, family: discoveryFamily(firstApiOf(models, providerId)) };
+  if (!isNonEmptyString(api) || !isNonEmptyString(modelBaseUrl)) {
+    throw new Skip("no configured model transport defaults");
+  }
+
+  return {
+    baseUrl, apiKey, headers, family: discoveryFamily(api), api, modelBaseUrl,
+    models: new Map(knownModels.map(model => [model.id, model])),
+  };
 }
 
-function buildEntries(catalog, providerId, live) {
+function buildEntries(catalog, providerId, live, target) {
   const entries = [];
   const trainingNotes = [];
   let dropped = 0;
@@ -146,7 +191,7 @@ function buildEntries(catalog, providerId, live) {
       continue;
     }
 
-    const built = buildEntry(item, enriched);
+    const built = buildEntry(item, enriched, target);
 
     entries.push(built.entry);
 
@@ -155,7 +200,7 @@ function buildEntries(catalog, providerId, live) {
     }
   }
 
-  return { providerId, skipped: undefined, entries, liveCount: live.length, dropped, trainingNotes };
+  return { providerId, skipped: undefined, entries, liveCount: live.length, dropped, trainingNotes, residentIds: [...target.models.keys()] };
 }
 
 // Discovery phase: network only, no merging, safe to run concurrently.
@@ -172,9 +217,9 @@ async function discoverProvider(deps, catalog, providerId, models) {
       deps.userAgent,
     );
 
-    return buildEntries(catalog, providerId, live);
+    return buildEntries(catalog, providerId, live, target);
   } catch (error) {
-    return skipped(providerId, error instanceof Error ? error.message : String(error));
+    return skipped(providerId, error instanceof Skip || error instanceof DiscoveryError ? error.message : "provider lookup failed");
   }
 }
 
@@ -221,7 +266,7 @@ function mergeDiscovered(doc, discovered, lines, totals, trainingNotes) {
       continue;
     }
 
-    const plan = planProviderUpdate(doc, result.providerId, result.entries, result.liveCount > 0);
+    const plan = planProviderUpdate(doc, result.providerId, result.entries, result.liveCount > 0, result.residentIds);
     doc = plan.next;
     totals.synced += 1;
     totals.added += plan.added;
@@ -248,8 +293,24 @@ function mergeDiscovered(doc, discovered, lines, totals, trainingNotes) {
 // extensions) can never sync again, and Pi composition-errors on their
 // stale managed sections every startup. Filtered runs touch only the
 // filter; an empty registry proves nothing and sweeps nothing.
-function sweepOrphans(doc, ids, filter, lines, totals) {
-  if (isNonEmptyString(filter) || ids.length === 0) {
+function sweepOrphans(doc, registry, filter, lines, totals) {
+  if (isNonEmptyString(filter)) {
+    return doc;
+  }
+
+  let ids;
+
+  try {
+    ids = providerIdsOf(registry.getAll());
+
+    if (ids.length === 0) return doc;
+
+    if (isFunction(registry.getRegisteredProviderIds)) {
+      for (const id of registry.getRegisteredProviderIds()) {
+        if (isString(id) && !ids.includes(id)) ids.push(id);
+      }
+    }
+  } catch {
     return doc;
   }
 
@@ -277,22 +338,51 @@ function reportTraining(trainingNotes, lines) {
   }
 }
 
-async function announceRefresh(deps, lines) {
+function discoveredModelsVisible(registry, discovered) {
+  if (!isFunction(registry.find)) return true;
+
+  for (const result of discovered) {
+    for (const entry of result.entries) {
+      if (!registry.find(result.providerId, entry.id)) return false;
+    }
+  }
+
+  return true;
+}
+
+async function announceRefresh(deps, discovered, lines) {
   if (isFunction(deps.registry.refresh)) {
     try {
-      await deps.registry.refresh();
-      lines.push("catalog live now; no restart needed");
-    } catch {
-      lines.push("restart Pi to pick up the new catalog");
-    }
+      await deps.registry.refresh({ allowNetwork: false });
 
-    return;
+      if (isFunction(deps.registry.getError) && deps.registry.getError()) {
+        lines.push("models.json saved, but Pi reports catalog errors; check the model configuration");
+
+        return false;
+      }
+
+      if (!discoveredModelsVisible(deps.registry, discovered)) {
+        lines.push("models.json saved, but Pi did not expose every discovered model; check provider model ownership");
+
+        return false;
+      }
+
+      lines.push("catalog live now; no restart needed");
+
+      return true;
+    } catch {
+      lines.push("models.json saved, but Pi could not reload the catalog; check the configuration and retry");
+
+      return false;
+    }
   }
 
   lines.push("restart Pi to pick up the new catalog");
+
+  return true;
 }
 
-async function finishRun(deps, doc, lines, totals) {
+async function finishRun(deps, doc, lines, totals, discovered) {
   lines.push(`+added ~updated -removed =kept (${totals.added} added, ${totals.updated} updated, ${totals.removed} removed)`);
 
   if (deps.dryRun) {
@@ -304,7 +394,12 @@ async function finishRun(deps, doc, lines, totals) {
   if (totals.added === 0 && totals.updated === 0 && totals.removed === 0) {
     lines.push("already up to date");
 
-    return { ok: true, lines, totals };
+    // A previous write may have succeeded while its reload failed. Disk equality
+    // does not establish activation; a successful discovery must retry the reload.
+    const ok = totals.synced > 0 && isFunction(deps.registry.refresh)
+      ? await announceRefresh(deps, discovered, lines) : true;
+
+    return { ok, lines, totals };
   }
 
   let backupPath = null;
@@ -322,9 +417,9 @@ async function finishRun(deps, doc, lines, totals) {
   }
 
   lines.push(`wrote ${deps.modelsPath}`);
-  await announceRefresh(deps, lines);
+  const ok = await announceRefresh(deps, discovered, lines);
 
-  return { ok: true, lines, totals };
+  return { ok, lines, totals };
 }
 
 // deps: {registry, fetchImpl, fs, modelsPath, userAgent, filter?, dryRun?, refresh?}.
@@ -343,6 +438,16 @@ export async function runSync(deps) {
 
   lines.push(`model-sync${deps.dryRun ? " (dry run)" : ""}: ${ids.length} provider${ids.length === 1 ? "" : "s"}`);
 
+  let doc;
+
+  try {
+    doc = readModelsFile(deps.modelsPath, deps.fs);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+
+    return { ok: false, lines: [...lines, `model-sync aborted: ${reason}`], totals };
+  }
+
   let catalog = null;
 
   if (ids.length > 0) {
@@ -359,7 +464,9 @@ export async function runSync(deps) {
     lines.push(`  ${loaded.note}`);
   }
 
-  let doc;
+  // Discovery can yield to another sync or a user edit. The final read/merge/write
+  // stays synchronous; unrelated changes completed during discovery survive.
+  const discovered = await Promise.all(ids.map((id) => discoverProvider(deps, catalog, id, allModels)));
 
   try {
     doc = readModelsFile(deps.modelsPath, deps.fs);
@@ -369,12 +476,9 @@ export async function runSync(deps) {
     return { ok: false, lines: [...lines, `model-sync aborted: ${reason}`], totals };
   }
 
-  // Promise.all preserves input order, so lines stay sorted by provider.
-  const discovered = await Promise.all(ids.map((id) => discoverProvider(deps, catalog, id, allModels)));
-
   doc = mergeDiscovered(doc, discovered, lines, totals, trainingNotes);
-  doc = sweepOrphans(doc, ids, deps.filter, lines, totals);
+  doc = sweepOrphans(doc, deps.registry, deps.filter, lines, totals);
   reportTraining(trainingNotes, lines);
 
-  return finishRun(deps, doc, lines, totals);
+  return finishRun(deps, doc, lines, totals, discovered);
 }

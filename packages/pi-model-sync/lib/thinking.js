@@ -5,10 +5,11 @@
  * API adapter translates the mapped value to the wire. Unknown models get the
  * conservative ladder (standard names, no xhigh/max); explicit wire values
  * from live metadata or models.dev always win via nearest-match, ties to the
- * lower rung. off is always null (omit reasoning, let the server decide).
+ * lower rung. Map values of null hide that Pi level (getSupportedThinkingLevels
+ * skips them), so off is omitted unless the source advertises none/off.
  */
 
-import { isString } from "./decode.js";
+import { defined, isString } from "./decode.js";
 
 // Ordered reasoning ladder. Index distance drives nearest-match.
 export const LADDER = ["minimal", "low", "medium", "high", "xhigh"];
@@ -72,6 +73,24 @@ function gatedLevel(level, values) {
   return values.includes(level) ? level : null;
 }
 
+// Pi treats thinkingLevelMap.off === null as "off is unsupported". Prefer an
+// advertised none/off wire value; otherwise omit the key so /thinking off stays.
+function offLevel(values) {
+  if (values === null) {
+    return undefined;
+  }
+
+  if (values.includes("none")) {
+    return "none";
+  }
+
+  if (values.includes("off")) {
+    return "off";
+  }
+
+  return undefined;
+}
+
 // Build the thinking config for one model. explicitValues is the wire
 // effort list from live metadata or models.dev, or null when unknown.
 export function buildThinking(reasoning, explicitValues) {
@@ -83,14 +102,14 @@ export function buildThinking(reasoning, explicitValues) {
 
   return {
     reasoning: true,
-    thinkingLevelMap: {
-      off: null,
+    thinkingLevelMap: defined({
+      off: offLevel(values),
       minimal: mapLevel("minimal", values),
       low: mapLevel("low", values),
       medium: mapLevel("medium", values),
       high: mapLevel("high", values),
       xhigh: gatedLevel("xhigh", values),
       max: gatedLevel("max", values),
-    },
+    }),
   };
 }

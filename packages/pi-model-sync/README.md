@@ -1,15 +1,28 @@
 # pi-model-sync
 
-`/model-sync` keeps Pi's model catalog fresh. Pi ships static per-provider
-model seeds and only one built-in provider implements `refreshModels`, so new
-models (a stealth drop on your gateway, a new Claude) never appear until Pi
-itself releases. This extension walks every provider Pi knows, built-in or
-extension-registered, lists each live catalog with that provider's own
-credentials, enriches from models.dev, and writes missing models to
-`models.json`.
+[![npm](https://img.shields.io/npm/v/pi-model-sync.svg)](https://www.npmjs.com/package/pi-model-sync)
+[![license](https://img.shields.io/npm/l/pi-model-sync.svg)](https://github.com/AdityaVG13/pi-stack/blob/main/packages/pi-model-sync/LICENSE)
+[![node](https://img.shields.io/node/v/pi-model-sync.svg)](https://nodejs.org)
+[![pi-package](https://img.shields.io/badge/pi--package-extension-7aa2f7)](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md)
 
-OMP users: OMP already solves this with its own catalog system
-(`@oh-my-pi/pi-catalog`). This package is Pi-only.
+`/model-sync` keeps Pi's model catalog fresh. Pi ships static per-provider
+model seeds and can refresh Pi's curated catalog. This extension additionally
+checks live lists exposed by configured providers, including custom gateways
+and native extension providers. Legacy extensions with explicit model lists
+keep ownership of those lists and are reported as skipped. Providers whose
+composed models mix discovery families (Copilot, Fireworks) are skipped rather
+than stamping one guessed `api` onto new ids. It walks providers
+represented in Pi's composed model registry, lists each live catalog with that
+provider's own credentials, enriches from models.dev, and writes missing models
+to `models.json`.
+
+Pi only. OMP already has `@oh-my-pi/pi-catalog`.
+
+```bash
+pi install npm:pi-model-sync
+# from a checkout:
+pi install ./packages/pi-model-sync
+```
 
 ## Use
 
@@ -43,7 +56,12 @@ catalog live now; no restart needed
    Google, Ollama); unknown families try each shape in turn. Bare and
    versioned base URLs are both normalized to the right list path.
    Paginating families (Anthropic cursors, Google page tokens) are walked
-   to the end, so a partial first page never prunes real models.
+   to the end. A later-page transport, shape, or cursor failure is an
+   incomplete catalog: the provider is skipped and no other API family is
+   probed, so a partial first page never authorizes pruning. OpenAI-family
+   lists that advertise `has_more` without a paginating family are skipped
+   the same way. Extra auth headers merge case-insensitively; the project
+   User-Agent always wins.
 3. **Enrich** from models.dev (context, costs, modalities, reasoning
    options). Live endpoint metadata wins when richer; models.dev fills the
    rest. The catalog is cached for 24h in
@@ -51,18 +69,35 @@ catalog live now; no restart needed
    no download; `--refresh` refetches on demand. If models.dev is
    unreachable the run falls back to any cached copy (fresh or stale),
    else continues live-only.
-4. **Merge** into `models.json`. Synced entries are stamped
-   `_managedBy: "pi-model-sync"` and refresh in place later. Hand-written
-   entries are never touched, and delisted models are pruned only after a
-   successful, non-empty live discovery; a dead token can never wipe a
-   catalog. Providers that left the registry (uninstalled extensions) get
-   an orphan sweep: managed entries go, everything else stays.
-5. **Reload** via `modelRegistry.refresh()` so the new catalog is live
-   without restarting Pi (older hosts fall back to a restart note).
+4. **Merge** into the latest `models.json`, re-read after discovery so edits
+   completed during discovery survive. A corrupt file aborts before any
+   network work as well. Synced entries are stamped
+   `_managedBy: "pi-model-sync"` and include configured `api`/`baseUrl`
+   defaults so Pi can compose new models for extension providers too. Resolved
+   request credentials and request-time URL overrides are not persisted.
+   Hand-written fields and values stay intact. Delisted models are pruned only
+   after a successful, complete, non-empty discovery. An orphan sweep checks
+   the current registry (including registered ids with no composed models),
+   not the pre-discovery snapshot.
+5. **Reload** the local file via `modelRegistry.refresh({allowNetwork:false})`.
+   A thrown refresh, reported registry error, or missing discovered model is a
+   failed activation, never a claim that the catalog is live. Successful discovery
+   reloads even when the file is unchanged, so retrying a failed activation does
+   not require another file edit. Hosts without refresh get a restart note.
 
-Every provider is isolated: one failure is one `skipped (reason)` line, never
-an aborted run. `models.json` is backed up (timestamped `.bak-`) before any
-write, and `--dry-run` previews the whole run.
+Discovery failures are isolated per provider as `skipped (reason)` lines.
+Skip text is locally generated (`DiscoveryError` / `Skip`); raw auth and
+transport exception messages never reach the report.
+`models.json` is backed up with an exclusive, timestamped `.bak-` copy before
+publication. A complete, flushed temporary file is renamed into place; partial
+writes leave the previous file intact. Existing symlinks are followed rather
+than replaced; dangling links abort. File permissions are preserved.
+`--dry-run` previews without writing the model file or cache.
+
+The final read/merge/write does not yield within this process. There is no
+cross-process lock or external-writer compare-and-swap: an external write in
+that final window can still race. Do not run concurrent external writers when
+you need lossless coordination.
 
 ## Public surface
 
@@ -76,52 +111,89 @@ write, and `--dry-run` previews the whole run.
 
 ## Invariants
 
-- Managed entries (`_managedBy`) are the only ones the sync updates or
-  removes. Untagged entries are preserved byte-identical. (Hand-stamping
-  the tag adopts the entry: the next sync owns it.)
-- No pruning without a successful live discovery for that provider.
+- Live ids already composed in the registry (builtin or extension seeds) are
+  not written as models.json overlays; Pi would replace the curated definition.
+  File-resident managed entries still refresh in place.
+- Managed **chat** entries (`_managedBy`, with absent `type` or `type: "chat"`)
+  are the only ones the sync updates or removes. Identity is chat type plus ID,
+  not ID alone. Image, classifier and unknown operation types are preserved,
+  even when tagged or sharing a chat ID. Hand-stamping adopts only chat entries.
+  Untagged fields and values are preserved, including duplicates; JSON
+  formatting and entry order can change.
+- In-provider pruning requires successful, complete, non-empty discovery. A
+  section that held only pruned chat entries is removed (Pi composition-errors
+  on `{ models: [] }` with no other keys); sections with user keys keep their
+  shape. The orphan sweep removes only managed chat entries of absent providers;
+  registered providers with no visible models remain protected, and an empty
+  model registry disables sweeping.
 - A missing models.json starts empty; a corrupt one aborts before any write.
+  Pi JSONC (BOM, `//` comments, trailing commas) is valid input; writes are
+  strict JSON, so comments are not preserved.
 - Models with known non-text output (video, image, embeddings) are skipped
-  by policy (this is a chat-model catalog), and zero context windows are
-  omitted (Pi throws on them at composition).
-- Skip reasons never include response bodies, so no key material leaks into
-  reports. Credentials are read through Pi's registry, never stored.
+  by policy (this is a chat-model catalog). Google's advertised method lists
+  must include `generateContent` when non-empty; embedding/predict-only models
+  are excluded even without models.dev enrichment. Missing method metadata
+  remains syncable. Empty Google ids are dropped. Zero context windows are
+  omitted (Pi throws on them at composition). A display name that would be
+  empty after title-casing falls back to the model id (Pi rejects `name: ""`).
+- Skip reasons exclude response bodies and raw auth/transport exception text.
+  Resolved keys and auth headers are read through Pi's registry, never stored.
 - All outbound requests send `User-Agent: OpenAI File Downloader, XaiImageApiFetch/1.0`.
+
+Pi 0.99 typed image/classifier catalogs belong to native or explicit provider
+registrations. Its `models.json` composer still treats file model definitions
+as chat models; preserving non-chat-shaped file records here does not make
+them load as typed models. Sync neither creates those records nor discovers
+non-chat catalogs. Native non-chat catalogs remain owned by their provider.
 
 ## Error model
 
 - Unknown provider filter, unreadable registry, corrupt models.json: the
   command reports the error and changes nothing.
 - Per-provider failures (no credentials, rejected key, no list endpoint,
-  unexpected shape): one skip line each; the run continues.
+  unexpected shape, mixed discovery families, explicit extension model list,
+  incomplete pagination): one skip line each; the run continues.
 - models.dev outage: falls back to the cache (stale if needed); with no
   cache at all, noted once and the run continues live-only.
 
 ## Conformance tests
 
-`npm test` runs 34 hermetic tests (`node --test`, no network, no Pi
-required): discovery shapes, auth, and pagination per family, models.dev
-mapping and enrichment, cache hit/miss/stale/offline rules, thinking-ladder
-rules, store merge/backup/prune/orphan guards, full orchestration over a
-fake registry, and command wiring. Live behavior
-(discovery against a real gateway, written-file acceptance by Pi's own
-provider composition) is verified manually before release, never in CI.
+`npm test` runs hermetic tests under `tests/` (`node --test`, no network, no Pi required):
+discovery shapes, case-insensitive auth headers, incomplete pagination
+(later-page 404/body/cursor failures and the 100-page cap cannot prune via
+another API probe), models.dev mapping, cache rules, thinking ladders,
+atomic publication and backup races, edits during discovery, configured
+transport defaults, reload failures, credential-safe reports, mixed-type
+catalog preservation, and command wiring. Real Pi composition
+and live gateway behavior are separate verification steps, not implied by
+these mock-provider tests.
 
 ## No-claim boundaries
 
 - Thinking levels for unknown models are the conservative family ladder
-  (`minimal/low/medium/high`, no `xhigh`/`max`); explicit wire values from
-  live metadata or models.dev always win. Provider-specific effort gates
-  (e.g. Meta Contributor `max`, which needs a client fingerprint) belong to
-  that provider's extension, not the generic engine.
+  (`minimal`/`low`/`medium`/`high`, no `xhigh`/`max`); explicit wire values
+  from live metadata or models.dev always win. `thinkingLevelMap.off` is
+  omitted unless the source advertises `none` or `off`; a null map value
+  hides that Pi level. Provider-specific effort gates (e.g. Meta Contributor
+  `max`, which needs a client fingerprint) belong to that provider's
+  extension, not the generic engine.
 - Providers without a listable endpoint (subscription transports, SigV4,
   management-plane lists) report `skipped` with the reason; they are not
   guessed.
-- Costs and limits are point-in-time; re-run to refresh. The sync never
-  changes prices on hand-written entries. Tiered pricing (context over a
-  threshold) is ignored; flat rates only.
+- Costs and limits are point-in-time; re-run to refresh. Vercel AI Gateway's
+  per-token list prices (including cache legs) are converted to Pi's per-million
+  units; models.dev fallback prices already use those units. Google list
+  `inputTokenLimit`/`outputTokenLimit` fill context and max-token limits when
+  present. The sync never changes prices on hand-written entries. Tiered
+  pricing (context over a threshold) is ignored; flat rates only.
 - Cached models.dev data is up to 24h old; `--refresh` forces a refetch.
   The report always says which it used (`fetched fresh`, `cache hit`,
   `stale cache`, or live-only).
-- List pagination stops at 100 pages per provider; catalogs past 100k
-  models are truncated, never looped forever.
+- Pagination stops at 100 pages per provider. A catalog still advertising
+  another page at that limit is rejected, not truncated and used for pruning.
+  Broken cursors, unsupported OpenAI `has_more`, and mid-list transport or
+  shape failures also skip the provider.
+
+## License
+
+MIT. [AdityaVG13/pi-stack](https://github.com/AdityaVG13/pi-stack/tree/main/packages/pi-model-sync)

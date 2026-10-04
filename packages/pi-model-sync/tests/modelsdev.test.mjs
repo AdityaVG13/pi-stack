@@ -103,6 +103,8 @@ describe("models.dev mapping", () => {
       name: "Bare",
       reasoning: false,
     });
+    // Pi rejects name:"" (minLength 1) and would fail the whole models.json.
+    assert.equal(enrichModel({}, "mystery", "acme/", {}).name, "acme/");
   });
 
   test("rejects junk instead of writing it", () => {

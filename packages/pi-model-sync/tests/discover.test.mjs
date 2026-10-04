@@ -97,15 +97,16 @@ describe("live discovery", () => {
       return new Response(JSON.stringify({ data: [{ id: "x" }], has_more: true }), { status: 200 });
     };
 
-    const capped = await listModels("https://a.test", { apiKey: "sk-ant-key" }, "anthropic", looping, UA);
-
+    // A capped traversal is incomplete, not a successful list eligible for pruning.
+    await assert.rejects(listModels("https://a.test", { apiKey: "sk-ant-key" }, "anthropic", looping, UA), /pagination limit/);
     assert.equal(calls, 100);
-    assert.equal(capped.length, 100);
   });
 
   test("lists Google models across pages with the key header", async () => {
     const { fetchImpl, seen } = stubFetch({
-      "https://g.test/v1beta/models?pageSize=1000": { models: [{ name: "models/gem-1", displayName: "Gem" }] },
+      "https://g.test/v1beta/models?pageSize=1000": {
+        models: [{ name: "models/" }, { name: "models/gem-1", displayName: "Gem" }],
+      },
     });
 
     const models = await listModels("https://g.test/v1beta", { apiKey: KEY_A }, "google", fetchImpl, UA);
@@ -158,4 +159,24 @@ describe("live discovery", () => {
     const html = stubFetch({ "https://h.test/v1/models": { raw: "<html>nope</html>" } });
     await assert.rejects(listModels("https://h.test", {}, "openai", html.fetchImpl, UA), /invalid JSON/);
   });
+});
+
+
+test("case-insensitive credentials override defaults without changing the required User-Agent", async (t) => {
+  for (const family of ["openai", "anthropic", "ollama", "google"]) {
+    await t.test(family, async () => {
+      await listModels("https://fixture.test", { apiKey: "fallback", headers: {
+        authorization: "Bearer explicit-fixture", "user-agent": "untrusted-override",
+      } }, family, async (_url, init) => {
+        const headers = new Headers(init.headers);
+        assert.equal(headers.get("authorization"), "Bearer explicit-fixture");
+        assert.equal(headers.get("user-agent"), UA);
+
+        const body = family === "google" ? { models: [{ name: "models/fresh" }] }
+          : family === "ollama" ? { models: [{ name: "fresh" }] } : { data: [{ id: "fresh" }] };
+
+        return new Response(JSON.stringify(body));
+      }, UA);
+    });
+  }
 });
