@@ -1,33 +1,38 @@
+# Project-local index storage when this repo is an indexer workspace.
+.indexer/
+
+# Local dependency, search-cache and evaluation artifacts (retain files on disk).
 node_modules/
-*.tgz
-.DS_Store
-*.log
+.asgrep/
+.eval/
+
+# Local credentials and operating-system metadata.
 .env
 .env.*
+.DS_Store
+
+# Generated archives, logs, coverage and profiling output.
+*.tgz
+*.log
 .npm/
 coverage/
-.supernova-perf/
+*.cpuprofile
+*.heapprofile
+*.heapsnapshot
+
+# Local agent journals, experiments and private verification work.
 .papercuts.jsonl
 .papercuts.archive.jsonl
-.asgrep/
 dogfood/
-# Experimental supernova forks and isolated eval homes. Never publish.
-.eval/
-.eval/**
 .ee/
 .hermes/
 .pi-subagents/
-# local agent / skill run output (never publish)
 .public-clean/
-**/.public-clean/
 .state-space-collapse/
-**/.state-space-collapse/
 .skill-loop-progress.md
 tools/
 .module-coupling-topology/
-**/.module-coupling-topology/
 .cyclomatic-reduction/
-**/.cyclomatic-reduction/
 .papers/
 packages/private-packages-test/
 
@@ -38,4 +43,3 @@ packages/private-packages-test/
 # Local lint and release-check overrides (untracked on purpose).
 /.oxlintrc.json
 /scripts/release-check.mjs
-
