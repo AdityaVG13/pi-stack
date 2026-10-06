@@ -620,6 +620,24 @@ test("registered providers without visible models are not mistaken for orphans",
   assert.deepEqual(JSON.parse(readFileSync(context.modelsPath, "utf8")).providers["fixed-list"].models, [model]);
 });
 
+test("rotator-hidden slot aliases sweep their tagged static leftovers", async () => {
+  const context = deps();
+  context.registry.getAll = () => [{ id: "seed", provider: "demo-openai", api: "openai-completions" }];
+  context.registry.getRegisteredProviderIds = () => ["demo-openai", "demo-openai-account-2", "demo-openai-account-3"];
+  const tagged = { id: "stale-slot-model", _managedBy: "pi-model-sync" };
+  const owned = { id: "user-slot-model" };
+  fs.writeFileSync(context.modelsPath, JSON.stringify({ providers: {
+    "demo-openai-account-2": { models: [tagged, owned] },
+    "demo-openai-account-3": { baseUrl: "https://custom.invalid/v1", models: [tagged] },
+  } }));
+  const result = await runSync(context);
+  assert.equal(result.ok, true);
+  const providers = JSON.parse(readFileSync(context.modelsPath, "utf8")).providers;
+  assert.deepEqual(providers["demo-openai-account-2"].models, [owned], "tagged leftovers sweep; user entries stay");
+  assert.deepEqual(providers["demo-openai-account-3"].models, [], "custom sections keep their shape with no models");
+  assert.match(result.lines.join("\n"), /demo-openai-account-2: -1 \(orphaned; provider not in registry\)/);
+});
+
 test("semantic pagination failures cannot authorize pruning through another API probe", async (t) => {
   for (const mode of ["shape", "cursor", "cap"]) {
     await t.test(mode, async () => {

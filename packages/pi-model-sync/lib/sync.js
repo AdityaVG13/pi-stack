@@ -17,6 +17,12 @@ import { enrichModel } from "./modelsdev.js";
 import { planOrphanSweep, planProviderUpdate, readModelsFile, writeModelsFile } from "./store.js";
 import { buildThinking } from "./thinking.js";
 
+const SLOT_SUFFIX = /-account-\d+$/;
+
+function isSlotAliasId(id) {
+  return SLOT_SUFFIX.test(id);
+}
+
 function providerIdsOf(models) {
   const ids = [];
 
@@ -307,7 +313,12 @@ function sweepOrphans(doc, registry, filter, lines, totals) {
 
     if (isFunction(registry.getRegisteredProviderIds)) {
       for (const id of registry.getRegisteredProviderIds()) {
-        if (isString(id) && !ids.includes(id)) ids.push(id);
+        // Rotator hides owned slot catalogs under the family carrier, so a
+        // registered sibling that lists nothing is unified, not missing:
+        // its tagged static leftovers are stale by definition and sweepable.
+        // Listed siblings (other balancers, adopted endpoints) stay known
+        // through getAll above, as do model-less base providers.
+        if (isString(id) && !ids.includes(id) && !isSlotAliasId(id)) ids.push(id);
       }
     }
   } catch {

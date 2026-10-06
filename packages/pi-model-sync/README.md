@@ -77,8 +77,8 @@ catalog live now; no restart needed
    request credentials and request-time URL overrides are not persisted.
    Hand-written fields and values stay intact. Delisted models are pruned only
    after a successful, complete, non-empty discovery. An orphan sweep checks
-   the current registry (including registered ids with no composed models),
-   not the pre-discovery snapshot.
+   the current registry (including registered ids with no composed models,
+   except rotator-hidden slot aliases), not the pre-discovery snapshot.
 5. **Reload** the local file via `modelRegistry.refresh({allowNetwork:false})`.
    A thrown refresh, reported registry error, or missing discovered model is a
    failed activation, never a claim that the catalog is live. Successful discovery
@@ -125,7 +125,9 @@ you need lossless coordination.
   on `{ models: [] }` with no other keys); sections with user keys keep their
   shape. The orphan sweep removes only managed chat entries of absent providers;
   registered providers with no visible models remain protected, and an empty
-  model registry disables sweeping.
+  model registry disables sweeping. The one exception is rotator-hidden slot
+  aliases (`*-account-N`): registered but model-less siblings list under
+  their family carrier by design, so their tagged static leftovers sweep.
 - A missing models.json starts empty; a corrupt one aborts before any write.
   Pi JSONC (BOM, `//` comments, trailing commas) is valid input; writes are
   strict JSON, so comments are not preserved.
