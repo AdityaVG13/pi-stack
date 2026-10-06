@@ -89,6 +89,7 @@ function notifyHiddenDefault(dir, state, ctx) {
 
   if (!carried) return;
   state.hiddenDefaultNotified = true;
+  debugLine(state, dir, "hidden_default", { provider, model: id, carrier: family.carrier });
   showText(ctx, `pi-rotator: default ${provider}/${id} now lists as ${family.carrier}/${id}; set it as the default again in /model.`);
 }
 

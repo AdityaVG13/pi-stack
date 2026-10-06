@@ -18,7 +18,9 @@ independent key methods in `lib/custom.js`. Native aliases rekey every operation
 catalog and persist refreshed catalogs under the account ID. Builtin chat
 streams use a canonical family wire view so native provider-ID-specific auth
 and signed tool/text replay work; callbacks, events and stored responses keep
-the actual serving alias. Third-party factories are not rewritten.
+the actual serving alias. Third-party factories are not rewritten. One slot
+per family -- the carrier -- lists the shared catalog while owned siblings
+register empty; see [Unified model listing](./README.md#unified-model-listing).
 
 `/rotator add [family]` prepares a slot without writing credentials or submitting
 login. `/login <printed-id>` remains Pi-owned. Unauthenticated slots are excluded;

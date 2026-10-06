@@ -90,7 +90,7 @@ Other builtin families are clone-registered. Registered package-owned account al
 From a checkout:
 
 ```bash
-pi install ./packages/pi-rotator
+pi install ./pi-stack/packages/pi-rotator
 ```
 
 For Pi 0.99, prefer native standalone accounts ([Native accounts](#native-accounts-pi-099)). Legacy layering over

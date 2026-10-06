@@ -3221,6 +3221,7 @@ describe("unified model listing", () => {
     assert.equal(ofKind(dir, "route").length, 0, "a pointer journals no routing evidence");
     assert.equal(notices.length, 1);
     assert.match(notices[0], /default openai-codex-account-2\/gpt-5.6-sol now lists as openai-codex\/gpt-5.6-sol; set it as the default again/);
+    assert.ok(debugLines(dir).some(line => line.kind === "hidden_default" && line.carrier === CODEX));
   });
 
   it("stale settings defaults load fine and earn no pointer when the carrier lacks them", async () => {
