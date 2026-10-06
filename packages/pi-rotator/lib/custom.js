@@ -66,7 +66,11 @@ function defaultCustomModel(id, family, template, modelId) {
 
 function* savedFamilyModels(id, saved) {
   for (const [providerId, source] of Object.entries(saved || {})) {
-    if (parseSlotId(providerId)?.base === id) yield* source.models || [];
+    if (parseSlotId(providerId)?.base !== id) continue;
+
+    // Corrupt sections fail open to the stock catalog: a throw here would
+    // abort discovery for every family sorted after this one.
+    if (Array.isArray(source?.models)) yield* source.models;
   }
 }
 
@@ -74,7 +78,7 @@ function customCatalog(id, family, template, saved) {
   const catalog = new Map(family.ids.map(modelId => [modelId, defaultCustomModel(id, family, template, modelId)]));
 
   for (const model of savedFamilyModels(id, saved)) {
-    if (!model.id || (model.type && model.type !== "chat")) continue;
+    if (model?.id?.constructor !== String || !model.id.trim() || (model.type && model.type !== "chat")) continue;
     catalog.set(model.id, { ...template, ...modelMetadata(model), provider: id, baseUrl: family.baseUrl, type: "chat" });
   }
 
@@ -90,7 +94,9 @@ export function customAccountBase(id, saved, builtins = nativeBuiltinModule) {
   if (configured?.baseUrl && configured.baseUrl !== family.baseUrl) return null;
   const native = builtinBase(builtins, family.template);
 
-  if (!native) throw new Error("Host API unavailable for " + id);
+  // No factory, no family: callers treat null as unsupported instead of
+  // failing the whole discovery loop or extension load.
+  if (!native) return null;
   const catalog = customCatalog(id, family, native.getModels()[0], saved);
   const preparePayload = id === "qwen" ? qwenMessages : payload => payload;
 

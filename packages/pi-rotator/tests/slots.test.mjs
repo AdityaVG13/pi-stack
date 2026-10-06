@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  carrierSlot,
   discoverFamilies,
   nextFreeSlot,
   parseSlotId,
@@ -84,6 +85,17 @@ describe("slots", () => {
       discoverFamilies({ "xai-account-2": {}, "xai-account-3": {} }),
       [{ base: "xai", slots: ["xai-account-2", "xai-account-3"] }],
     );
+  });
+
+  it("carrier is the lowest configured slot, else slots[0], else null", () => {
+    assert.equal(carrierSlot(["cursor", "cursor-account-2"], () => true), "cursor");
+    assert.equal(carrierSlot(["cursor", "cursor-account-2"], id => id !== "cursor"), "cursor-account-2");
+    assert.equal(carrierSlot(["cursor", "cursor-account-2"], () => false), "cursor");
+    assert.equal(carrierSlot(["xai-account-2", "xai-account-3"], () => true), "xai-account-2");
+    assert.equal(carrierSlot(["cursor", "cursor-account-2"]), "cursor");
+    assert.equal(carrierSlot(["cursor"], () => { throw new Error("snapshot failed"); }), "cursor");
+    assert.equal(carrierSlot([], () => true), null);
+    assert.equal(carrierSlot(null), null);
   });
 
   it("next free slot fills the lowest gap per family", () => {

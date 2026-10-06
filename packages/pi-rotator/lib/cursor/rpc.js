@@ -186,6 +186,10 @@ export function resolveModelId(model, reasoningEffort) {
     suffix = "-thinking";
     base = base.slice(0, -9);
   }
+  // Sessions can restore a stale raw id (effort embedded) from before
+  // catalog collapsing. Appending the live effort again would address a
+  // model that cannot exist (`-high-high`); the id already names it.
+  if (base.endsWith(`-${reasoningEffort}`)) return model;
   return `${base}-${reasoningEffort}${suffix}`;
 }
 

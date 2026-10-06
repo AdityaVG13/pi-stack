@@ -21,7 +21,7 @@
       "outputBytes": 8829,
       "outputSha256": "09b9565efa917c6511b909f92ebfdde86baf3cb6ba02e2d40d3e2c134b103139",
       "transform": "Node stripTypeScriptTypes(mode:strip)",
-      "shippedSha256": "aa480e5faa146bf3f0623015e5b480619d93568c3aacfdf43265c0db10b19b7f"
+      "shippedSha256": "6a8740d67692a096def1683e78688d2844f758f1424867a8464788126b3c9bf3"
     },
     {
       "source": "cursor-model-name.ts",
@@ -255,7 +255,9 @@
       "Streaming failures use OpenAI SSE error envelopes, not an invalid finish_reason or assistant content; the real Pi host regression preserves bridge and Connect error messages.",
       "Non-streaming native tools are rejected and cannot renew the useful-output watchdog; only visible progress renews that clock.",
       "Unhandled execs and failed native result encodings report through best-effort opt-in debug logs, never stderr.",
-      "Non-success HTTP2 responses become status-only Connect errors for streaming and nonzero unary exits with no retained body; streamed 401/402/403/429 failures retain account-recovery semantics."
+      "Non-success HTTP2 responses become status-only Connect errors for streaming and nonzero unary exits with no retained body; streamed 401/402/403/429 failures retain account-recovery semantics.",
+      "Effort resolution never double-appends: a model id already ending in the live effort (stale raw ids restored from older sessions) resolves as-is instead of addressing a nonexistent `-high-high` variant.",
+      "Unified model listing: slot catalogs resolve through a per-slot policy (carrier lists the family union, siblings list nothing), sibling discovery re-lists the carrier best-effort, discovery marks feed saved-id supersede, and setup returns a reregister handle for carrier sync. Requests still authenticate per slot."
     ]
   },
   "shippedModules": [
@@ -337,7 +339,7 @@
     },
     {
       "path": "rpc.js",
-      "sha256": "8a2d6c6b92332384ae7b42847c2022a17a7000bc429a10a973078e670b6d99ce"
+      "sha256": "7a2a6aad1335faec977fcfe142b72c9a3c10344cd20e297f906a1aaf05c1adaa"
     },
     {
       "path": "server-messages.js",

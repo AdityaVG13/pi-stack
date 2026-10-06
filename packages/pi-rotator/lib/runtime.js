@@ -4,6 +4,9 @@ import { selectCursorSpeed, showText, hideWidget } from "./commands.js";
 import { nativeFamilyNames, rediscover, syncPreparedAccounts } from "./accounts.js";
 import { onAssistantTurnEnd, onBeforeSettle, onResponse, onTurnEnd, resetRecovery } from "./recovery.js";
 import { onBeforeRequest, onCompact, onContext, onWarmDecision } from "./requests.js";
+import { repairHiddenRestore } from "./switch.js";
+import { debugLine } from "./support.js";
+import { familyOf } from "./sessions.js";
 import { createCursorAccounts } from "./cursor.js";
 import { customAccountBase } from "./custom.js";
 import { createAccountUsage } from "./management.js";
@@ -16,7 +19,7 @@ export function createRuntimeState(dir, config, mode, transport) {
     families: new Map(), accountFactories: new Map(), nativeFamilies: nativeFamilyNames(),
     preparedAccounts: new Set(), ownedAliases: new Set(), requests: new Map(),
     config, mode, transportWarn: mode === "transport" && transport.onlyActive,
-    pendingThinking: undefined, lastThinking: undefined,
+    pendingThinking: undefined, lastThinking: undefined, hiddenDefaultNotified: false,
   };
 
   state.usage = createAccountUsage(dir, state);
@@ -59,6 +62,36 @@ async function refreshRestoredModel(pi, ctx) {
   if (model) await pi.setModel(model);
 }
 
+// A persisted settings default can name a slot the unified listing hides.
+// Core then falls back silently to an unrelated model on fresh sessions,
+// so say once per process where the default moved. Never rewrites user
+// settings and never overrides the live selection: CLI flags, scoped runs
+// and subagents keep exactly what they asked for.
+function notifyHiddenDefault(dir, state, ctx) {
+  if (state.hiddenDefaultNotified) return;
+  const settings = readJson(dir, "settings.json") || {};
+  const provider = settings.defaultProvider;
+  const id = settings.defaultModel;
+
+  if (!provider || !id) return;
+  const family = familyOf(state, provider);
+
+  if (!family || !family.slots.includes(provider) || !family.carrier) return;
+  let listed;
+  let carried;
+
+  try {
+    listed = ctx?.modelRegistry?.find?.(provider, id);
+    carried = !listed && ctx?.modelRegistry?.find?.(family.carrier, id);
+  } catch {
+    return;
+  }
+
+  if (!carried) return;
+  state.hiddenDefaultNotified = true;
+  showText(ctx, `pi-rotator: default ${provider}/${id} now lists as ${family.carrier}/${id}; set it as the default again in /model.`);
+}
+
 async function startSession(pi, dir, state, startup, ctx) {
   hideWidget(ctx);
 
@@ -66,6 +99,13 @@ async function startSession(pi, dir, state, startup, ctx) {
 
   if (state.cursor?.credentialIds().length) await state.cursor.restore(ctx?.modelRegistry);
   const families = rediscover(pi, dir, state, undefined, ctx?.modelRegistry);
+  const restored = await repairHiddenRestore(pi, dir, state, ctx);
+
+  if (restored === "no-selection" || restored === "empty-branch") notifyHiddenDefault(dir, state, ctx);
+
+  if (restored === "failed" || restored === "unknown-model" || restored === "moved") {
+    debugLine(state, dir, "hidden_restore", { outcome: restored });
+  }
 
   if (startup.changed) showText(ctx, "pi-rotator: standalone account handoff complete. Existing logins retained.");
 
@@ -77,7 +117,7 @@ async function startTask(pi, dir, state, ctx) {
   syncPreparedAccounts(pi, dir, state, ctx);
   resetRecovery(state, ctx);
 
-  if (state.config.fastMode) await selectCursorSpeed(pi, dir, state, true, ctx);
+  if (state.config.fastMode) await selectCursorSpeed(pi, dir, state, true, ctx, { automatic: true, announce: true });
 }
 
 function observeResponse(pi, dir, state, usageEnabled, event, ctx) {

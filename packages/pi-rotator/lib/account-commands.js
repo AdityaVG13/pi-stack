@@ -96,7 +96,9 @@ export function accountCommand(pi, dir, state, tokens, ctx) {
   const { id, n } = nextAvailableAccount(auth, state, base, ctx);
 
   try {
-    registerOwnedAlias(pi, state, base, provider, id, n);
+    // Prepared slots have no credentials yet, so they never carry the
+    // family listing; discovery promotes a carrier once one logs in.
+    registerOwnedAlias(pi, state, base, provider, id, n, true);
     state.preparedAccounts.add(id);
   } catch {
     return showText(ctx, "pi-rotator: native registration rejected; account not created.");
@@ -165,12 +167,16 @@ function forgetRemovedAlias(pi, dir, state, id) {
   // Rotator aliases; numbered slots stay reserved until unregister so
   // /rotator add cannot reuse a ghost host entry.
   if (Object.hasOwn(effectiveAuth(dir), id) || (parseSlotId(id)?.n ?? 1) < 2) return;
+
   state.preparedAccounts.delete(id);
+
   if (!state.ownedAliases.has(id)) return;
 
   try { pi?.unregisterProvider?.(id); } catch { /* login is already gone */ }
+
   state.ownedAliases.delete(id);
   state.nativeAliases?.delete(id);
+  state.cursor?.forgetSlot?.(id);
 }
 
 export async function removeCommand(pi, dir, state, _config, tokens, ctx) {

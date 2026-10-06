@@ -61,6 +61,30 @@ export function discoverFamilies(auth) {
   return [...groups].map(group => discoveredFamily(auth, group)).sort(compareFamilyNames);
 }
 
+// Unified /model listing: exactly one slot per family carries the visible
+// catalog; owned siblings register with empty catalogs so each model
+// appears once no matter how many accounts serve it. The carrier is the
+// lowest-numbered configured slot (usually the base); when nothing reports
+// configured, slots[0] still wins so a family never loses its listing to a
+// stale auth snapshot. Total: never throws, null only without slots.
+export function carrierSlot(slots, isConfigured) {
+  if (!Array.isArray(slots) || slots.length === 0) return null;
+
+  if (isConfigured instanceof Function) {
+    const configured = slots.find(id => {
+      try {
+        return isConfigured(id) === true;
+      } catch {
+        return false;
+      }
+    });
+
+    if (configured !== undefined) return configured;
+  }
+
+  return slots[0];
+}
+
 export function nextFreeSlot(auth, base) {
   let n = 1;
 

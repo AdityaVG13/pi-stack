@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import piRotator from "../index.js";
+import { stopProxy } from "../lib/cursor/proxy.js";
 
 const CODEX = "openai-codex";
 
@@ -199,6 +200,7 @@ describe("activation", () => {
       status: "active",
       reason: null,
       via: "transport",
+      carrier: null,
     });
     // Route-only: the transport owns registration, we never re-register.
     assert.equal(pi.registeredProviders.length, 0);
@@ -1954,6 +1956,52 @@ describe("fast mode", () => {
     assert.equal(live.model.provider, "cursor-account-2", "a missing fast variant must not cool its registered standard model");
   });
 
+  it("automatic fast reconciliation skips a cooling fast tier; explicit fast on honors consent", async () => {
+    const dir = agentDirWith(transportFiles({ "auth.json": { cursor: {}, "cursor-account-2": {} } }));
+
+    writeRotatorConfig(dir, { strategy: "round-robin", fastMode: true });
+    const pi = fakePi();
+    const models = new Map();
+
+    for (const provider of ["cursor", "cursor-account-2"]) {
+      for (const id of ["gpt-5.4", "gpt-5.4-fast"]) models.set(provider + "/" + id, { provider, id, api: "openai-completions" });
+    }
+
+    const live = ctx("cursor", "fast-tier-cooldown", {
+      model: models.get("cursor/gpt-5.4-fast"),
+      modelRegistry: { find: (provider, id) => models.get(provider + "/" + id) },
+      thinkingLevel: "high",
+    });
+
+    pi.setModel = async model => {
+      await tick();
+      pi.setModelCalls.push(model);
+
+      if (!models.has(model.provider + "/" + model.id)) return false;
+
+      live.model = model;
+
+      return true;
+    };
+
+    piRotator(pi);
+    await fire(pi, "session_start");
+    // One served fast request, then a tier-only rejection (fast wording, no quota exhaustion).
+    await fire(pi, "before_provider_request", { payload: { model: "gpt-5.4-fast", input: [] } }, live);
+    await fire(pi, "agent_end", { messages: [{ role: "assistant", provider: "cursor", model: "gpt-5.4-fast", stopReason: "error", errorMessage: "fast capacity temporarily unavailable" }] }, live);
+    assert.equal(ofKind(dir, "turn_failed").at(-1).cooldownScope, "fast-tier");
+    // The user switches back to standard to keep working.
+    live.model = models.get("cursor/gpt-5.4");
+    const calls = pi.setModelCalls.length;
+    await fire(pi, "before_agent_start", {}, live);
+    assert.equal(live.model.id, "gpt-5.4", "automatic reconciliation must not flip onto a cooling fast tier");
+    assert.equal(pi.setModelCalls.length, calls, "no switch is attempted while the fast tier cools");
+    assert.equal(ofKind(dir, "fast_model_skipped").length, 1, "the skip is journaled, not silent");
+    // Explicit consent still wins and fails visibly if the tier rejects it.
+    await pi.commands.get("rotator").handler("fast on", live);
+    assert.equal(live.model.id, "gpt-5.4-fast", "explicit /rotator fast on honors consent despite cooling");
+  });
+
   it("Claude fast-tier limits do not poison standard capacity; OpenAI shared limits do", async () => {
     for (const [base, modelId, api, shared] of [
       ["anthropic", "claude-opus-5-5", "anthropic-messages", false],
@@ -2746,7 +2794,7 @@ describe("downloaded provider ownership", () => {
     const alias = pi.registeredProviders[0][0];
     assert.equal(alias.auth, auth);
     assert.equal(alias.streamSimple, base.streamSimple);
-    assert.deepEqual(alias.getModels(), [{ ...model, provider: family + "-account-2" }]);
+    assert.deepEqual(alias.getModels(), [], "prepared logins list nothing until they authenticate");
     assert.equal(model.provider, family);
   });
 
@@ -2921,9 +2969,13 @@ describe("established native account factory", () => {
     assert.match(await command.handler("add anthropic", live), /prepared anthropic-account-2/);
     const prepared = pi.registeredProviders.find(([def]) => def.id === "anthropic-account-2")[0];
     assert.equal(prepared.auth, anchor.auth, "new accounts retain the established native authentication contract");
+    assert.deepEqual(prepared.getModels(), [], "prepared logins stay out of the family listing");
     // Account-specific wire adapters need distinct functions; verify the native
     // behavior rather than incidental function identity under the legacy overlay.
-    const model = prepared.getModels()[0];
+    // Prepared siblings list nothing, so the streaming model comes from the
+    // real factory catalog instead of the hidden alias listing.
+    const { builtinBase, nativeBuiltinModule } = await import("../lib/clone.js");
+    const model = { ...builtinBase(nativeBuiltinModule, "anthropic").getModels()[0], provider: prepared.id };
     let callbackModel;
 
     const response = await prepared.streamSimple(model, { messages: [{ role: "user", content: "fixture", timestamp: 0 }] }, {
@@ -2938,7 +2990,7 @@ describe("established native account factory", () => {
     assert.equal(callbackModel.provider, prepared.id);
     assert.equal(response.provider, prepared.id);
     assert.match(response.errorMessage, /fixture stopped before network/);
-    assert.ok(prepared.getModels().every(model => model.provider === prepared.id));
+    assert.deepEqual(anchor.getModels(), [], "established siblings stay out of the family listing too");
     assert.ok(pi.registeredProviders.every(([def]) => def.id !== "anthropic"), "the overlay is never replaced");
     assert.equal(readFileSync(join(dir, "auth.json"), "utf8"), before);
     natives.set(anchor.id, { ...anchor, name: "different package now owns this ID" });
@@ -2951,34 +3003,325 @@ describe("established native account factory", () => {
 
 describe("saved native model metadata", () => {
   it("preserves missing chat IDs across native slots without adopting proxy URLs, credentials or replacing stock models", async () => {
-    const dir = agentDirWith({ "settings.json": {}, "auth.json": { [CODEX]: {}, [CODEX2]: {}, [CODEX3]: {} } });
+    // Base-less on purpose: the carrier alias lists stock plus saved extras
+    // while siblings stay hidden, so one family entry carries the union.
+    const dir = agentDirWith({ "settings.json": {}, "auth.json": { [CODEX2]: {}, [CODEX3]: {} } });
     // This ID must remain outside the stock catalog so metadata preservation is exercised.
     const metadata = { id: "rotator-fixture-future-chat", name: "Future fixture chat", reasoning: true, input: ["text", "image"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 272000, maxTokens: 128000, thinkingLevelMap: { xhigh: "xhigh", max: "max" } };
-    writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { [CODEX2]: { api: "openai-codex-responses", baseUrl: "http://127.0.0.1:1/v1", apiKey: "retired-proxy-key", models: [{ ...metadata, baseUrl: "http://127.0.0.1:2/v1", apiKey: "retired-model-key", headers: { authorization: "retired-model-auth" } }, { ...metadata, id: "gpt-6-sol", name: "must not override stock" }, { ...metadata, id: "image-model", type: "image" }] } } }));
+    writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { [CODEX2]: { api: "openai-codex-responses", baseUrl: "http://127.0.0.1:1/v1", apiKey: "retired-proxy-key", models: [{ ...metadata, baseUrl: "http://127.0.0.1:2/v1", apiKey: "retired-model-key", headers: { authorization: "retired-model-auth" } }, { ...metadata, id: "gpt-6-sol", name: "must not override stock" }, { ...metadata, id: "image-model", type: "image" }, { ...metadata, id: "  ", name: "blank-row-marker" }] } } }));
     const before = readFileSync(join(dir, "models.json"), "utf8");
     const pi = fakePi();
     piRotator(pi);
-
-    for (const id of [CODEX2, CODEX3]) {
-      const provider = pi.registeredProviders.find(([def]) => def.id === id)[0];
-      const imported = provider.getModels().find(model => model.id === metadata.id);
-      assert.ok(imported, "saved current default is included in each native account catalog");
-      assert.equal(imported.provider, id);
-      assert.equal(imported.baseUrl, "https://chatgpt.com/backend-api");
-      assert.equal(imported.api, "openai-codex-responses");
-      assert.equal(imported.name, metadata.name);
-      assert.deepEqual(imported.cost, metadata.cost);
-      assert.deepEqual(imported.thinkingLevelMap, metadata.thinkingLevelMap);
-      assert.equal(imported.contextWindow, metadata.contextWindow);
-      assert.equal(imported.apiKey, undefined);
-      assert.equal(imported.headers, undefined);
-      assert.ok(provider.getAllModels().some(model => model.id === metadata.id && model.type === "chat"));
-      assert.equal(provider.getModels().filter(model => model.id === "gpt-6-sol").length, 1, "saved entries cannot duplicate stock IDs and overwrite them during SDK publication");
-      assert.notEqual(provider.getModels().find(model => model.id === "gpt-6-sol").name, "must not override stock");
-      assert.ok(!provider.getModels().some(model => model.id === "image-model"));
-    }
-
+    const provider = pi.registeredProviders.find(([def]) => def.id === CODEX2)[0];
+    const imported = provider.getModels().find(model => model.id === metadata.id);
+    assert.ok(imported, "saved current default is included in the carrier account catalog");
+    assert.equal(imported.provider, CODEX2);
+    assert.equal(imported.baseUrl, "https://chatgpt.com/backend-api");
+    assert.equal(imported.api, "openai-codex-responses");
+    assert.equal(imported.name, metadata.name);
+    assert.deepEqual(imported.cost, metadata.cost);
+    assert.deepEqual(imported.thinkingLevelMap, metadata.thinkingLevelMap);
+    assert.equal(imported.contextWindow, metadata.contextWindow);
+    assert.equal(imported.apiKey, undefined);
+    assert.equal(imported.headers, undefined);
+    assert.ok(provider.getAllModels().some(model => model.id === metadata.id && model.type === "chat"));
+    assert.equal(provider.getModels().filter(model => model.id === "gpt-6-sol").length, 1, "saved entries cannot duplicate stock IDs and overwrite them during SDK publication");
+    assert.notEqual(provider.getModels().find(model => model.id === "gpt-6-sol").name, "must not override stock");
+    assert.ok(!provider.getModels().some(model => model.id === "image-model"));
+    assert.ok(provider.getModels().every(model => model.id && model.id.trim()), "no blank ids publish");
+    assert.ok(!provider.getModels().some(model => model.name === "blank-row-marker"), "whitespace rows register nothing at all");
+    assert.deepEqual(pi.registeredProviders.find(([def]) => def.id === CODEX3)[0].getModels(), [], "non-carrier siblings list nothing");
     assert.equal(readFileSync(join(dir, "models.json"), "utf8"), before);
+  });
+});
+
+describe("unified model listing", () => {
+  it("a malformed cursor credential fails its own slot, never the family", async () => {
+    const dir = agentDirWith({ "settings.json": {}, "auth.json": { cursor: { type: "oauth", access: "fixture-base" }, "cursor-account-2": { type: "oauth" } } });
+    const pi = fakePi();
+
+    piRotator(pi);
+
+    const live = ctx("cursor", "malformed-slot", {
+      model: { provider: "cursor", id: "fixture-model", api: "openai-completions" },
+      modelRegistry: {
+        // Faithful registry: only ids rotator actually registered resolve.
+        getProvider: id => pi.registeredProviders.some(args => args[0]?.id === id || args[0] === id) ? { id } : undefined,
+        hasConfiguredAuth: ({ provider }) => provider !== "cursor-account-2",
+      },
+    });
+
+    pi.setModel = async model => {
+      pi.setModelCalls.push(model);
+      live.model = model;
+
+      return true;
+    };
+
+    try {
+      await fire(pi, "session_start", {}, live);
+      const row = ofKind(dir, "rediscover").filter(entry => entry.family === "cursor").at(-1);
+      assert.equal(row.status, "active");
+      assert.deepEqual(row.slots, ["cursor", "cursor-account-2"]);
+      await fire(pi, "before_provider_request", { payload: { model: "fixture-model", input: [] } }, live);
+      await fire(pi, "agent_end", { messages: [{ role: "assistant", provider: "cursor", model: "fixture-model", stopReason: "error", errorMessage: "HTTP 429 rate limited" }] }, live);
+      assert.equal(live.model.provider, "cursor", "recovery never routes into the unverified slot");
+      assert.equal(ofKind(dir, "slot_skipped").at(-1).reason, "unauthorized");
+    } finally {
+      stopProxy();
+    }
+  });
+
+  it("hidden siblings list nothing yet serve rotation with carrier-derived defs", async () => {
+    const dir = agentDirWith({ "settings.json": {}, "auth.json": { [CODEX]: {}, [CODEX2]: {} } });
+    const pi = fakePi();
+
+    piRotator(pi);
+
+    const carrierDef = { provider: CODEX, id: MODEL, api: "openai-codex-responses" };
+
+    const live = ctx(CODEX, "unified-rotation", {
+      model: { ...carrierDef },
+      modelRegistry: {
+        find: (provider, id) => provider === CODEX && id === MODEL ? { ...carrierDef } : undefined,
+        getProvider: () => ({ id: "fixture" }),
+        hasConfiguredAuth: () => true,
+      },
+    });
+
+    pi.setModel = async model => {
+      pi.setModelCalls.push(model);
+      live.model = model;
+
+      return true;
+    };
+
+    await fire(pi, "session_start", {}, live);
+
+    const alias = pi.registeredProviders.find(([def]) => def.id === CODEX2)[0];
+    assert.deepEqual(alias.getModels(), [], "non-carrier siblings list nothing");
+
+    if (alias.getAllModels) assert.deepEqual(alias.getAllModels(), [], "every operation type stays hidden");
+    assert.equal(ofKind(dir, "rediscover").filter(row => row.family === CODEX).at(-1).carrier, CODEX);
+    assert.match(await pi.commands.get("rotator").handler("status", live), /openai-codex: 2 slots.*lists openai-codex/);
+    await pi.commands.get("rotator").handler("next", live);
+    assert.equal(live.model.provider, CODEX2);
+    assert.equal(live.model.id, MODEL);
+    assert.equal(live.model.api, "openai-codex-responses", "rotation targets carry the full carrier-derived def");
+  });
+
+  it("carrier follows live auth: base-less aliases list until the base logs in", async () => {
+    const dir = agentDirWith({ "settings.json": {}, "auth.json": { [CODEX2]: {}, [CODEX3]: {} } });
+    const pi = fakePi();
+    piRotator(pi);
+    const live = ctx(CODEX2, "carrier-swap", { modelRegistry: { getProvider: () => undefined } });
+    const listed = () => pi.registeredProviders.filter(([def]) => def.id === CODEX2).at(-1)[0];
+    await fire(pi, "session_start", {}, live);
+    assert.ok(listed().getModels().length > 0, "a base-less carrier alias lists the family catalog");
+    assert.equal(ofKind(dir, "rediscover").filter(row => row.family === CODEX).at(-1).carrier, CODEX2);
+    writeFileSync(join(dir, "auth.json"), JSON.stringify({ [CODEX]: {}, [CODEX2]: {}, [CODEX3]: {} }));
+    await fire(pi, "session_start", {}, live);
+    assert.deepEqual(listed().getModels(), [], "the base carries once it logs in; the alias hides");
+    assert.equal(ofKind(dir, "rediscover").filter(row => row.family === CODEX).at(-1).carrier, CODEX);
+    const settled = listed();
+    const registrations = pi.registeredProviders.length;
+    await fire(pi, "session_start", {}, live);
+    assert.equal(pi.registeredProviders.length, registrations, "steady state re-registers nothing");
+    assert.equal(listed(), settled, "steady state keeps the same definition objects");
+  });
+
+  it("carrier prefers live configured credentials over a stale base login", async () => {
+    const dir = agentDirWith({ "settings.json": {}, "auth.json": { [CODEX]: {}, [CODEX2]: {} } });
+    const pi = fakePi();
+
+    piRotator(pi);
+
+    const live = ctx(CODEX, "stale-base", { modelRegistry: {
+      getProvider: id => ({ id }),
+      getProviderAuthStatus: id => ({ configured: id === CODEX2 }),
+    } });
+
+    await fire(pi, "session_start", {}, live);
+    assert.equal(ofKind(dir, "rediscover").filter(row => row.family === CODEX).at(-1).carrier, CODEX2);
+    const listed = pi.registeredProviders.filter(([def]) => def.id === CODEX2).at(-1)[0];
+    assert.ok(listed.getModels().length > 0, "the configured sibling carries the listing");
+    assert.ok(!pi.registeredProviders.some(([def]) => def.id === CODEX), "the Pi-owned base is never re-registered");
+  });
+
+  it("session start repairs branches stranded on hidden slots", async () => {
+    const dir = agentDirWith({ "settings.json": {}, "auth.json": { [CODEX]: {}, [CODEX2]: {} } });
+    const pi = fakePi();
+
+    piRotator(pi);
+
+    const carrierDef = { provider: CODEX, id: MODEL, api: "openai-codex-responses" };
+
+    const branch = [
+      { type: "message", message: { role: "assistant", provider: CODEX2, model: MODEL, api: "openai-codex-responses" } },
+    ];
+
+    const live = ctx(CODEX, "hidden-restore", {
+      model: { provider: CODEX, id: "other-model" },
+      sessionManager: { getSessionId: () => "hidden-restore", getBranch: () => branch },
+      modelRegistry: {
+        find: (provider, id) => provider === CODEX && id === MODEL ? { ...carrierDef } : undefined,
+        getProvider: () => ({ id: "fixture" }),
+        hasConfiguredAuth: () => true,
+      },
+    });
+
+    pi.setModel = async model => {
+      pi.setModelCalls.push(model);
+      live.model = model;
+
+      return true;
+    };
+
+    await fire(pi, "session_start", {}, live);
+    assert.equal(pi.setModelCalls.length, 1);
+    assert.equal(live.model.provider, CODEX2);
+    assert.equal(live.model.id, MODEL);
+    assert.equal(live.model.api, "openai-codex-responses");
+    const routes = ofKind(dir, "route").filter(row => row.reason === "hidden-restore");
+    assert.equal(routes.length, 1);
+    assert.equal(routes[0].to, CODEX2);
+    assert.equal(routes[0].model, MODEL);
+  });
+
+  it("fresh sessions with a hidden settings default get a one-time pointer, never a switch", async () => {
+    const dir = agentDirWith({ "settings.json": { defaultProvider: CODEX2, defaultModel: MODEL }, "auth.json": { [CODEX]: {}, [CODEX2]: {} } });
+    const pi = fakePi();
+
+    piRotator(pi);
+
+    const notices = [];
+
+    const live = ctx(CODEX, "hidden-default", {
+      model: { provider: CODEX, id: "other-model" },
+      sessionManager: { getSessionId: () => "hidden-default", getBranch: () => [] },
+      modelRegistry: {
+        find: (provider, id) => provider === CODEX && id === MODEL ? { provider, id, api: "openai-codex-responses" } : undefined,
+        getProvider: () => ({ id: "fixture" }),
+        hasConfiguredAuth: () => true,
+      },
+      ui: { notify: message => notices.push(message) },
+    });
+
+    pi.setModel = async model => {
+      pi.setModelCalls.push(model);
+      live.model = model;
+
+      return true;
+    };
+
+    await fire(pi, "session_start", {}, live);
+
+    await fire(pi, "session_start", {}, live);
+    assert.equal(pi.setModelCalls.length, 0, "the live selection is never overridden");
+    assert.equal(ofKind(dir, "route").length, 0, "a pointer journals no routing evidence");
+    assert.equal(notices.length, 1);
+    assert.match(notices[0], /default openai-codex-account-2\/gpt-5.6-sol now lists as openai-codex\/gpt-5.6-sol; set it as the default again/);
+  });
+
+  it("stale settings defaults load fine and earn no pointer when the carrier lacks them", async () => {
+    const dir = agentDirWith({ "settings.json": { defaultProvider: CODEX2, defaultModel: "adopted-only" }, "auth.json": { [CODEX]: {}, [CODEX2]: {} } });
+    const pi = fakePi();
+
+    piRotator(pi);
+
+    const notices = [];
+
+    const live = ctx(CODEX, "hidden-default-adopted", {
+      model: { provider: CODEX, id: "other-model" },
+      sessionManager: { getSessionId: () => "hidden-default-adopted", getBranch: () => [] },
+      modelRegistry: {
+        find: () => undefined,
+        getProvider: () => ({ id: "fixture" }),
+        hasConfiguredAuth: () => true,
+      },
+      ui: { notify: message => notices.push(message) },
+    });
+
+    pi.setModel = async model => {
+      pi.setModelCalls.push(model);
+      live.model = model;
+
+      return true;
+    };
+
+    await fire(pi, "session_start", {}, live);
+    assert.equal(notices.length, 0, "no pointer when the carrier cannot serve the default either");
+    assert.equal(pi.setModelCalls.length, 0);
+    assert.ok(readFileSync(join(dir, "settings.json"), "utf8").includes(CODEX2), "user settings are never rewritten");
+    assert.ok(debugLines(dir).some(line => line.kind === "stale_default"), "the stale default is still diagnosable");
+  });
+
+  it("a throwing registry never breaks session start or the default pointer", async () => {
+    const dir = agentDirWith({ "settings.json": { defaultProvider: CODEX2, defaultModel: MODEL }, "auth.json": { [CODEX]: {}, [CODEX2]: {} } });
+    const pi = fakePi();
+
+    piRotator(pi);
+
+    const notices = [];
+
+    const live = ctx(CODEX, "throwing-find", {
+      model: { provider: CODEX, id: "other-model" },
+      sessionManager: { getSessionId: () => "throwing-find", getBranch: () => [] },
+      modelRegistry: {
+        find: () => { throw new Error("registry down"); },
+        getProvider: () => ({ id: "fixture" }),
+        hasConfiguredAuth: () => true,
+      },
+      ui: { notify: message => notices.push(message) },
+    });
+
+    await fire(pi, "session_start", {}, live);
+    assert.equal(notices.length, 0);
+    assert.equal(ofKind(dir, "route").filter(row => row.reason === "hidden-restore").length, 0);
+  });
+
+  it("restore repair leaves aligned, listed, foreign and unknown selections to core", async () => {
+    const cases = [
+      { name: "aligned", live: { provider: CODEX2, id: MODEL }, branch: [{ type: "model_change", provider: CODEX2, modelId: MODEL }], listed: false },
+      { name: "listed", live: { provider: CODEX, id: "other" }, branch: [{ type: "model_change", provider: CODEX2, modelId: MODEL }], listed: true },
+      { name: "foreign", live: { provider: CODEX, id: "other" }, branch: [{ type: "model_change", provider: "zzz", modelId: MODEL }], listed: false },
+      { name: "unknown", live: { provider: CODEX, id: "other" }, branch: [{ type: "model_change", provider: CODEX2, modelId: "gone" }], listed: false },
+      { name: "no-branch", live: { provider: CODEX, id: "other" }, branch: null, listed: false },
+    ];
+
+    for (const kase of cases) {
+      const dir = agentDirWith({ "settings.json": {}, "auth.json": { [CODEX]: {}, [CODEX2]: {} } });
+      const pi = fakePi();
+
+      piRotator(pi);
+
+      const live = ctx(CODEX, "restore-" + kase.name, {
+        model: { ...kase.live },
+        sessionManager: kase.branch ? { getSessionId: () => "restore-" + kase.name, getBranch: () => kase.branch } : { getSessionId: () => "restore-" + kase.name },
+        modelRegistry: {
+          find: (provider, id) => {
+            if (provider === CODEX && id === MODEL) return { provider, id, api: "openai-codex-responses" };
+
+            if (kase.listed && provider === CODEX2 && id === MODEL) return { provider, id, api: "openai-codex-responses" };
+
+            return undefined;
+          },
+          getProvider: () => ({ id: "fixture" }),
+          hasConfiguredAuth: () => true,
+        },
+      });
+
+      pi.setModel = async model => {
+        pi.setModelCalls.push(model);
+        live.model = model;
+
+        return true;
+      };
+
+      await fire(pi, "session_start", {}, live);
+      assert.equal(pi.setModelCalls.length, 0, kase.name + ": core owns this selection");
+      assert.equal(ofKind(dir, "route").filter(row => row.reason === "hidden-restore").length, 0, kase.name + ": no repair evidence");
+    }
   });
 });
 

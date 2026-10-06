@@ -1,7 +1,7 @@
 import { appendJournal, pruneCooldowns, pruneSessions } from "./store.js";
 import { aliasDef, builtinBase, nativeBuiltinModule } from "./clone.js";
 import { debugLine, readJson } from "./support.js";
-import { discoverFamilies, parseSlotId } from "./slots.js";
+import { carrierSlot, discoverFamilies, parseSlotId } from "./slots.js";
 import { isTransportFamily } from "./transport.js";
 import { customAccountBase } from "./custom.js";
 import { modelMetadata } from "./catalog.js";
@@ -21,16 +21,16 @@ function establishedAccountBase(base, registry, state) {
   return null;
 }
 
-export function registerOwnedAlias(pi, state, base, provider, id, n) {
-  const definition = aliasDef(provider, id, n);
+export function registerOwnedAlias(pi, state, base, provider, id, n, hidden = false) {
+  const definition = aliasDef(provider, id, n, hidden);
   pi.registerProvider(definition);
   state.ownedAliases.add(id);
   state.nativeAliases ||= new Map();
-  state.nativeAliases.set(id, { base, provider, definition });
+  state.nativeAliases.set(id, { base, provider, definition, hidden });
 }
 
 function validSavedChat(model, ids) {
-  return model?.id && model.id.constructor === String && (!model.type || model.type === "chat") && !ids.has(model.id);
+  return model?.id?.constructor === String && model.id.trim() !== "" && (!model.type || model.type === "chat") && !ids.has(model.id);
 }
 
 function appendSavedSource(provider, models, source, ids, extras) {
@@ -100,12 +100,30 @@ function cloneFailureMessage(error) {
   return String((error && error.message) || error).slice(0, 160);
 }
 
-function registerSlot(pi, dir, state, base, id, builtinModule, registry) {
+function registerSlot(pi, dir, state, base, id, builtinModule, registry, carrier) {
   if (id === base) return { via: "base" };
 
   if (base === "cursor" && state.cursor?.owns(id)) return { via: "cursor" };
 
-  if (state.ownedAliases.has(id)) return { via: "clone" };
+  const hidden = id !== carrier;
+
+  if (state.ownedAliases.has(id)) {
+    // Carrier swaps re-list without churning serving state: same alias id,
+    // only the catalog flips. A failed re-list keeps the old listing; the
+    // alias still routes, so the family must not fail over cosmetics.
+    const record = state.nativeAliases?.get(id);
+
+    if (record && record.hidden !== hidden) {
+      try {
+        registerOwnedAlias(pi, state, base, record.provider, id, parseSlotId(id).n, hidden);
+        debugLine(state, dir, "slot_recataloged", { id, hidden });
+      } catch (error) {
+        debugLine(state, dir, "slot_recatalog_failed", { id, message: cloneFailureMessage(error) });
+      }
+    }
+
+    return { via: "clone" };
+  }
 
   // Package-owned protocols/auth are never replaced or rolled back.
   if (registry?.getProvider?.(id)) return { via: "registered" };
@@ -115,7 +133,7 @@ function registerSlot(pi, dir, state, base, id, builtinModule, registry) {
   if (!baseDef) return { reason: "no pi-ai builtin factory" };
 
   try {
-    registerOwnedAlias(pi, state, base, baseDef, id, n);
+    registerOwnedAlias(pi, state, base, baseDef, id, n, hidden);
 
     return { via: "clone", created: true };
   } catch (error) {
@@ -125,16 +143,16 @@ function registerSlot(pi, dir, state, base, id, builtinModule, registry) {
   }
 }
 
-function registerFamilySlots(pi, dir, state, base, slots, builtinModule, viaTransport, registry) {
+function registerFamilySlots(pi, dir, state, base, slots, builtinModule, viaTransport, registry, carrier) {
   // Transport-owned families are route-only; their definitions remain untouched.
-  if (viaTransport) return { ok: true, slots: [...slots], via: "transport" };
+  if (viaTransport) return { ok: true, slots: [...slots], via: "transport", carrier: null };
   const created = [];
   const vias = new Set();
 
   for (const id of slots) {
-    const result = registerSlot(pi, dir, state, base, id, builtinModule, registry);
+    const result = registerSlot(pi, dir, state, base, id, builtinModule, registry, carrier);
 
-    if (result.reason) return { ok: false, reason: result.reason, registered: created };
+    if (result.reason) return { ok: false, reason: result.reason, registered: created, carrier: null };
 
     vias.add(result.via);
 
@@ -144,7 +162,17 @@ function registerFamilySlots(pi, dir, state, base, slots, builtinModule, viaTran
     }
   }
 
-  return { ok: true, slots: [...slots], via: vias.has("cursor") ? "cursor" : registrationVia(vias.has("registered"), vias.has("clone")) };
+  // Cursor catalogs live behind the bridge; converge the carrier there too.
+  // Best effort: routing resolves across slots regardless of listing state.
+  if (base === "cursor") {
+    try {
+      state.cursor?.syncCarrier?.(slots, carrier);
+    } catch (error) {
+      debugLine(state, dir, "cursor_carrier_sync_failed", { base, message: cloneFailureMessage(error) });
+    }
+  }
+
+  return { ok: true, slots: [...slots], via: vias.has("cursor") ? "cursor" : registrationVia(vias.has("registered"), vias.has("clone")), carrier };
 }
 
 function registrationVia(adopted, cloned) {
@@ -158,7 +186,7 @@ function ensureFamily(state, base) {
     family = {
       base, slots: [], cooldowns: new Map(), drained: new Map(), sessions: new Map(),
       ttlMs: Object.hasOwn(state.config.ttlByFamily, base) ? state.config.ttlByFamily[base] : state.config.ttlMs,
-      strategy: state.config.strategy, rrIndex: -1, status: "pending", reason: null, via: null,
+      strategy: state.config.strategy, rrIndex: -1, status: "pending", reason: null, via: null, carrier: null,
     };
     state.families.set(base, family);
   }
@@ -172,6 +200,7 @@ function updateFamily(pi, state, family, slots, result) {
     family.status = "active";
     family.reason = null;
     family.via = result.via;
+    family.carrier = result.carrier ?? null;
 
     return;
   }
@@ -192,6 +221,7 @@ function updateFamily(pi, state, family, slots, result) {
   family.slots = slots;
   family.status = "unsupported";
   family.reason = result.reason;
+  family.carrier = null;
 }
 
 // Discovery consumes IDs, never package keys. Host auth metadata permits
@@ -203,6 +233,27 @@ function registeredIds(registry) {
 
 function configuredAccount(registry, id) {
   return registry.getProvider?.(id) && registry.getProviderAuthStatus?.(id)?.configured === true;
+}
+
+// Listing follows live auth, not slot order alone: a stale base credential
+// must not take the family catalog down with it when a sibling is healthy.
+// Without a registry (startup, before the host snapshot exists) the auth
+// snapshot decides; carrierSlot still falls back to slots[0] so the family
+// always lists somewhere.
+export function familyCarrier(slots, auth, registry) {
+  if (registry) {
+    const live = slots.find(id => {
+      try {
+        return configuredAccount(registry, id) === true;
+      } catch {
+        return false;
+      }
+    });
+
+    if (live !== undefined) return live;
+  }
+
+  return carrierSlot(slots, id => Object.hasOwn(auth || {}, id));
 }
 
 function discoveryAccounts(auth, registry, state) {
@@ -227,7 +278,8 @@ export function rediscover(pi, dir, state, auth = readJson(dir, "auth.json"), re
     seen.add(base);
     const family = ensureFamily(state, base);
     const viaTransport = state.mode === "transport" && isTransportFamily(base);
-    const result = registerFamilySlots(pi, dir, state, base, slots, builtinModule, viaTransport, registry);
+    const carrier = viaTransport ? null : familyCarrier(slots, auth, registry);
+    const result = registerFamilySlots(pi, dir, state, base, slots, builtinModule, viaTransport, registry, carrier);
     updateFamily(pi, state, family, slots, result);
 
     pruneCooldowns(family.cooldowns, Date.now());
@@ -237,6 +289,7 @@ export function rediscover(pi, dir, state, auth = readJson(dir, "auth.json"), re
       slots,
       status: family.status,
       reason: family.reason,
+      carrier: family.carrier,
     });
     appendJournal(dir, "rediscover", {
       family: base,
@@ -244,6 +297,7 @@ export function rediscover(pi, dir, state, auth = readJson(dir, "auth.json"), re
       status: family.status,
       reason: family.reason,
       via: family.via,
+      carrier: family.carrier,
     });
   }
 

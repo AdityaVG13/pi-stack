@@ -5,7 +5,7 @@ import { parseSlotId, nextFreeSlot } from "./slots.js";
 import { peekSession, ttlFor, familyOf, sessionState } from "./sessions.js";
 import { readJson } from "./support.js";
 import { serializeHandoff, resolveTarget, applySwitch } from "./switch.js";
-import { appendJournal } from "./store.js";
+import { appendJournal, isCooling } from "./store.js";
 
 function slotLine(family, session, id, now, ttlMs, fastModelId) {
   const until = family.cooldowns.get(id);
@@ -35,7 +35,8 @@ function familyStatus(family, config, ctx, auth, now) {
   const { model, inFamily } = servingModel(ctx, family);
   const ttlMs = ttlFor(family, inFamily ? model : null);
   const via = family.via && family.via !== "clone" ? ` · ${family.via}` : "";
-  const lines = [`${family.base}: ${family.slots.length} slots · ttl ${Math.round(ttlMs / 60000)}m${via}`];
+  const lists = family.carrier ? ` · lists ${family.carrier}` : "";
+  const lines = [`${family.base}: ${family.slots.length} slots · ttl ${Math.round(ttlMs / 60000)}m${via}${lists}`];
 
   for (const id of family.slots) {
     lines.push(slotLine(family, session, id, now, ttlMs, inFamily && config.fastMode ? model.id : null));
@@ -111,7 +112,7 @@ export function fastStatus(state, ctx) {
   return lines.join("\n");
 }
 
-export async function selectCursorSpeed(pi, dir, state, enabled, ctx) {
+export async function selectCursorSpeed(pi, dir, state, enabled, ctx, opts = {}) {
   const family = ctx?.model && familyOf(state, ctx.model.provider);
 
   if (family?.base !== "cursor") return "";
@@ -126,7 +127,20 @@ export async function selectCursorSpeed(pi, dir, state, enabled, ctx) {
   
     if (isFast === enabled) return "";
     const id = enabled ? model.id + "-fast" : model.id.slice(0, -5);
-    const resolved = resolveTarget(ctx, model.provider, id);
+
+    // Automatic reconciliation must not resurrect a tier the router just
+    // cooled: flipping onto a cooling fast target turns one rate limit into
+    // a fail loop across manual switches and account rotations, and every
+    // flip rebuilds the Cursor conversation from scratch. The skip is
+    // journaled and the preference stays on; an explicit `/rotator fast on`
+    // still honors consent and fails visibly instead.
+    if (opts.automatic && enabled && isCooling(family.cooldowns, fastCooldownKey(model.provider, id), Date.now())) {
+      appendJournal(dir, "fast_model_skipped", { provider: model.provider, from: model.id, to: id, reason: "fast-tier cooling" });
+
+      return "";
+    }
+
+    const resolved = resolveTarget(ctx, model.provider, id, family.slots);
   
     if (!resolved.full) return "Cursor counterpart " + id + " is not registered; current model unchanged.";
   
@@ -134,9 +148,13 @@ export async function selectCursorSpeed(pi, dir, state, enabled, ctx) {
   
     appendJournal(dir, "fast_model", { provider: model.provider, from: model.id, to: id, landed });
   
-    return landed
+    const message = landed
       ? "Selected Cursor " + id + "; model-id changes may start a cold cache."
       : "Cursor switch did not land; current model unchanged.";
+
+    if (landed && opts.announce) showText(ctx, message);
+  
+    return message;
   });
 }
 

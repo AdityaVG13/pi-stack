@@ -96,6 +96,7 @@ Full contract: [README.md](../packages/pi-rotator/README.md).
 - The standalone target is **Pi + pi-rotator only**, with no pi-multi-account installed or enabled. Pi's native provider APIs own builtin authentication and streaming; Rotator ships its own Cursor transport and independent Qwen/Ollama Cloud key methods.
 - pi-multi-account references are migration and optional legacy-coexistence support, not a runtime dependency. Existing configured owners are preserved until explicit `/rotator cutover`; close other sessions sharing the agent directory first. See [LAYERING.md](../packages/pi-rotator/LAYERING.md).
 - Two routers still fight over `setModel`. Rotator enters **standby** rather than splitting state.
+- Owned slot catalogs hide under one family carrier in `/model`; adopted and legacy-transport slots still list separately. Settings defaults and `--models` scopes that name a hidden slot stop matching and must be re-picked to the base once.
 - Native standalone mode uses the provider API introduced in Pi AI 0.99 and requires Node **22.19+**. Current packed SDK checks target Pi **1.0.0**; the wildcard host-peer range does not certify every Pi version.
 - Isolated fresh/upgrade SDK, transport and real TUI shutdown checks pass without loading pi-multi-account. Live provider/OAuth flows, upstream Cursor HTTP/2, entitlement and remote cache sharing remain unverified. Isolated shutdown timing does not establish the cause of an earlier live multi-extension delay.
 

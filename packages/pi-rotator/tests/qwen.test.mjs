@@ -28,6 +28,22 @@ test("Qwen and cloud Ollama aliases use host APIs with portable saved catalogs a
   assert.equal(customAccountBase("ollama", { ollama: { baseUrl: "http://localhost:11434/v1" } }), null, "never redirect a separately configured local/provider package to the cloud");
 });
 
+test("a host without the template API reports unsupported instead of throwing", () => {
+  assert.equal(customAccountBase("qwen", {}, { builtinProviders: () => [] }), null);
+  assert.equal(customAccountBase("ollama", {}, null), null);
+});
+
+test("corrupt saved model shapes never break custom family construction", () => {
+  const base = customAccountBase("qwen", { qwen: { models: 42 }, "qwen-account-2": null, "qwen-account-9": { models: [{ id: "  ", name: "ws-marker" }, null, 42, { id: "ok-x", name: "Ok" }] } });
+  const models = base.getModels();
+  const ids = models.map(m => m.id);
+  assert.ok(ids.includes("qwen-max"), "stock catalog survives corrupt saved sections");
+  assert.ok(ids.includes("ok-x"), "valid rows survive beside corrupt siblings");
+  assert.ok(ids.every(id => id && id.trim()), "no blank ids publish");
+  assert.ok(!models.some(m => m.name === "ws-marker"), "whitespace rows register nothing at all");
+  assert.ok(customAccountBase("qwen", null).getModels().length > 0);
+});
+
 test("Ollama cloud uses the native chat-completions wire path for stock and saved aliases", async () => {
   const base = customAccountBase("ollama", { ollama: { models: [{ id: "saved-cloud-model", name: "saved" }] } });
   const alias = aliasDef(base, "ollama-account-2", 2);

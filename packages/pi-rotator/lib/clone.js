@@ -64,16 +64,18 @@ function builtinWireStream(base, aliasId, stream) {
   };
 }
 
-export function aliasDef(base, aliasId, n) {
+export function aliasDef(base, aliasId, n, hidden = false) {
   const def = { ...base, id: aliasId, name: `${base.name} (account ${n})` };
   // Native catalogs carry provider identity. Re-key every operation without
   // mutating the factory's catalog; OAuth, refresh and wire implementations
   // remain provider-owned. Never pass this object through legacy ProviderConfig.
+  // Hidden siblings keep everything but the listing: one family catalog on
+  // the carrier, every account still routable underneath.
   const rekey = models => models.map(model => ({ ...model, provider: aliasId }));
 
-  def.getModels = () => rekey(base.getModels());
+  def.getModels = hidden ? () => [] : () => rekey(base.getModels());
 
-  if (base.getAllModels) def.getAllModels = () => rekey(base.getAllModels());
+  if (base.getAllModels) def.getAllModels = hidden ? () => [] : () => rekey(base.getAllModels());
 
   if (base[BUILTIN_WIRE]) {
     def.stream = builtinWireStream(base, aliasId, base.stream);

@@ -112,6 +112,11 @@ No cache entries are transferred between subscriptions. OMP is not certified.
 - `index.js` selects ownership/mode; `runtime.js` constructs state and binds host hooks.
 - `accounts.js` discovers and registers slots. `catalog.js` is the shared saved-model
   metadata boundary, used by builtin aliases, independent key providers and migration.
+- `slots.js` names slot identity and picks the family carrier: the one slot
+  whose catalog lists in `/model` while owned siblings register empty.
+  `cursor.js` converges the carrier union for the reused transport; adopted
+  and transport-owned slots are never hidden. `switch.js` resolves hidden
+  targets from sibling defs and repairs restores stranded on hidden slots.
 - `commands.js` dispatches routing controls; `account-commands.js` provisions/manages
   logins; `command-ui.js` owns transient presentation and speed selection.
 - `requests.js` shapes cache/replay requests; `recovery.js` classifies failures and

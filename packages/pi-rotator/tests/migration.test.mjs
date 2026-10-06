@@ -46,13 +46,52 @@ test("migration retires only managed routes, preserves current model/native auth
   assert.deepEqual(input, before, "planning is read-only");
 });
 
-test("migration rejects ambiguous managed transports and a missing preserved default before writing", () => {
+test("migration rejects ambiguous managed transports before writing", () => {
   const wrongAPI = fixture();
   wrongAPI.models.providers["openai-codex-account-2"].api = "custom-protocol";
   assert.throws(() => prepareMigration(wrongAPI, restore), /transport/);
-  const missing = fixture();
-  missing.settings.defaultModel = "missing-current-model";
-  assert.throws(() => prepareMigration(missing, restore), /default model/);
+});
+
+test("misshapen provider sections and blank model ids never break migration planning", () => {
+  const input = {
+    settings: { packages: [] },
+    auth: {},
+    sidecar: {},
+    models: { providers: { cursor: null, "openai-codex": 42, qwen: "x", ollama: null, "anthropic-account-2": [1],
+      "openai-codex-account-2": { api: "openai-codex-responses", baseUrl: "http://127.0.0.1:1234/v1", apiKey: legacyPlaceholderKey("openai-codex-account-2"), models: [{ id: "  " }, null, { id: "ok-y", name: "Ok" }] } } },
+  };
+
+  const result = prepareMigration(input, restore);
+
+  assert.deepEqual(result.models.providers.cursor, null);
+  assert.deepEqual(result.models.providers.qwen, "x");
+  assert.deepEqual(result.models.providers.ollama, null);
+  assert.deepEqual(result.models.providers["anthropic-account-2"], [1]);
+  assert.deepEqual(result.models.providers["openai-codex"], { models: [{ id: "ok-y", name: "Ok" }] }, "misshapen base sections normalize so the legacy catalog still merges");
+  assert.equal(result.models.providers["openai-codex-account-2"], undefined, "managed routes still retire");
+});
+
+test("unparseable legacy urls are left alone instead of breaking migration planning", () => {
+  const input = {
+    settings: { packages: [] },
+    auth: {},
+    sidecar: {},
+    models: { providers: { "openai-codex-account-2": { api: "openai-codex-responses", baseUrl: "http://[invalid", apiKey: legacyPlaceholderKey("openai-codex-account-2"), models: [] } } },
+  };
+
+  const result = prepareMigration(input, restore);
+
+  assert.deepEqual(result.models.providers["openai-codex-account-2"].baseUrl, "http://[invalid", "an unverifiable route is preserved, not retired or fatal");
+});
+
+test("stale settings defaults pass through migration verbatim instead of blocking it", () => {
+  // The migration never rewrites defaults and Pi falls back gracefully, so a
+  // stale default must not fail the plan (it used to kill every startup).
+  const input = fixture();
+  input.settings.defaultModel = "missing-current-model";
+  const result = prepareMigration(input, restore);
+  assert.equal(result.settings.defaultModel, "missing-current-model");
+  assert.equal(result.settings.defaultProvider, "openai-codex");
 });
 
 test("base-route retirement cannot discard newer sibling catalog entries", () => {

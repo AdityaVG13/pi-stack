@@ -58,6 +58,18 @@ describe("clone", () => {
     assert.equal(base.streamSimple, streamSimple);
   });
 
+  it("hidden aliases list no catalog but keep transport, auth and refresh", () => {
+    const base = { ...fakeBase(), getAllModels: () => [{ id: "gpt-5.5" }], refreshModels: () => "refresh" };
+    const alias = aliasDef(base, "openai-codex-account-2", 2, true);
+
+    assert.deepEqual(alias.getModels(), []);
+    assert.deepEqual(alias.getAllModels(), []);
+    assert.equal(alias.stream, base.stream);
+    assert.equal(alias.auth, base.auth);
+    assert.ok(alias.refreshModels instanceof Function);
+    assert.equal(base.getModels().length, 1, "hiding never mutates the factory catalog");
+  });
+
   it("builtinBase picks the family and misses unknown ids", () => {
     const mod = fakeModule();
 

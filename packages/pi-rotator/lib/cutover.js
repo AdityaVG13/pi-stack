@@ -15,8 +15,16 @@ const MANAGED_APIS = { anthropic: "anthropic-messages", "openai-codex": "openai-
 export function managedFamily(id, source) {
   const base = parseSlotId(id)?.base;
 
+  if (!source || source.constructor !== Object) return undefined;
+
   if (!Object.hasOwn(MANAGED_APIS, base) || !source.baseUrl || !isLegacyModelMarker(source.apiKey)) return undefined;
-  const url = new URL(source.baseUrl);
+  let url;
+
+  try {
+    url = new URL(source.baseUrl);
+  } catch {
+    return undefined;
+  }
 
   if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return undefined;
 
@@ -26,7 +34,14 @@ export function managedFamily(id, source) {
 }
 
 function retireRoute(plan, id, source, base) {
-  const models = (source.models || []).flatMap(model => model.type && model.type !== "chat" ? [] : [modelMetadata(model)]);
+  const rows = Array.isArray(source.models) ? source.models : [];
+
+  const models = rows.flatMap(model => {
+    if (model?.type && model.type !== "chat") return [];
+    const metadata = modelMetadata(model);
+
+    return metadata.id ? [metadata] : [];
+  });
 
   if (base === "cursor") {
     if (plan.auth[id]?.type === "oauth") plan.models.providers[id] = { modelOverrides: Object.fromEntries(models.map(({ id: modelId, ...values }) => [modelId, values])) };
@@ -34,9 +49,13 @@ function retireRoute(plan, id, source, base) {
     return;
   }
 
-  const target = plan.models.providers[base] ||= { models: [] };
-  const existing = target.models ||= [];
-  const ids = new Set([...providerBase(base).getModels(), ...existing].map(model => model.id));
+  if (!plan.models.providers[base] || plan.models.providers[base].constructor !== Object) plan.models.providers[base] = {};
+  const target = plan.models.providers[base];
+
+  if (!Array.isArray(target.models)) target.models = [];
+  const existing = target.models;
+  const stock = providerBase(base)?.getModels?.() || [];
+  const ids = new Set([...stock, ...existing].map(model => model?.id));
 
   for (const model of models) {
     if (!ids.has(model.id)) existing.push(model);
@@ -70,7 +89,8 @@ function retireRoutes(plan, routes) {
 }
 
 function retireCopiedKeys(providers, auth) {
-  for (const [id, source] of Object.entries(providers)) {
+  for (const [id, source] of Object.entries(providers || {})) {
+    if (!source || source.constructor !== Object) continue;
     const endpoint = customAccountEndpoint(parseSlotId(id)?.base);
     const credential = auth[id];
 
@@ -78,12 +98,28 @@ function retireCopiedKeys(providers, auth) {
   }
 }
 
-function validateDefaultCatalog(plan) {
-  const base = parseSlotId(plan.settings.defaultProvider)?.base;
-  const stock = providerBase(base)?.getModels();
-  const saved = plan.models.providers[plan.settings.defaultProvider]?.models || plan.models.providers[base]?.models || [];
+// A stale settings default must never block migration or startup: the plan
+// copies settings verbatim and Pi falls back gracefully on its own. Record
+// it for diagnostics instead. Only stock-backed families can judge; cursor
+// catalogs resolve at runtime, never from this snapshot.
+function warnStaleDefault(dir, plan) {
+  try {
+    const provider = plan.settings?.defaultProvider;
+    const id = plan.settings?.defaultModel;
 
-  if (stock && plan.settings.defaultModel && ![...stock, ...saved].some(model => model.id === plan.settings.defaultModel)) throw new Error("Preserved default model is missing from the native catalog");
+    if (!provider || !id) return;
+    const base = parseSlotId(provider)?.base;
+    const stock = providerBase(base)?.getModels?.() || [];
+
+    if (!stock.length) return;
+    const section = name => plan.models.providers?.[name];
+    const saved = [...(Array.isArray(section(provider)?.models) ? section(provider).models : []), ...(Array.isArray(section(base)?.models) ? section(base).models : [])];
+
+    if ([...stock, ...saved].some(model => model?.id === id)) return;
+    appendDebug(dir, "stale_default", { provider, model: id });
+  } catch {
+    // Diagnostics never block startup.
+  }
 }
 
 export function prepareMigration(input, restoreAll = restoreShadowedAuth) {
@@ -98,7 +134,6 @@ export function prepareMigration(input, restoreAll = restoreShadowedAuth) {
   // Only exact legacy copies on known endpoints are retired; env/command keys
   // and foreign provider configurations stay owned by their original package.
   retireCopiedKeys(plan.models.providers, input.auth);
-  validateDefaultCatalog(plan);
 
   return plan;
 }
@@ -123,6 +158,7 @@ export function initializeStandalone(dir) {
     const input = { settings, auth: readStorage(authPath), sidecar: readStorage(sidecarPath), models: readStorage(modelsPath) };
     input.models.providers ||= {};
     const plan = prepareMigration(input);
+    warnStaleDefault(dir, plan);
     let changed = false;
 
     for (const [key, path] of [["auth", authPath], ["models", modelsPath], ["sidecar", sidecarPath]]) {

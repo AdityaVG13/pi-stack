@@ -21,7 +21,7 @@ import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { resumePendingExecWithToolResult } from "../lib/cursor/native-results.js";
 import { processServerMessage } from "../lib/cursor/server-messages.js";
 import piRotator from "../index.js";
-import { stopProxy, setBridgeFactoryForTests, writeSSEStreamForTests, resumeCursorToolResultsForTests, __testInternals, getCursorModels, resolveUsableModelId, startProxy, getProxyPort, parseMessages } from "../lib/cursor/proxy.js";
+import { stopProxy, setBridgeFactoryForTests, writeSSEStreamForTests, resumeCursorToolResultsForTests, __testInternals, getCursorModels, resolveModelId, resolveUsableModelId, startProxy, getProxyPort, parseMessages } from "../lib/cursor/proxy.js";
 import { create, toBinary, fromBinary, toJson, fromJson } from "@bufbuild/protobuf";
 import { ValueSchema } from "@bufbuild/protobuf/wkt";
 import { buildCursorRequest, buildMcpToolDefinitions } from "../lib/cursor/request.js";
@@ -92,13 +92,14 @@ test("standalone Cursor preparation reuses real catalogs, OAuth and cleanup with
     const base = pi.providers.get("cursor");
     const alias = pi.providers.get("cursor-account-2");
     assert.ok(base && alias, "Cursor base and login alias are registered");
-    const saved = alias.models.find(model => model.id === "cursor-migration-future");
-    assert.ok(saved, "owned startup definition includes newer saved IDs without obsolete proxy URLs");
+    assert.deepEqual(alias.models, [], "non-carrier siblings list nothing: one family entry in /model");
+    const saved = base.models.find(model => model.id === "cursor-migration-future");
+    assert.ok(saved, "the carrier includes newer saved IDs without obsolete proxy URLs");
     assert.equal(saved.apiKey, undefined);
     assert.equal(saved.headers, undefined);
     assert.equal(alias.baseUrl, base.baseUrl);
     assert.match(alias.baseUrl, /^http:\/\/127\.0\.0\.1:\d+\/v1$/);
-    const ordinary = alias.models.find(model => !model.id.endsWith("-fast") && alias.models.some(row => row.id === model.id + "-fast"));
+    const ordinary = base.models.find(model => !model.id.endsWith("-fast") && base.models.some(row => row.id === model.id + "-fast"));
     assert.ok(ordinary, "real normal/fast counterparts survive extraction");
     assert.equal(alias.oauth.getApiKey({ access: "fixture-slot2" }), "fixture-slot2");
     assert.equal(base.oauth.getApiKey({ access: "fixture-base" }), "fixture-base");
@@ -153,8 +154,9 @@ test("standalone Cursor preparation reuses real catalogs, OAuth and cleanup with
     assert.equal(renewed.access, token("refreshed-slot2"));
     assert.equal(renewed.refresh, "fixture-refreshed-slot2");
     assert.deepEqual(bridgeTokens, [token("refreshed-slot2")], "catalog discovery uses the renewed selected account token");
-    assert.ok(pi.providers.get("cursor-account-2").models.some(row => row.id === "reused-catalog-model"));
-    assert.ok(!pi.providers.get("cursor-account-2").models.some(row => row.id === "cursor-migration-future"), "live catalog discovery supersedes saved startup-only IDs");
+    assert.deepEqual(pi.providers.get("cursor-account-2").models, [], "a discovered sibling stays hidden; its catalog joins the union");
+    assert.ok(pi.providers.get("cursor").models.some(row => row.id === "reused-catalog-model"), "sibling discovery joins the carrier union");
+    assert.ok(pi.providers.get("cursor").models.some(row => row.id === "cursor-migration-future"), "saved startup-only IDs persist until the carrier itself discovers");
     assert.equal(readFileSync(join(dir, "auth.json"), "utf8"), credentialSnapshot, "SDK alone persists renewed credentials");
     const nextCatalog = toBinary(GetUsableModelsResponseSchema, create(GetUsableModelsResponseSchema, { models: [{ modelId: "refresh-again-model", displayName: "Updated after refresh" }] }));
     setBridgeFactoryForTests(() => {
@@ -164,7 +166,19 @@ test("standalone Cursor preparation reuses real catalogs, OAuth and cleanup with
     });
     globalThis.fetch = async () => new Response(JSON.stringify({ accessToken: token("refreshed-again-slot2"), refreshToken: "fixture-again-refresh" }), { status: 200 });
     await pi.providers.get("cursor-account-2").oauth.refreshToken(renewed);
-    assert.ok(pi.providers.get("cursor-account-2").models.some(row => row.id === "refresh-again-model"), "catalog updates survive re-registration on every refresh");
+    assert.ok(pi.providers.get("cursor").models.some(row => row.id === "refresh-again-model"), "catalog updates survive re-registration on every refresh");
+    assert.deepEqual(pi.providers.get("cursor-account-2").models, []);
+    const baseCatalog = toBinary(GetUsableModelsResponseSchema, create(GetUsableModelsResponseSchema, { models: [{ modelId: "base-live-model", displayName: "Base live model" }] }));
+    setBridgeFactoryForTests(() => {
+      let dataCallback, closeCallback;
+
+      return { proc: { kill() {} }, write() {}, onData(callback) { dataCallback = callback; }, onClose(callback) { closeCallback = callback; }, end() { setImmediate(() => { dataCallback(baseCatalog); closeCallback(0); }); } };
+    });
+    globalThis.fetch = async () => new Response(JSON.stringify({ accessToken: token("refreshed-base"), refreshToken: "fixture-base-refresh" }), { status: 200 });
+    await pi.providers.get("cursor").oauth.refreshToken({ access: "old-base", refresh: "fixture-base-refresh" });
+    assert.ok(pi.providers.get("cursor").models.some(row => row.id === "base-live-model"));
+    assert.ok(pi.providers.get("cursor").models.some(row => row.id === "refresh-again-model"), "the union keeps sibling discoveries");
+    assert.ok(!pi.providers.get("cursor").models.some(row => row.id === "cursor-migration-future"), "live carrier discovery supersedes saved startup-only IDs");
     const currentKey = deriveConversationKeyFromSessionId("cursor-current");
     const otherKey = deriveConversationKeyFromSessionId("cursor-other");
     const oldConversation = deterministicConversationId(currentKey);
@@ -826,6 +840,14 @@ test("Cursor discovered catalogs and effort fallback are credential-scoped", asy
   } finally {
     setBridgeFactoryForTests();
   }
+});
+
+test("resolveModelId never double-appends an effort already in the model id", () => {
+  assert.equal(resolveModelId("cursor-grok-4.6", "high"), "cursor-grok-4.6-high");
+  assert.equal(resolveModelId("cursor-grok-4.6-fast", "high"), "cursor-grok-4.6-high-fast");
+  assert.equal(resolveModelId("cursor-grok-4.6-high", "high"), "cursor-grok-4.6-high");
+  assert.equal(resolveModelId("cursor-grok-4.6-high-fast", "high"), "cursor-grok-4.6-high-fast");
+  assert.equal(resolveModelId("cursor-grok-4.6", ""), "cursor-grok-4.6");
 });
 
 test("Cursor HTTP tool continuations honor the selected account, model and response format", async t => {
@@ -1864,7 +1886,8 @@ test("late Cursor catalog refresh cannot reclaim an alias replaced by a foreign 
     globalThis.fetch = async () => new Response(JSON.stringify({ accessToken: "fixture-new-access", refreshToken: "fixture-new-refresh" }), { status: 200 });
     await owned.oauth.refreshToken({ refresh: "fixture-old-refresh" });
     owned = pi.providers.get("cursor-account-2");
-    assert.ok(owned.models.some(model => model.id === "refreshed-model"), "legitimate owned catalogs still update");
+    assert.deepEqual(owned.models, [], "a discovered sibling stays hidden");
+    assert.ok(pi.providers.get("cursor").models.some(model => model.id === "refreshed-model"), "legitimate owned catalogs still update the carrier union");
     const foreign = { ...owned, baseUrl: "https://custom.invalid/v1" };
     pi.providers.set("cursor-account-2", foreign);
     await owned.oauth.refreshToken({ refresh: "fixture-old-refresh" });
@@ -1874,7 +1897,8 @@ test("late Cursor catalog refresh cannot reclaim an alias replaced by a foreign 
     pi.providers.delete("cursor-account-2");
     await accounts.prepare(["cursor-account-2"], registry);
     assert.equal(accounts.owns("cursor-account-2"), true, "relinquished IDs can be prepared again after the foreign definition is removed");
-    assert.ok(pi.providers.get("cursor-account-2").models.some(model => model.id === "saved-future-model"), "reclaimed definitions are primed from saved metadata again");
+    assert.deepEqual(pi.providers.get("cursor-account-2").models, [], "reclaimed siblings stay hidden");
+    assert.ok(pi.providers.get("cursor").models.some(model => model.id === "saved-future-model"), "reclaimed definitions are primed from saved metadata again");
   } finally {
     globalThis.fetch = previousFetch;
     stopProxy();
@@ -1882,6 +1906,200 @@ test("late Cursor catalog refresh cannot reclaim an alias replaced by a foreign 
   }
 });
 
+test("saved Cursor overrides collapse stale effort variants instead of resurrecting ghost models", async () => {
+  const pi = fakePi();
+  const dir = mkdtempSync(join(tmpdir(), "rotator-cursor-ghost-"));
+
+  const state = { ownedAliases: new Set(), savedModelProviders: { "cursor-account-2": { modelOverrides: {
+    "cursor-grok-4.6-high": { name: "Grok 4.6", contextWindow: 200000, maxTokens: 64000 },
+    "cursor-grok-4.6-high-fast": { name: "Grok 4.6 Fast", contextWindow: 200000, maxTokens: 64000 },
+    "cursor-migration-future": { name: "saved newer Cursor model", contextWindow: 200000, maxTokens: 32000 },
+  } } } };
+
+  const registry = { getProvider: id => pi.providers.get(id), getRegisteredProviderConfig: id => pi.providers.get(id) };
+  const accounts = createCursorAccounts(pi, dir, state);
+  writeFileSync(join(dir, "auth.json"), "{}");
+
+  try {
+    await accounts.prepare(["cursor-account-2"], registry);
+    assert.deepEqual(pi.providers.get("cursor-account-2").models, [], "non-carrier siblings list nothing");
+    const models = pi.providers.get("cursor").models;
+    const ids = models.map(model => model.id);
+    assert.ok(!ids.includes("cursor-grok-4.6-high"), "a stale raw effort id is not resurrected as a model");
+    assert.ok(!ids.includes("cursor-grok-4.6-high-fast"), "a stale raw fast effort id is not resurrected as a model");
+    assert.ok(ids.includes("cursor-grok-4.6"), "the collapsed base stays registered from the fallback catalog");
+    assert.ok(ids.includes("cursor-grok-4.6-fast"), "the fast counterpart survives as one collapsed entry");
+    assert.ok(ids.includes("cursor-migration-future"), "genuinely unknown ids are still preserved");
+    assert.ok(models.find(model => model.id === "cursor-grok-4.6-fast").thinkingLevelMap, "the collapsed fast entry carries an effort map, not a frozen label");
+  } finally {
+    stopProxy();
+  }
+});
+
+test("corrupt cursor override shapes never publish junk model ids", async () => {
+  const pi = fakePi();
+  const dir = mkdtempSync(join(tmpdir(), "rotator-cursor-junk-"));
+
+  const state = { ownedAliases: new Set(), savedModelProviders: {
+    cursor: { modelOverrides: { "": { name: "blank" }, "  ": { name: "spaces" } } },
+    "cursor-account-2": { modelOverrides: ["not-an-object"] },
+  } };
+
+  const registry = { getProvider: id => pi.providers.get(id), getRegisteredProviderConfig: id => pi.providers.get(id) };
+  const accounts = createCursorAccounts(pi, dir, state);
+
+  writeFileSync(join(dir, "auth.json"), "{}");
+
+  try {
+    await accounts.prepare(["cursor-account-2"], registry);
+    const ids = pi.providers.get("cursor").models.map(model => model.id);
+    assert.ok(!ids.includes(""), "blank override keys do not register");
+    assert.ok(!ids.includes("  "), "whitespace override keys do not register");
+    assert.ok(!ids.includes("0"), "non-object override sections do not register");
+    assert.ok(ids.includes("cursor-grok-4.6"), "fallback coverage survives corrupt sections");
+  } finally {
+    stopProxy();
+  }
+});
+
+test("cursor carrier sync promotes a base-less alias and demotes it when the base logs in", async () => {
+  const pi = fakePi();
+  const dir = mkdtempSync(join(tmpdir(), "rotator-cursor-carrier-"));
+  const state = { ownedAliases: new Set(), savedModelProviders: {} };
+  const registry = { getProvider: id => pi.providers.get(id), getRegisteredProviderConfig: id => pi.providers.get(id) };
+  const accounts = createCursorAccounts(pi, dir, state);
+  writeFileSync(join(dir, "auth.json"), JSON.stringify({ "cursor-account-2": { type: "oauth", access: token("slot2") } }));
+
+  try {
+    await accounts.prepare(["cursor-account-2"], registry);
+    assert.ok(pi.providers.get("cursor-account-2").models.length > 0, "a base-less carrier alias lists the family catalog");
+    assert.deepEqual(pi.providers.get("cursor").models, [], "the unconfigured base stays hidden");
+    writeFileSync(join(dir, "auth.json"), JSON.stringify({ cursor: { type: "oauth", access: token("base") }, "cursor-account-2": { type: "oauth", access: token("slot2") } }));
+    accounts.syncCarrier(["cursor", "cursor-account-2"], "cursor");
+    assert.ok(pi.providers.get("cursor").models.length > 0, "the base carries once it logs in");
+    assert.deepEqual(pi.providers.get("cursor-account-2").models, [], "the demoted alias hides");
+    assert.ok(pi.providers.get("cursor").models.some(model => model.id === "cursor-grok-4.6"), "the carrier union keeps fallback coverage");
+  } finally {
+    stopProxy();
+  }
+});
+
+test("cursor fast selection resolves hidden siblings through the carrier catalog", async () => {
+  const { selectCursorSpeed } = await import("../lib/command-ui.js");
+  const dir = mkdtempSync(join(tmpdir(), "rotator-cursor-hidden-fast-"));
+  const state = { families: new Map(), config: { fastMode: true } };
+  state.families.set("cursor", { base: "cursor", status: "active", slots: ["cursor-account-2", "cursor-account-3"], sessions: new Map(), cooldowns: new Map(), drained: new Map() });
+
+  const carrier = { provider: "cursor-account-2", id: "gpt-fast", api: "openai-completions" };
+
+  const ctx = {
+    model: { provider: "cursor-account-3", id: "gpt", api: "openai-completions" },
+    thinkingLevel: "high",
+    sessionManager: { getSessionId: () => "hidden-fast" },
+    modelRegistry: { find: (provider, id) => provider === "cursor-account-2" && id === "gpt-fast" ? { ...carrier } : undefined },
+  };
+
+  const pi = {
+    setModel: async model => {
+      ctx.model = model;
+
+      return true;
+    },
+  };
+
+  const message = await selectCursorSpeed(pi, dir, state, true, ctx);
+  assert.equal(ctx.model.provider, "cursor-account-3");
+  assert.equal(ctx.model.id, "gpt-fast");
+  assert.equal(ctx.model.api, "openai-completions");
+  assert.match(message, /Selected Cursor/);
+});
+
+
+test("departed cursor slots leave the union; re-added slots restart from fallback", async () => {
+  const pi = fakePi();
+  const dir = mkdtempSync(join(tmpdir(), "rotator-cursor-union-prune-"));
+  const state = { ownedAliases: new Set(), savedModelProviders: {} };
+  const registry = { getProvider: id => pi.providers.get(id), getRegisteredProviderConfig: id => pi.providers.get(id) };
+  const accounts = createCursorAccounts(pi, dir, state);
+  const previousFetch = globalThis.fetch;
+  writeFileSync(join(dir, "auth.json"), JSON.stringify({ cursor: { type: "oauth", access: token("base") }, "cursor-account-2": { type: "oauth", access: token("slot2") } }));
+  const body = toBinary(GetUsableModelsResponseSchema, create(GetUsableModelsResponseSchema, { models: [{ modelId: "slot2-unique-model", displayName: "Slot2 unique" }] }));
+  setBridgeFactoryForTests(() => {
+    let data, close;
+
+    return { proc: { kill() {} }, write() {}, onData(fn) { data = fn; }, onClose(fn) { close = fn; }, end() { queueMicrotask(() => { data(body); close(0); }); } };
+  });
+  globalThis.fetch = async () => new Response(JSON.stringify({ accessToken: token("new"), refreshToken: "new-refresh" }), { status: 200 });
+
+  try {
+    await accounts.prepare(["cursor", "cursor-account-2"], registry);
+    await pi.providers.get("cursor-account-2").oauth.refreshToken({ refresh: "old-refresh" });
+    assert.ok(pi.providers.get("cursor").models.some(model => model.id === "slot2-unique-model"), "sibling discovery joins the union");
+    accounts.syncCarrier(["cursor"], "cursor");
+    assert.ok(!pi.providers.get("cursor").models.some(model => model.id === "slot2-unique-model"), "departed slots leave the union");
+    accounts.syncCarrier([], null);
+    accounts.syncCarrier(["cursor", "cursor-account-2"], "cursor");
+    assert.deepEqual(pi.providers.get("cursor-account-2").models, []);
+    assert.ok(pi.providers.get("cursor").models.some(model => model.id === "cursor-grok-4.6"), "re-added slots restart from fallback coverage");
+    assert.ok(!pi.providers.get("cursor").models.some(model => model.id === "slot2-unique-model"), "stale discovered ids do not linger");
+  } finally {
+    globalThis.fetch = previousFetch;
+    stopProxy();
+    setBridgeFactoryForTests();
+  }
+});
+
+test("carrier sync never breaks rediscovery when a re-registration is rejected", async () => {
+  const pi = fakePi();
+  const dir = mkdtempSync(join(tmpdir(), "rotator-cursor-sync-fail-"));
+  const state = { ownedAliases: new Set(), savedModelProviders: {} };
+  const registry = { getProvider: id => pi.providers.get(id), getRegisteredProviderConfig: id => pi.providers.get(id) };
+  const accounts = createCursorAccounts(pi, dir, state);
+  writeFileSync(join(dir, "auth.json"), JSON.stringify({ "cursor-account-2": { type: "oauth", access: token("slot2") } }));
+
+  try {
+    await accounts.prepare(["cursor-account-2"], registry);
+    const before = pi.providers.get("cursor-account-2").models.length;
+    assert.ok(before > 0);
+    pi.registerProvider = () => { throw new Error("host rejects re-registration"); };
+
+    assert.doesNotThrow(() => accounts.syncCarrier(["cursor", "cursor-account-2"], "cursor"));
+    assert.equal(pi.providers.get("cursor-account-2").models.length, before, "the working listing survives");
+  } finally {
+    stopProxy();
+  }
+});
+
+test("removing a cursor slot forgets its union share immediately", async () => {
+  const pi = fakePi();
+  const dir = mkdtempSync(join(tmpdir(), "rotator-cursor-forget-"));
+  const state = { ownedAliases: new Set(), savedModelProviders: {} };
+  const registry = { getProvider: id => pi.providers.get(id), getRegisteredProviderConfig: id => pi.providers.get(id) };
+  const accounts = createCursorAccounts(pi, dir, state);
+  const previousFetch = globalThis.fetch;
+  writeFileSync(join(dir, "auth.json"), JSON.stringify({ cursor: { type: "oauth", access: token("base") }, "cursor-account-2": { type: "oauth", access: token("slot2") } }));
+  const body = toBinary(GetUsableModelsResponseSchema, create(GetUsableModelsResponseSchema, { models: [{ modelId: "slot2-unique-model", displayName: "Slot2 unique" }] }));
+  setBridgeFactoryForTests(() => {
+    let data, close;
+
+    return { proc: { kill() {} }, write() {}, onData(fn) { data = fn; }, onClose(fn) { close = fn; }, end() { queueMicrotask(() => { data(body); close(0); }); } };
+  });
+  globalThis.fetch = async () => new Response(JSON.stringify({ accessToken: token("new"), refreshToken: "new-refresh" }), { status: 200 });
+
+  try {
+    await accounts.prepare(["cursor", "cursor-account-2"], registry);
+    await pi.providers.get("cursor-account-2").oauth.refreshToken({ refresh: "old-refresh" });
+    assert.ok(pi.providers.get("cursor").models.some(model => model.id === "slot2-unique-model"));
+    accounts.forgetSlot("cursor-account-2");
+    accounts.syncCarrier(["cursor", "cursor-account-2"], "cursor");
+    assert.ok(!pi.providers.get("cursor").models.some(model => model.id === "slot2-unique-model"), "forgotten slots leave the union without waiting on rediscovery");
+    assert.ok(pi.providers.get("cursor").models.some(model => model.id === "cursor-grok-4.6"), "fallback coverage remains");
+  } finally {
+    globalThis.fetch = previousFetch;
+    stopProxy();
+    setBridgeFactoryForTests();
+  }
+});
 
 test("offline Cursor bootstrap preserves explicitly configured foreign endpoints without a registry", async t => {
   for (const id of ["cursor", "cursor-account-2"]) await t.test(id, async () => {

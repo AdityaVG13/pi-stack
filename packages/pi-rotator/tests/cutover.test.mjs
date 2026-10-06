@@ -53,6 +53,15 @@ test("automatic standalone handoff restores exact logins and catalogs, retains u
   assert.equal(initializeStandalone(f.dir).changed, false);
 });
 
+test("a stale settings default neither blocks handoff nor gets rewritten", () => {
+  const f = fixture();
+  writeFileSync(join(f.dir, "settings.json"), JSON.stringify({ packages: [], defaultProvider: "openai-codex", defaultModel: "model-removed-upstream" }));
+  const result = initializeStandalone(f.dir);
+  assert.equal(result.changed, true, "auth/catalog restoration proceeds");
+  assert.equal(read(f.dir, "settings.json").defaultModel, "model-removed-upstream");
+  assert.match(readFileSync(join(f.dir, "pi-rotator-debug.log"), "utf8"), /"kind":"stale_default"/);
+});
+
 test("fresh install creates no credentials or configuration and configured legacy owners prevent automatic writes", () => {
   const dir = mkdtempSync(join(tmpdir(), "rotator-fresh-"));
   assert.equal(initializeStandalone(dir).changed, false);

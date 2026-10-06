@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { atomicStorage } from "./credentials.js";
 
 export const DEFAULT_STRATEGY = "balanced";
 
@@ -70,10 +71,10 @@ export function saveFastMode(agentDir, enabled) {
 
   if (!raw || Object.getPrototypeOf(raw) !== Object.prototype) throw new Error("pi-rotator config must be a JSON object");
   mkdirSync(join(agentDir, "config", "pi-rotator"), { recursive: true });
-  writeFileSync(path, JSON.stringify({ ...raw, fastMode: enabled === true }, null, 2) + "\n");
+  atomicStorage(path, { ...raw, fastMode: enabled === true });
 }
 
 export function saveConfig(agentDir, config) {
   mkdirSync(join(agentDir, "config", "pi-rotator"), { recursive: true });
-  writeFileSync(configPath(agentDir), JSON.stringify(normalizeConfig(config), null, 2) + "\n");
+  atomicStorage(configPath(agentDir), normalizeConfig(config));
 }

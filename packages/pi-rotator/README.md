@@ -25,11 +25,12 @@ pi install npm:pi-rotator
 8. [Reused Cursor transport](#reused-cursor-transport)
 9. [Request identity and recovery boundaries](#request-identity-and-recovery-boundaries)
 10. [How it works](#how-it-works)
-11. [Evidence](#evidence)
-12. [Layout](#layout)
-13. [Tests](#tests)
-14. [Release notes](#release-notes)
-15. [Not yet](#not-yet)
+11. [Unified model listing](#unified-model-listing)
+12. [Evidence](#evidence)
+13. [Layout](#layout)
+14. [Tests](#tests)
+15. [Release notes](#release-notes)
+16. [Not yet](#not-yet)
 
 ## Use
 
@@ -118,7 +119,7 @@ Other already-running Pi processes need a reload to read the saved preference.
 | OpenAI API | Requests `service_tier: "priority"` on Responses/Chat Completions, including API-key-only sessions |
 | OpenAI Codex | Requests priority for documented GPT-5.4/5.5/5.6 and GPT-6/6.x Astra/Sol/Luna families; subscription credit eligibility remains server-controlled |
 | Anthropic | Adds `speed: "fast"` and `fast-mode-2026-02-01` to existing SDK betas for Claude Opus 5.5, 5 and 4.8 (including dated snapshots) |
-| Cursor | Selects the same account's registered `<current-model>-fast` counterpart; rotation keeps that model id on other accounts |
+| Cursor | Selects the same account's registered `<current-model>-fast` counterpart; rotation keeps that model id on other accounts; run-start reconciliation skips a cooling fast target (journaled, preference stays on) |
 | Kimi | Does not switch models: its HighSpeed offering is a distinct model. Select it explicitly with `/model`; rotation preserves that selection |
 | Qwen, Ollama, other compatible endpoints | Unchanged; no verified same-model fast-tier switch is inferred from API compatibility or a "fast" model name |
 
@@ -128,7 +129,10 @@ account entitlement. In particular, Claude Opus 4.7 rejects fast requests and
 fast-capable. Anthropic's preview requires access; Cursor availability depends
 on the account's catalog and plan. Missing/rejected Cursor variants leave the
 model unchanged and are reported by the command. Cursor preference is also
-applied at the start of a run, never by rewriting an in-flight request.
+applied at the start of a run, never by rewriting an in-flight request. That
+automatic pass skips a fast counterpart whose tier is cooling and journals
+`fast_model_skipped`; an explicit `/rotator fast on` still selects the
+counterpart and fails visibly if the tier rejects it.
 
 `fast off` stops rotator's request additions and, for Cursor, selects a
 registered standard counterpart if available. OpenAI/Codex off observes the
@@ -354,6 +358,7 @@ certify other models, accounts, live login or future remote availability.
 Native builtin aliases may extend their chat catalog with missing IDs from
 `models.json` entries for the same family, including a newer saved default.
 Only model metadata is carried over; proxy URLs, keys and headers are not.
+The merged catalog lists on the family carrier; hidden siblings stay empty.
 Stock model entries remain authoritative and package-owned factories are not
 modified. Each chat/fallback catalog extension uses one native snapshot so a
 second read cannot suppress a saved ID from the catalog being returned. This
@@ -375,8 +380,9 @@ is available, explicit saved transport/auth configuration blocks takeover too.
 On supported SDKs, ownership is reconciled against the currently registered
 legacy configuration; catalog callbacks cannot reclaim a replaced provider.
 
-Discovered catalogs and effort fallback are scoped to the credential that fetched
-them (bearer values are not retained as cache keys). A paused native-tool Run is
+Discovered catalogs are fetched per credential (bearer values are not
+retained as cache keys) and listed as one family union on the carrier;
+effort fallback stays credential-scoped. A paused native-tool Run is
 already authenticated: same-account/same-model streaming continuations retain it,
 while account/model changes rebuild from Pi's transcript with a fresh conversation
 identity. Non-streaming continuations rebuild instead of emitting SSE. This may
@@ -503,6 +509,44 @@ Before every automatic or manual switch, the target is verified against Pi's own
 
 Switches themselves leave the thinking API untouched: the target is captured from the same session's request context, and the next request on the switched model repairs an untouched loss. Pending repair cannot follow a different session or model. If you changed the level yourself in between, that change is adopted, never stomped. No thinking call happens around a switch, because any contact there corrupts the next turn's setup (bisected live); settled reads and writes inside the repair step are safe.
 
+## Unified model listing
+
+With N logins in a family, `/model` lists each model once, not once per
+account. Exactly one slot per family -- the **carrier** -- carries the
+visible catalog; owned siblings register with empty catalogs and stay
+routable underneath. Selecting a model means that model on any healthy
+account; rotation keeps serving it across logins without re-picking.
+
+The carrier is the lowest-numbered slot with live configured credentials
+(usually the base id), falling back to the first slot when no snapshot
+says otherwise, so a family never loses its listing to one stale login.
+It follows login/logout/remove: logging out the base promotes the next
+healthy sibling, and the journal's `rediscover` lines name the current
+carrier per family. Cursor carriers list the union of every slot's
+discovered catalog plus saved newer ids (until that account reads its
+live catalog, which supersedes them), so a model any account serves
+is selectable; requests still authenticate per slot and fail over to an
+account that serves the pick.
+
+Three boundaries stay visible. Slots rotator does not own -- adopted
+package/custom endpoints and legacy-transport families -- keep their own
+listings; hiding only what you own is a hard rule. Hand-written per-slot
+`models` entries still merge, but need explicit `api`/`baseUrl` like any
+custom definition -- they can no longer inherit them from the hidden native
+catalog. The footer and transcript keep naming the serving account
+(`cursor-account-2/model`), so you can always see which login did the work.
+While serving on a hidden slot the picker cannot pre-highlight the current
+entry; selecting the listed one moves serving to the carrier and rotation
+continues from there. `--models` scopes that name a hidden
+slot warn and stop matching; a saved default pointing at one gets a one-time
+pointer to the carrier instead of a silent fallback. Re-scope, or set the
+base entry as the default again, once. And sessions that ended on a hidden
+slot are repaired at session start: core restore cannot resolve an unlisted
+id and would fall back to the default model, so rotator re-applies the
+branch's implied slot through the normal verified handoff (journaled as a
+`route` with reason `hidden-restore`, thinking deferred as usual). Listed,
+foreign, virtual and unknown selections are left to core untouched.
+
 ## Evidence
 
 Every request and routing decision is journaled to `~/.pi/agent/pi-rotator-journal.jsonl` (hashes and counts only, never bodies or credentials). Raw provider/exception messages are omitted; event/account metadata and controlled routing reasons remain. Log serialization or write failures are cosmetic and cannot stop routing:
@@ -511,7 +555,9 @@ Every request and routing decision is journaled to `~/.pi/agent/pi-rotator-journ
 |------|---------|
 | `request` | Fingerprint of the tier-shaped payload per slot, plus `fastRequested` and `fastChanged`; requested speed is not confirmation of backend speed |
 | `fast_mode` / `fast_model` | Saved preference or confirmed/rejected Cursor model selection; no request bodies |
-| `route` | From/to slot, reason (`rotate`, `exhausted`, `manual`), warmth |
+| `fast_model_skipped` | Automatic fast reconciliation skipped a cooling fast tier (preference stays on) |
+| `route` | From/to slot, reason (`rotate`, `exhausted`, `manual`, `hidden-restore`), warmth |
+| `rediscover` | Family slots, status, mechanism and the slot carrying the visible catalog (`carrier`) |
 | `switch_rejected` / `switch_error` | The switch never landed (a `route` entry is the intent, these are the outcome) |
 | `slot_skipped` | A picked slot Pi cannot serve right now (`unregistered` or `unauthorized`); it sits out while the next candidate is tried |
 | `turn_failed` | A low-level run failed, with the failed slot and error excerpt (including pre-request auth/model errors) |
@@ -574,6 +620,30 @@ install/upgrade fixtures use fake credentials and temporary agent directories.
 Pure slot, strategy, router, and config logic with unit tests; the Pi edge (`registerProvider`, `setModel`, hooks) lives in `index.js` and `lib/` runtime/account modules.
 
 ## Release notes
+
+### 0.4.0
+
+`/model` lists each model once per family no matter how many logins serve
+it. Exactly one slot per family -- the carrier, usually the base id --
+carries the visible catalog; owned siblings register empty and stay
+routable underneath, and Cursor carriers list the union of every slot's
+discovered catalog. Rotation targets resolve through sibling definitions,
+so hidden slots keep serving with full model defs. Sessions that ended on
+a hidden slot are repaired at session start instead of falling back to the
+default model, and a settings default that names one gets a one-time pointer
+to the carrier. Adopted package endpoints and legacy-transport families keep
+their own listings; the footer keeps naming the serving account.
+
+Automatic Cursor fast reconciliation no longer flips onto a cooling fast
+tier (the skip is journaled; explicit `/rotator fast on` still honors
+consent), landed automatic flips are announced, and legacy raw Cursor ids
+persisted as overrides collapse onto their effort-grouped bases instead of
+resurrecting ghost models. Startup no longer fails on a stale settings
+default or a malformed cursor credential: the default passes through with
+a debug breadcrumb, and the bad slot fails verify-and-cool while the family
+keeps routing. Saved-catalog ingestion sanitizes every field, config writes
+are atomic, and `prepareMigration` degrades on misshapen sections instead of
+throwing.
 
 ### 0.2.2
 

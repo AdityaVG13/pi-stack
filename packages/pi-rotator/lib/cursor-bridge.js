@@ -99,11 +99,16 @@ export async function setupCursorSubscription(pi, options) {
     registerCatalog(pi, mod, id, proxyPort, mod.FALLBACK_MODELS, options);
   }
   // Registration/preparation is offline; login and refresh retain catalog discovery.
-  if (options.discover === false) return proxyPort;
+  // reregister reads the live proxy port per call, so handles survive rebinds.
+  const handle = {
+    reregister: (id, models) => registerCatalog(pi, mod, id, proxyPort, models, options),
+  };
+
+  if (options.discover === false) return handle;
   void discoverCatalog(pi, mod, ids, proxyPort, options).catch(error => {
     options.log?.("cursor_catalog", { outcome: "crashed", reason: catalogFailure(error) });
   });
-  return proxyPort;
+  return handle;
 }
 
 /**
@@ -145,20 +150,46 @@ function catalogFailure(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-// Re-registration must retain discovery/duplicate-login callbacks. A discovered
-// catalog belongs only to the credential that fetched it, not every sibling slot.
-function registerCatalog(pi, mod, id, port, models, options) {
-  // Import/bind/discovery yield: recheck immediately before replacing a provider definition.
-  if (options.canRegister?.(id) === false) throw new Error("Cursor provider is foreign-owned: " + id);
+// Re-registration must retain discovery/duplicate-login callbacks. Discovered
+// catalogs feed the family union for LISTING only; every request still
+// authenticates as its own slot, and rotation fails over to an account
+// that actually serves the selected model.
+function slotCatalog(options, id, models) {
+  return options.resolveSlotCatalog ? options.resolveSlotCatalog(id, models) : models;
+}
+
+function registerOne(pi, mod, id, port, models, options) {
   mod.registerCursorProvider(pi, id, port, models, {
     rejectDuplicateLogin: options.rejectDuplicateLogin,
     onModelsDiscovered: discovered => {
+      options.markDiscovered?.(id);
       registerCatalog(pi, mod, id, port, discovered, options);
       options.onProvision?.([id], port, discovered);
     }
   });
+}
+
+function registerCatalog(pi, mod, id, port, models, options) {
+  // Import/bind/discovery yield: recheck immediately before replacing a provider definition.
+  if (options.canRegister?.(id) === false) throw new Error("Cursor provider is foreign-owned: " + id);
+  registerOne(pi, mod, id, port, slotCatalog(options, id, models), options);
   // Claim only registrations that succeeded, so partial setup remains safely retryable.
   options.registered?.add(id);
+  // A sibling discovery can grow the family union: re-list the carrier.
+  // Best effort after a claimed registration; the union converges on the
+  // next discovery or carrier sync regardless.
+  const carrier = options.resolveSlotCatalog && options.carrierId?.();
+
+  if (carrier && carrier !== id) {
+    try {
+      if (options.canRegister?.(carrier) !== false) {
+        registerOne(pi, mod, carrier, port, slotCatalog(options, carrier), options);
+        options.registered?.add(carrier);
+      }
+    } catch (error) {
+      options.log?.("cursor_catalog", { outcome: "carrier-refresh-failed", provider: carrier, reason: catalogFailure(error) });
+    }
+  }
 }
 
 async function provisionDiscoveredCatalog(pi, mod, proxyPort, id, entry, options) {
@@ -167,6 +198,7 @@ async function provisionDiscoveredCatalog(pi, mod, proxyPort, id, entry, options
     options.log?.("cursor_catalog", { outcome: "empty", provider: id });
     return false;
   }
+  options.markDiscovered?.(id);
   registerCatalog(pi, mod, id, proxyPort, models, options);
   options.onProvision?.([id], proxyPort, models);
   options.log?.("cursor_catalog", { outcome: "discovered", provider: id, models: models.length });

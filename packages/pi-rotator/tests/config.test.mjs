@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -112,4 +112,5 @@ it("round-trips reserved JSON family names and preserves metadata during fast-mo
   saveFastMode(dir, true);
   assert.deepEqual(JSON.parse(readFileSync(configPath(dir), "utf8")), { ...raw, fastMode: true });
   assert.deepEqual(loadConfig(dir).ttlByFamily, expected);
+  assert.deepEqual(readdirSync(join(dir, "config", "pi-rotator")), ["config.json"], "atomic writes leave no temp droppings");
 });

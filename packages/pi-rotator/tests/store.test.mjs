@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applySwitch } from "../lib/switch.js";
+import { applySwitch, branchSelection, repairHiddenRestore, resolveTarget } from "../lib/switch.js";
 import { safeOn } from "../lib/support.js";
 import {
   EXHAUSTED_STATUS,
@@ -132,6 +132,87 @@ describe("store", () => {
 
     assert.equal(sessions.has("fresh"), true);
     assert.equal(sessions.has("stale"), false);
+  });
+
+  it("resolveTarget reuses a sibling slot def with the serving provider rewritten", () => {
+    const carrier = { provider: "openai-codex", id: "gpt-6-sol", api: "openai-codex-responses" };
+    const ctx = { modelRegistry: { find: (provider, id) => provider === "openai-codex" && id === "gpt-6-sol" ? carrier : undefined } };
+    const direct = resolveTarget(ctx, "openai-codex", "gpt-6-sol", ["openai-codex", "openai-codex-account-2"]);
+    assert.equal(direct.full, true);
+    assert.equal(direct.target, carrier);
+    const hidden = resolveTarget(ctx, "openai-codex-account-2", "gpt-6-sol", ["openai-codex", "openai-codex-account-2"]);
+    assert.equal(hidden.full, true);
+    assert.equal(hidden.target.provider, "openai-codex-account-2");
+    assert.equal(hidden.target.api, "openai-codex-responses");
+    assert.equal(carrier.provider, "openai-codex", "the carrier def is never mutated");
+  });
+
+  it("resolveTarget searches the base then every slot before degrading to a bare pair", () => {
+    const def = { provider: "xai-account-2", id: "grok", api: "xai", name: "Grok (account 2)" };
+    const ctx = { modelRegistry: { find: (provider, id) => provider === "xai-account-2" && id === "grok" ? def : undefined } };
+    const rewritten = resolveTarget(ctx, "xai-account-3", "grok", ["xai-account-2", "xai-account-3"]);
+    assert.equal(rewritten.full, true);
+    assert.equal(rewritten.target.provider, "xai-account-3");
+    assert.equal(rewritten.target.name, "Grok (account 3)", "displays name the serving login");
+    assert.equal(def.name, "Grok (account 2)", "the carrier def is never mutated");
+    assert.equal(resolveTarget(ctx, "xai", "grok", ["xai-account-2", "xai-account-3"]).target.name, "Grok");
+    const bare = resolveTarget(ctx, "xai-account-3", "unknown-model", ["xai-account-2", "xai-account-3"]);
+    assert.equal(bare.full, false);
+    assert.deepEqual(bare.target, { provider: "xai-account-3", id: "unknown-model" });
+    const throwing = resolveTarget({ modelRegistry: { find: () => { throw new Error("registry down"); } } }, "x", "y", ["x"]);
+    assert.equal(throwing.full, false);
+  });
+
+  it("branchSelection prefers the last model change, else the latest serving id", () => {
+    const change = { type: "model_change", provider: "openai-codex-account-2", modelId: "gpt-6-sol" };
+    const response = id => ({ type: "message", message: { role: "assistant", provider: "openai-codex", model: id, api: "openai-codex-responses" } });
+    assert.deepEqual(branchSelection([response("old"), change], () => undefined), { provider: "openai-codex-account-2", modelId: "gpt-6-sol" });
+    assert.deepEqual(branchSelection([change, response("gpt-6-sol")], () => undefined), { provider: "openai-codex", modelId: "gpt-6-sol" });
+    assert.deepEqual(branchSelection([response("gpt-6-sol")], () => undefined), { provider: "openai-codex", modelId: "gpt-6-sol" });
+    assert.equal(branchSelection([], () => undefined), undefined);
+    assert.equal(branchSelection(null), undefined);
+    assert.equal(branchSelection([{ type: "model_change" }, { type: "message", message: { role: "assistant" } }]), undefined);
+    const virtual = () => ({ api: "pi-virtual" });
+    assert.deepEqual(
+      branchSelection([{ type: "model_change" }, { type: "message", message: { role: "assistant", provider: "p", model: "m" } }], virtual),
+      { provider: "p", modelId: "m" },
+      "a malformed change cannot hold a virtual selection",
+    );
+  });
+
+  it("branchSelection survives a throwing model lookup", () => {
+    const change = { type: "model_change", provider: "openai-codex", modelId: "router" };
+    const response = { type: "message", message: { role: "assistant", provider: "openai-codex-account-2", model: "gpt-6-sol", api: "openai-codex-responses" } };
+    const throwing = () => { throw new Error("registry down"); };
+
+    assert.deepEqual(branchSelection([change, response], throwing), { provider: "openai-codex-account-2", modelId: "gpt-6-sol" });
+  });
+
+  it("branchSelection leaves held virtual selections to their router", () => {
+    const change = { type: "model_change", provider: "openai-codex", modelId: "router" };
+    const response = { type: "message", message: { role: "assistant", provider: "openai-codex-account-2", model: "gpt-6-sol", api: "openai-codex-responses" } };
+    const virtual = () => ({ api: "pi-virtual" });
+    assert.deepEqual(branchSelection([change, response], virtual), { provider: "openai-codex", modelId: "router" });
+    assert.deepEqual(branchSelection([change, response], () => undefined), { provider: "openai-codex-account-2", modelId: "gpt-6-sol" });
+    const virtualResponse = { type: "message", message: { role: "assistant", provider: "openai-codex", model: "router", api: "pi-virtual" } };
+    assert.deepEqual(branchSelection([virtualResponse, response], virtual), { provider: "openai-codex-account-2", modelId: "gpt-6-sol" });
+  });
+
+  it("restore repair degrades cleanly when the host branch or registry throws", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "rotator-restore-host-"));
+    const family = { base: "openai-codex", status: "active", slots: ["openai-codex", "openai-codex-account-2"], sessions: new Map(), cooldowns: new Map(), drained: new Map() };
+    const state = { families: new Map([["openai-codex", family]]) };
+    const throwingBranch = { sessionManager: { getSessionId: () => "s", getBranch: () => { throw new Error("branch down"); } } };
+
+    assert.equal(await repairHiddenRestore({}, dir, state, throwingBranch), "no-branch");
+
+    const throwingRegistry = {
+      model: { provider: "openai-codex", id: "other" },
+      sessionManager: { getSessionId: () => "s", getBranch: () => [{ type: "model_change", provider: "openai-codex-account-2", modelId: "gpt-6-sol" }] },
+      modelRegistry: { find: () => { throw new Error("registry down"); } },
+    };
+
+    assert.equal(await repairHiddenRestore({}, dir, state, throwingRegistry), "unknown-model");
   });
 
   it("pins the exhausted statuses that trigger mid-turn rescue", () => {
