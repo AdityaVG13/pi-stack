@@ -12,7 +12,7 @@ Current versions this file was written against:
 | [pi-supernova](../packages/pi-supernova) | 0.11.0 | One CodeMode tool: `read` / `edit` / `write` / `bash` |
 | [pi-rotator](../packages/pi-rotator) | 0.3.0 | Standalone account management and rotation, including Cursor |
 | [pi-cliffcompaction](../packages/pi-cliffcompaction) | 0.2.0 | Mechanical autocompaction (no LLM summary) |
-| [pi-model-sync](../packages/pi-model-sync) | 0.1.0 | `/model-sync` live provider catalogs into `models.json` |
+| [pi-model-sync](../packages/pi-model-sync) | 0.1.1 | `/model-sync` live provider catalogs into `models.json` |
 | [pi-lakers-theme](../packages/pi-lakers-theme) | 0.2.0 | Pi theme |
 
 `pi-indexer` and `pi-agent-cache` stay in the tree and are not published. Do not treat them as npm install surfaces.
