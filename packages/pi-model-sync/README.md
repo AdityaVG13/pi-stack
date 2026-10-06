@@ -21,7 +21,7 @@ Pi only. OMP already has `@oh-my-pi/pi-catalog`.
 ```bash
 pi install npm:pi-model-sync
 # from a checkout:
-pi install ./packages/pi-model-sync
+pi install ./pi-stack/packages/pi-model-sync
 ```
 
 ## Use
@@ -42,8 +42,8 @@ model-sync: 12 providers
   vercel-ai-gateway: +1 ~0 -0 =0 (390 live)
   ! vercel-ai-gateway/stealth/pixel-canary: prompts may be retained for training
 +added ~updated -removed =kept (1 added, 0 updated, 0 removed)
-backup: /Users/you/.pi/agent/models.json.bak-20260926T023000Z
-wrote /Users/you/.pi/agent/models.json
+backup: ~/.pi/agent/models.json.bak-20260926T023000Z
+wrote ~/.pi/agent/models.json
 catalog live now; no restart needed
 ```
 
