@@ -292,7 +292,16 @@ export function createCursorAccounts(pi, dir, state) {
     const ids = Object.keys(readAuth()).filter(id => parseSlotId(id)?.base === "cursor");
     const ready = await prepare(ids, registry);
 
-    if (ready && registry?.refresh) await registry.refresh({ providers: ids, allowNetwork: false });
+    // Availability refresh is best effort and usable-credentials-only: a
+    // throwing or confused host must not fail session start after a
+    // successful preparation.
+    if (ready && registry?.refresh) {
+      try {
+        await registry.refresh({ providers: credentialIds(), allowNetwork: false });
+      } catch {
+        appendDebug(dir, "cursor_refresh_failed", {});
+      }
+    }
   }
 
   return { owns, prepare, restore, credentialIds, syncCarrier, forgetSlot };

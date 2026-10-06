@@ -2015,6 +2015,33 @@ test("cursor fast selection resolves hidden siblings through the carrier catalog
 });
 
 
+test("cursor restore survives a throwing availability refresh and refreshes usable logins only", async () => {
+  const pi = fakePi();
+  const dir = mkdtempSync(join(tmpdir(), "rotator-cursor-restore-refresh-"));
+  const state = { ownedAliases: new Set(), savedModelProviders: {} };
+  const refreshed = [];
+  const registry = {
+    getProvider: id => pi.providers.get(id),
+    getRegisteredProviderConfig: id => pi.providers.get(id),
+    refresh: async options => {
+      refreshed.push(options.providers);
+
+      throw new Error("host refresh down");
+    },
+  };
+  const accounts = createCursorAccounts(pi, dir, state);
+  writeFileSync(join(dir, "auth.json"), JSON.stringify({ "cursor-account-2": { type: "oauth", access: token("slot2") }, "cursor-account-3": { type: "oauth" } }));
+
+  try {
+    await accounts.restore(registry);
+    assert.ok(pi.providers.has("cursor-account-2"), "preparation lands before the failed refresh");
+    assert.ok(pi.providers.has("cursor-account-3"), "malformed siblings still prepare");
+    assert.deepEqual(refreshed, [["cursor-account-2"]], "refresh targets usable logins, never malformed entries");
+  } finally {
+    stopProxy();
+  }
+});
+
 test("departed cursor slots leave the union; re-added slots restart from fallback", async () => {
   const pi = fakePi();
   const dir = mkdtempSync(join(tmpdir(), "rotator-cursor-union-prune-"));
