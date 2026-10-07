@@ -1984,42 +1984,12 @@ test("cursor carrier sync promotes a base-less alias and demotes it when the bas
   }
 });
 
-test("cursor fast selection resolves hidden siblings through the carrier catalog", async () => {
-  const { selectCursorSpeed } = await import("../lib/command-ui.js");
-  const dir = mkdtempSync(join(tmpdir(), "rotator-cursor-hidden-fast-"));
-  const state = { families: new Map(), config: { fastMode: true } };
-  state.families.set("cursor", { base: "cursor", status: "active", slots: ["cursor-account-2", "cursor-account-3"], sessions: new Map(), cooldowns: new Map(), drained: new Map() });
-
-  const carrier = { provider: "cursor-account-2", id: "gpt-fast", api: "openai-completions" };
-
-  const ctx = {
-    model: { provider: "cursor-account-3", id: "gpt", api: "openai-completions" },
-    thinkingLevel: "high",
-    sessionManager: { getSessionId: () => "hidden-fast" },
-    modelRegistry: { find: (provider, id) => provider === "cursor-account-2" && id === "gpt-fast" ? { ...carrier } : undefined },
-  };
-
-  const pi = {
-    setModel: async model => {
-      ctx.model = model;
-
-      return true;
-    },
-  };
-
-  const message = await selectCursorSpeed(pi, dir, state, true, ctx);
-  assert.equal(ctx.model.provider, "cursor-account-3");
-  assert.equal(ctx.model.id, "gpt-fast");
-  assert.equal(ctx.model.api, "openai-completions");
-  assert.match(message, /Selected Cursor/);
-});
-
-
 test("cursor restore survives a throwing availability refresh and refreshes usable logins only", async () => {
   const pi = fakePi();
   const dir = mkdtempSync(join(tmpdir(), "rotator-cursor-restore-refresh-"));
   const state = { ownedAliases: new Set(), savedModelProviders: {} };
   const refreshed = [];
+
   const registry = {
     getProvider: id => pi.providers.get(id),
     getRegisteredProviderConfig: id => pi.providers.get(id),
@@ -2029,6 +1999,7 @@ test("cursor restore survives a throwing availability refresh and refreshes usab
       throw new Error("host refresh down");
     },
   };
+
   const accounts = createCursorAccounts(pi, dir, state);
   writeFileSync(join(dir, "auth.json"), JSON.stringify({ "cursor-account-2": { type: "oauth", access: token("slot2") }, "cursor-account-3": { type: "oauth" } }));
 
@@ -2409,6 +2380,37 @@ test("Cursor protobuf and MCP maps preserve special JSON keys end to end", async
     assert.equal(Object.getPrototypeOf(map), Object.prototype);
     assert.deepEqual(Object.fromEntries(Object.entries(map).map(([name, value]) => [name, toJson(ValueSchema, fromBinary(ValueSchema, value))])), args, "history serialization cannot silently remove arguments");
   });
+});
+
+test("cursor-minted dual tool ids round-trip verbatim and match results by the full id", async () => {
+  const { handleExecMessage } = await import("../lib/cursor/exec.js");
+  const { completionToolCall } = await import("../lib/cursor/completion.js");
+  const joined = "call-1afe950d-a6d1-4c3d-8de3-e12a47cb982d-4\nfc_p49ASx6-4SRMt5-e204baa9-aws_ue1_0";
+  const seen = [];
+
+  const handled = handleExecMessage(
+    { id: 7, execId: "exec-fixture", message: { case: "mcpArgs", value: { toolName: "supernova", toolCallId: joined, providerIdentifier: "pi" } } },
+    [{ name: "supernova" }],
+    () => {},
+    exec => seen.push(exec),
+  );
+
+  assert.equal(handled, true);
+  assert.equal(seen[0].toolCallId, joined, "the wire id is used verbatim, never split or sanitized");
+
+  const nativeSeen = [];
+
+  const nativeHandled = handleExecMessage(
+    { id: 8, execId: "exec-native", message: { case: "writeArgs", value: { path: "/fixture.txt", fileText: "x", toolCallId: joined } } },
+    [{ name: "write" }],
+    () => {},
+    exec => nativeSeen.push(exec),
+  );
+
+  assert.equal(nativeHandled, true);
+  assert.equal(nativeSeen[0].toolCallId, joined, "native execs keep the wire id verbatim too");
+  assert.equal(completionToolCall(seen[0], 0).id, joined, "the OpenAI chunk carries the exact id Pi will echo back");
+  assert.ok(new Map([[joined, { content: "ok" }]]).has(seen[0].toolCallId), "result matching keys on the full id");
 });
 
 test("Cursor diagnostic failures cannot prevent shutdown or spill private payloads to stderr", () => {

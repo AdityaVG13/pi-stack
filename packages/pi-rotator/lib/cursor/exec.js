@@ -105,6 +105,10 @@ function nativeToolCallId(args) {
   return typeof args.toolCallId === "string" && args.toolCallId ? args.toolCallId : crypto.randomUUID();
 }
 
+// Cursor mints dual tool ids ("call-<uuid>-<n>\nfc-<internal>_<i>").
+// Cursor keys result frames by exec identity, but proxy-side matching,
+// history steps and Pi echo all share this exact string: use the wire
+// value verbatim everywhere and never split, trim or re-key it.
 export function handleExecMessage(execMsg, mcpTools, sendFrame, onMcpExec) {
   const {
     case: execCase,

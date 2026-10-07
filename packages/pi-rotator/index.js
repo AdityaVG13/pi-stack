@@ -50,7 +50,7 @@ export default function piRotator(pi) {
   if (mode === "standalone") registerStandalone(pi, dir, state, owners);
   bindRoutingHooks(pi, dir, state, startup);
   pi.registerCommand("rotator", {
-    description: "Accounts, logins, limits and routing; add | next | fast | status | refresh | accounts | limits | remove | reset | cutover",
+    description: "Accounts, logins, limits and routing; add | next | status | refresh | accounts | limits | remove | reset | cutover",
     getArgumentCompletions: prefix => commandCompletions(prefix, state.nativeFamilies),
     handler: (raw, ctx) => onCommand(pi, dir, state, config, raw, ctx),
   });

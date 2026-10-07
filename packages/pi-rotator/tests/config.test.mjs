@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,7 +11,6 @@ import {
   configPath,
   loadConfig,
   saveConfig,
-  saveFastMode,
 } from "../lib/config.js";
 
 describe("config", () => {
@@ -24,22 +23,14 @@ describe("config", () => {
       ttlByFamily: {},
       debugLog: true,
       announceSwitches: false,
-      fastMode: false,
     };
 
     assert.deepEqual(normalizeConfig(null), expected);
     assert.deepEqual(normalizeConfig(undefined), expected);
     assert.deepEqual(normalizeConfig(42), expected);
     assert.deepEqual(normalizeConfig("nope"), expected);
+    assert.equal(normalizeConfig({ fastMode: true }).fastMode, undefined, "retired preferences are ignored, never resurrected");
     assert.equal(DEFAULT_STRATEGY, "balanced");
-  });
-
-  it("fast mode requires an explicit boolean opt-in", () => {
-    assert.equal(normalizeConfig({ fastMode: true }).fastMode, true);
-
-    for (const fastMode of [false, undefined, null, "on", 1]) {
-      assert.equal(normalizeConfig({ fastMode }).fastMode, false);
-    }
   });
 
   it("accepts every strategy and rejects anything else", () => {
@@ -101,16 +92,14 @@ describe("config", () => {
   });
 });
 
-it("round-trips reserved JSON family names and preserves metadata during fast-mode updates", () => {
+it("round-trips reserved JSON family names with atomic writes", () => {
   const dir = mkdtempSync(join(tmpdir(), "rotator-config-keys-"));
   const ttlByFamily = JSON.parse('{"constructor":1234.9,"__proto__":2345.8,"toString":3456.7,"openai-codex":4567.6}');
   const expected = Object.fromEntries(Object.entries(ttlByFamily).map(([name, ms]) => [name, Math.floor(ms)]));
   saveConfig(dir, { ttlByFamily });
   assert.deepEqual(loadConfig(dir).ttlByFamily, expected, "saving one valid family must not erase other TTL overrides");
-  const raw = { ...JSON.parse(readFileSync(configPath(dir), "utf8")), constructor: "fixture-metadata" };
-  writeFileSync(configPath(dir), JSON.stringify(raw));
-  saveFastMode(dir, true);
-  assert.deepEqual(JSON.parse(readFileSync(configPath(dir), "utf8")), { ...raw, fastMode: true });
+  saveConfig(dir, { ...loadConfig(dir), strategy: "failover" });
+  assert.equal(JSON.parse(readFileSync(configPath(dir), "utf8")).strategy, "failover");
   assert.deepEqual(loadConfig(dir).ttlByFamily, expected);
   assert.deepEqual(readdirSync(join(dir, "config", "pi-rotator")), ["config.json"], "atomic writes leave no temp droppings");
 });

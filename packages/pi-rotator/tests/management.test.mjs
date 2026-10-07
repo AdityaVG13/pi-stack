@@ -147,7 +147,7 @@ test("response quota and drain stay attached to the request account after a manu
   const f = fixture();
   const model = { provider: "openai-codex", id: "same-model", api: "openai-codex-responses" };
   Object.assign(f.family, { status: "active", ttlMs: 300000, strategy: "balanced" });
-  Object.assign(f.state, { requests: new Map(), config: { ...f.state.config, fastMode: false, debugLog: false }, usage: createAccountUsage(f.dir, f.state), usageEnabled: false });
+  Object.assign(f.state, { requests: new Map(), config: { ...f.state.config, debugLog: false }, usage: createAccountUsage(f.dir, f.state), usageEnabled: false });
   const handlers = new Map();
   const pi = { on: (name, handler) => handlers.set(name, handler) };
   const ctx = { model, sessionManager: { getSessionId: () => "fixture-session" } };

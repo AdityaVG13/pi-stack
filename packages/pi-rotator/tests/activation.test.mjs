@@ -1808,69 +1808,35 @@ describe("activation", () => {
 });
 
 
-describe("fast mode", () => {
-  it("persists request-tier preferences across accounts, providers, restart and off", async () => {
+describe("tier observation", () => {
+  it("never shapes request payloads; observed tier markers journal as-is", async () => {
     const dir = agentDirWith(transportFiles({
-      "auth.json": { [CODEX]: {}, [CODEX2]: {}, anthropic: {}, "anthropic-account-2": {} },
+      "auth.json": { [CODEX]: {}, [CODEX2]: {} },
     }));
 
     const pi = fakePi();
 
     piRotator(pi);
     await fire(pi, "session_start");
-    const command = pi.commands.get("rotator").handler;
     const content = Object.freeze([{ role: "user", content: "stable prefix" }]);
-    const payload = Object.freeze({ model: MODEL, input: content, reasoning: { effort: "high" }, prompt_cache_key: "stable", betas: Object.freeze(["existing-beta"]) });
-    const codex = provider => ctx(provider, "fast", { model: { provider, id: MODEL, api: "openai-codex-responses" } });
+    const payload = Object.freeze({ model: MODEL, input: content });
+    const codex = provider => ctx(provider, "shaping", { model: { provider, id: MODEL, api: "openai-codex-responses" } });
 
     assert.equal(await fire(pi, "before_provider_request", { payload }, codex(CODEX)), undefined);
-    writeRotatorConfig(dir, { fastMode: false, ttlMs: 777777, externalSetting: { keep: true } });
-    assert.match(await command("fast on", codex(CODEX)), /premium|credits/i);
-    const saved = JSON.parse(readFileSync(join(dir, "config/pi-rotator/config.json")));
-
-    assert.equal(saved.ttlMs, 777777);
-    assert.deepEqual(saved.externalSetting, { keep: true });
-    assert.equal(JSON.parse(readFileSync(join(dir, "config/pi-rotator/config.json"))).fastMode, true);
-
-    for (const provider of [CODEX, CODEX2]) {
-      const result = await fire(pi, "before_provider_request", { payload }, codex(provider));
-
-      assert.deepEqual(result, { ...payload, service_tier: "priority" });
-      assert.equal(result.input, content);
-    }
-
-    const requests = ofKind(dir, "request").slice(-2);
-
-    assert.equal(requests[0].fp, requests[1].fp);
-    assert.equal(requests[0].fastRequested, true);
-
-    for (const provider of ["anthropic", "anthropic-account-2"]) {
-      const model = { provider, id: "claude-opus-5-5", api: "anthropic-messages" };
-      const result = await fire(pi, "before_provider_request", { payload }, ctx(provider, "claude", { model }));
-
-      assert.equal(result.speed, "fast");
-      assert.deepEqual(result.betas, ["existing-beta", "fast-mode-2026-02-01"]);
-      assert.equal(result.input, content);
-      assert.equal(result.model, payload.model, "no hidden wire model substitution");
-    }
-
-    const restarted = fakePi();
-
-    piRotator(restarted);
-    await fire(restarted, "session_start");
-    assert.equal((await fire(restarted, "before_provider_request", { payload }, codex(CODEX2))).service_tier, "priority");
-    await command("fast off", codex(CODEX));
-    assert.equal(await fire(pi, "before_provider_request", { payload }, codex(CODEX)), undefined);
-    assert.equal(ofKind(dir, "request").at(-1).fastChanged, true);
-    assert.equal(JSON.parse(readFileSync(join(dir, "config/pi-rotator/config.json"))).fastMode, false);
-    assert.equal(payload.service_tier, undefined);
-    assert.deepEqual(payload.betas, ["existing-beta"]);
+    assert.equal(await fire(pi, "before_provider_request", { payload }, codex(CODEX2)), undefined);
+    const plain = ofKind(dir, "request").slice(-2);
+    assert.equal(plain[0].fp, plain[1].fp);
+    assert.equal(plain[0].fastRequested, false);
+    const tiered = Object.freeze({ model: MODEL, input: content, service_tier: "priority" });
+    assert.equal(await fire(pi, "before_provider_request", { payload: tiered }, codex(CODEX)), undefined, "Pi-native shaping passes through untouched");
+    const observed = ofKind(dir, "request").at(-1);
+    assert.equal(observed.fastRequested, true);
+    assert.equal(observed.fastChanged, true);
+    assert.equal(tiered.service_tier, "priority", "observed payload is never rewritten");
   });
 
-  it("does not invent fast flags or substitute Kimi/Qwen models", async () => {
-    const dir = agentDirWith(transportFiles());
-
-    writeRotatorConfig(dir, { fastMode: true });
+  it("passes every provider payload through untouched and switches nothing", async () => {
+    agentDirWith(transportFiles());
     const pi = fakePi();
 
     piRotator(pi);
@@ -1895,122 +1861,18 @@ describe("fast mode", () => {
     }
 
     assert.deepEqual(pi.setModelCalls, []);
-    assert.match(await pi.commands.get("rotator").handler("fast maybe", ctx(CODEX)), /on.*off.*status/);
-    assert.equal(JSON.parse(readFileSync(join(dir, "config/pi-rotator/config.json"))).fastMode, true);
+    assert.deepEqual(payload, { model: "kept", messages: [{ role: "user", content: "task" }] }, "no provider payload is ever rewritten");
   });
 
-  it("uses only registered Cursor fast variants and keeps them through rotation", async () => {
-    const dir = agentDirWith(transportFiles({ "auth.json": { cursor: {}, "cursor-account-2": {} } }));
-
-    writeRotatorConfig(dir, { strategy: "round-robin" });
-    const pi = fakePi();
-    const models = new Map();
-
-    for (const provider of ["cursor", "cursor-account-2"]) {
-      for (const id of ["gpt-5.4", "gpt-5.4-fast"]) models.set(provider + "/" + id, { provider, id, api: "openai-completions" });
-    }
-
-    const live = ctx("cursor", "cursor-fast", {
-      model: models.get("cursor/gpt-5.4"),
-      modelRegistry: { find: (provider, id) => models.get(provider + "/" + id) },
-      thinkingLevel: "high",
-    });
-
-    pi.setModel = async model => {
-      await tick();
-      pi.setModelCalls.push(model);
-
-      if (!models.has(model.provider + "/" + model.id)) return false;
-
-      live.model = model;
-
-      return true;
-    };
-
-    piRotator(pi);
-    await fire(pi, "session_start");
-    const command = pi.commands.get("rotator").handler;
-
-    await command("fast on", live);
-    assert.equal(live.model.id, "gpt-5.4-fast");
-    await command("next", live);
-    assert.equal(live.model.provider, "cursor-account-2");
-    assert.equal(live.model.id, "gpt-5.4-fast");
-    await command("fast off", live);
-    assert.equal(live.model.id, "gpt-5.4");
-    await command("fast on", live);
-    live.model = models.get("cursor-account-2/gpt-5.4");
-    await fire(pi, "before_agent_start", {}, live);
-    assert.equal(live.model.id, "gpt-5.4-fast", "persistent preference applies at the next run");
-    live.model = { ...live.model, id: "no-counterpart" };
-    assert.match(await command("fast on", live), /not registered/);
-    assert.equal(live.model.id, "no-counterpart");
-    assert.equal(pi.setModelCalls.some(model => model.id === "no-counterpart-fast"), false);
-    assert.equal(JSON.parse(readFileSync(join(dir, "config/pi-rotator/config.json"))).fastMode, true);
-
-    live.model = models.get("cursor/gpt-5.4-fast");
-    models.delete("cursor-account-2/gpt-5.4-fast");
-    await fire(pi, "turn_end", { message: { role: "assistant", provider: "cursor", model: "gpt-5.4-fast", stopReason: "stop" } }, live);
-    await command("fast off", live);
-    await command("next", live);
-    assert.equal(live.model.provider, "cursor-account-2", "a missing fast variant must not cool its registered standard model");
-  });
-
-  it("automatic fast reconciliation skips a cooling fast tier; explicit fast on honors consent", async () => {
-    const dir = agentDirWith(transportFiles({ "auth.json": { cursor: {}, "cursor-account-2": {} } }));
-
-    writeRotatorConfig(dir, { strategy: "round-robin", fastMode: true });
-    const pi = fakePi();
-    const models = new Map();
-
-    for (const provider of ["cursor", "cursor-account-2"]) {
-      for (const id of ["gpt-5.4", "gpt-5.4-fast"]) models.set(provider + "/" + id, { provider, id, api: "openai-completions" });
-    }
-
-    const live = ctx("cursor", "fast-tier-cooldown", {
-      model: models.get("cursor/gpt-5.4-fast"),
-      modelRegistry: { find: (provider, id) => models.get(provider + "/" + id) },
-      thinkingLevel: "high",
-    });
-
-    pi.setModel = async model => {
-      await tick();
-      pi.setModelCalls.push(model);
-
-      if (!models.has(model.provider + "/" + model.id)) return false;
-
-      live.model = model;
-
-      return true;
-    };
-
-    piRotator(pi);
-    await fire(pi, "session_start");
-    // One served fast request, then a tier-only rejection (fast wording, no quota exhaustion).
-    await fire(pi, "before_provider_request", { payload: { model: "gpt-5.4-fast", input: [] } }, live);
-    await fire(pi, "agent_end", { messages: [{ role: "assistant", provider: "cursor", model: "gpt-5.4-fast", stopReason: "error", errorMessage: "fast capacity temporarily unavailable" }] }, live);
-    assert.equal(ofKind(dir, "turn_failed").at(-1).cooldownScope, "fast-tier");
-    // The user switches back to standard to keep working.
-    live.model = models.get("cursor/gpt-5.4");
-    const calls = pi.setModelCalls.length;
-    await fire(pi, "before_agent_start", {}, live);
-    assert.equal(live.model.id, "gpt-5.4", "automatic reconciliation must not flip onto a cooling fast tier");
-    assert.equal(pi.setModelCalls.length, calls, "no switch is attempted while the fast tier cools");
-    assert.equal(ofKind(dir, "fast_model_skipped").length, 1, "the skip is journaled, not silent");
-    // Explicit consent still wins and fails visibly if the tier rejects it.
-    await pi.commands.get("rotator").handler("fast on", live);
-    assert.equal(live.model.id, "gpt-5.4-fast", "explicit /rotator fast on honors consent despite cooling");
-  });
-
-  it("Claude fast-tier limits do not poison standard capacity; OpenAI shared limits do", async () => {
-    for (const [base, modelId, api, shared] of [
-      ["anthropic", "claude-opus-5-5", "anthropic-messages", false],
-      [CODEX, MODEL, "openai-codex-responses", true],
+  it("observed fast-tier limits do not poison standard capacity; OpenAI shared limits do", async () => {
+    for (const [base, modelId, api, tier, shared] of [
+      ["anthropic", "claude-opus-5-5", "anthropic-messages", { speed: "fast", betas: ["fast-mode-2026-02-01"] }, false],
+      [CODEX, MODEL, "openai-codex-responses", { service_tier: "priority" }, true],
     ]) {
       const other = base + "-account-2";
       const dir = agentDirWith(transportFiles({ "auth.json": { [base]: {}, [other]: {} } }));
 
-      writeRotatorConfig(dir, { fastMode: true, strategy: "failover" });
+      writeRotatorConfig(dir, { strategy: "failover" });
       const pi = fakePi();
 
       const live = ctx(base, "fast-quota", {
@@ -2028,13 +1890,13 @@ describe("fast mode", () => {
       piRotator(pi);
       await fire(pi, "session_start");
       await fire(pi, "before_agent_start", {}, live);
-      await fire(pi, "before_provider_request", { payload: { model: modelId, input: [] } }, live);
+      await fire(pi, "before_provider_request", { payload: { model: modelId, input: [], ...tier } }, live);
       await fire(pi, "after_provider_response", { status: 429 }, live);
       await fire(pi, "agent_end", { messages: [{ role: "assistant", provider: base, model: modelId, stopReason: "error", errorMessage: "fast rate limit" }] }, live);
       assert.equal(live.model.provider, other);
       const command = pi.commands.get("rotator").handler;
 
-      await command("fast off", live);
+      await fire(pi, "before_provider_request", { payload: { model: modelId, input: [] } }, live);
       await command("next", live);
       assert.equal(live.model.provider, shared ? other : base, "only separate fast capacity leaves the standard account eligible");
 
@@ -2055,7 +1917,7 @@ describe("fast mode", () => {
       const api = "anthropic-messages";
       const dir = agentDirWith(transportFiles({ "auth.json": { [base]: {}, [other]: {} } }));
 
-      writeRotatorConfig(dir, { fastMode: true, strategy: "failover" });
+      writeRotatorConfig(dir, { strategy: "failover" });
 
       const pi = fakePi();
 
@@ -2079,16 +1941,15 @@ describe("fast mode", () => {
       else await fire(pi, "agent_end", { messages: [{ role: "assistant", provider: base, model: modelId, stopReason: "error", errorMessage: "HTTP 401: invalid authentication token" }] }, live);
 
       assert.equal(live.model.provider, other);
-      await pi.commands.get("rotator").handler("fast off", live);
       await pi.commands.get("rotator").handler("next", live);
       assert.equal(live.model.provider, other, "an invalid credential cannot serve standard requests either");
     }
   });
 
-  it("fast entitlement failures try each account once and leave standard mode available", async () => {
+  it("tier entitlement failures try each account once and leave standard capacity available", async () => {
     const dir = agentDirWith(transportFiles());
 
-    writeRotatorConfig(dir, { fastMode: true, strategy: "failover" });
+    writeRotatorConfig(dir, { strategy: "failover" });
     const pi = fakePi();
 
     const live = ctx(CODEX, "fast-denied", {
@@ -2106,23 +1967,24 @@ describe("fast mode", () => {
     piRotator(pi);
     await fire(pi, "session_start");
     await fire(pi, "before_agent_start", {}, live);
+    const tiered = { model: MODEL, input: [], service_tier: "priority" };
 
     for (const provider of [CODEX, CODEX2]) {
       assert.equal(live.model.provider, provider);
-      await fire(pi, "before_provider_request", { payload: { model: MODEL, input: [] } }, live);
+      await fire(pi, "before_provider_request", { payload: tiered }, live);
       await fire(pi, "agent_end", { messages: [{ role: "assistant", provider, model: MODEL, stopReason: "error", errorMessage: "priority processing is not enabled for this account" }] }, live);
     }
 
     assert.equal(pi.setModelCalls.length, 1, "no retry cycle after both accounts deny the tier");
     assert.ok(ofKind(dir, "turn_failed").every(row => row.cooldownScope === "fast-tier"));
-    await pi.commands.get("rotator").handler("fast off", live);
+    await fire(pi, "before_provider_request", { payload: { model: MODEL, input: [] } }, live);
     await pi.commands.get("rotator").handler("next", live);
     assert.equal(live.model.provider, CODEX);
   });
 
-  it("upstream priority requests do not quarantine standard accounts when Rotator fast mode is off", async () => {
+  it("upstream priority requests do not quarantine standard accounts", async () => {
     const dir = agentDirWith(transportFiles());
-    writeRotatorConfig(dir, { fastMode: false, strategy: "failover" });
+    writeRotatorConfig(dir, { strategy: "failover" });
     const pi = fakePi();
 
     const live = ctx(CODEX, "upstream-priority", {
@@ -2148,9 +2010,9 @@ describe("fast mode", () => {
     assert.equal(live.model.provider, CODEX, "standard traffic can reuse the account that denied only priority");
   });
 
-  it("upstream priority recovery skips tier cooldowns from earlier activities while fast mode is off", async () => {
+  it("upstream priority recovery skips tier cooldowns from earlier activities", async () => {
     const dir = agentDirWith(transportFiles());
-    writeRotatorConfig(dir, { fastMode: false, strategy: "failover" });
+    writeRotatorConfig(dir, { strategy: "failover" });
     const pi = fakePi();
 
     const live = ctx(CODEX, "upstream-tier-cooldown", {
@@ -2182,41 +2044,11 @@ describe("fast mode", () => {
     await pi.commands.get("rotator").handler("next", live);
     assert.equal(live.model.provider, CODEX, "tier cooldowns still leave standard capacity available");
   });
-
-  it("API-key OpenAI shaping works without discovered login slots; failed saves cannot enable it", async () => {
-    const dir = agentDirWith(transportFiles({ "auth.json": {} }));
-    const pi = fakePi();
-
-    piRotator(pi);
-    await fire(pi, "session_start");
-    const payload = { model: "gpt-5.6-sol", messages: [{ role: "user", content: "hello" }] };
-    const live = ctx("openai", "key", { model: { provider: "openai", id: MODEL, api: "openai-completions" } });
-
-    mkdirSync(join(dir, "config/pi-rotator/config.json"), { recursive: true });
-    await assert.rejects(pi.commands.get("rotator").handler("fast on", live));
-    assert.equal(await fire(pi, "before_provider_request", { payload }, live), undefined);
-
-    const nextDir = agentDirWith(transportFiles({ "auth.json": {} }));
-
-    writeRotatorConfig(nextDir, { fastMode: true });
-    const enabled = fakePi();
-
-    piRotator(enabled);
-    await fire(enabled, "session_start");
-
-    for (const api of ["openai-completions", "openai-responses"]) {
-      const result = await fire(enabled, "before_provider_request", { payload }, { ...live, model: { ...live.model, api } });
-
-      assert.deepEqual(result, { ...payload, service_tier: "priority" });
-      assert.equal(await fire(enabled, "before_provider_request", { payload: result }, { ...live, model: { ...live.model, api } }), undefined);
-    }
-  });
 });
 
-
-it("Cursor fast commands queue behind automatic handoffs", async () => {
+it("manual commands queue behind automatic handoffs", async () => {
   const dir = agentDirWith(transportFiles({ "auth.json": { cursor: {}, "cursor-account-2": {} } }));
-  writeRotatorConfig(dir, { strategy: "round-robin", fastMode: true });
+  writeRotatorConfig(dir, { strategy: "round-robin" });
   const pi = fakePi();
   const models = new Map();
 
@@ -2235,6 +2067,7 @@ it("Cursor fast commands queue behind automatic handoffs", async () => {
   pi.setModel = async model => {
     if (model.provider === "cursor-account-2" && model.id.endsWith("-fast")) { entered(); await gate; }
 
+    pi.setModelCalls.push(model);
     live.model = model;
 
     return true;
@@ -2247,7 +2080,7 @@ it("Cursor fast commands queue behind automatic handoffs", async () => {
 
   try {
     await enteredPromise;
-    command = pi.commands.get("rotator").handler("fast off", live);
+    command = pi.commands.get("rotator").handler("next", live);
     await tick();
   } finally {
     release();
@@ -2255,9 +2088,10 @@ it("Cursor fast commands queue behind automatic handoffs", async () => {
     await command;
   }
 
-  assert.equal(live.model.provider, "cursor-account-2", "retain the automatic account handoff");
-  assert.equal(live.model.id, "gpt-5.4", "the completed fast-off command must not be undone by an older handoff");
-  assert.equal(JSON.parse(readFileSync(join(dir, "config/pi-rotator/config.json"))).fastMode, false);
+  assert.equal(pi.setModelCalls.length, 2, "both handoffs land exactly once");
+  assert.equal(pi.setModelCalls[0].provider, "cursor-account-2", "the automatic handoff lands first");
+  assert.equal(live.model.provider, "cursor", "the queued command applies to the settled state");
+  assert.equal(live.model.id, "gpt-5.4-fast", "manual next keeps the model while switching accounts");
 });
 
 
@@ -2352,7 +2186,7 @@ describe("simple command UX", () => {
 
     const before = pi.registeredProviders.length;
     await command("", live);
-    assert.deepEqual(choices[0].options, ["Add account", "Switch account", "Fast mode", "Account status", "Refresh accounts", "Usage / limits", "All accounts"]);
+    assert.deepEqual(choices[0].options, ["Add account", "Switch account", "Account status", "Refresh accounts", "Usage / limits", "All accounts"]);
     assert.equal(panels.length, 0, "escape does not change the existing panel");
     assert.equal(pi.registeredProviders.length, before);
     assert.equal(pi.setModelCalls.length, 0);
@@ -2383,12 +2217,22 @@ describe("simple command UX", () => {
     assert.match(await command("rediscover", live), /openai-codex×2/);
   });
 
-  it("menu dispatch reuses guarded switching and makes paid fast enable an explicit choice", async () => {
-    const dir = agentDirWith(transportFiles());
+  it("the retired fast command points forward instead of silently showing status", async () => {
+    agentDirWith({ "settings.json": {}, "auth.json": {} });
+    const pi = fakePi();
+
+    piRotator(pi);
+    const command = pi.commands.get("rotator").handler;
+
+    assert.match(await command("fast", ctx(CODEX)), /fast mode was removed in 0\.5\.0/);
+  });
+
+  it("menu dispatch reuses guarded switching across every entry", async () => {
+    agentDirWith(transportFiles());
     const pi = fakePi();
     piRotator(pi);
     await fire(pi, "session_start");
-    const queue = ["Switch account", "Fast mode", undefined, "Fast mode", "Status", "Fast mode", "Enable fast mode (premium)", "Fast mode", "Disable fast mode", "Refresh accounts", "Account status", "Add account"];
+    const queue = ["Switch account", "Refresh accounts", "Account status", "All accounts", "Add account"];
     const dialogs = [];
 
     const live = ctx(CODEX, "menu-actions", { hasUI: true,
@@ -2409,20 +2253,14 @@ describe("simple command UX", () => {
 
     const command = pi.commands.get("rotator").handler;
     assert.match(await command("", live), /switched to openai-codex-account-2/);
-    await command("", live);
-    assert.equal(existsSync(join(dir, "config/pi-rotator/config.json")), false, "cancelled fast menu does not change billing preference");
-    assert.ok(dialogs[2].options.includes("Enable fast mode (premium)"));
-    assert.match(await command("", live), /fast mode: off/);
-    assert.equal(existsSync(join(dir, "config/pi-rotator/config.json")), false, "viewing fast status does not opt in");
-    await command("", live);
-    assert.equal(JSON.parse(readFileSync(join(dir, "config/pi-rotator/config.json"))).fastMode, true);
-    await command("", live);
-    assert.equal(JSON.parse(readFileSync(join(dir, "config/pi-rotator/config.json"))).fastMode, false);
     assert.match(await command("", live), /tracking/);
-    assert.match(await command("", live), /fast mode: off/);
+    assert.match(await command("", live), /openai-codex/);
+    assert.match(await command("", live), /openai-codex/);
     assert.match(await command("", live), /transport owns/);
     assert.equal(queue.length, 0);
     assert.equal(pi.setModelCalls.length, 1);
+    assert.equal(dialogs.length, 5);
+    assert.ok(dialogs.every(dialog => !dialog.options.includes("Fast mode")), "no removed entries linger in the menu");
   });
 
   it("menu add uses current-family inference and provider selection only when no model is selected", async () => {
@@ -2452,7 +2290,7 @@ describe("simple command UX", () => {
     assert.equal(pi.registeredProviders.length, before, "cancelled provider picker creates nothing");
   });
 
-  it("autocomplete offers short commands, explicit fast choices and native families", () => {
+  it("autocomplete offers short commands and native families", () => {
     agentDirWith({ "settings.json": {}, "auth.json": {} });
     const pi = fakePi();
     piRotator(pi);
@@ -2461,7 +2299,7 @@ describe("simple command UX", () => {
     const values = prefix => (complete(prefix) || []).map(item => item.value);
     assert.ok(values("a").includes("add"));
     assert.ok(values("r").includes("refresh"));
-    assert.deepEqual(values("fast o"), ["fast on", "fast off"]);
+    assert.deepEqual(values("fast o"), [], "retired commands offer no completions");
     assert.deepEqual(values("add openai"), ["add openai", "add openai-codex"]);
     assert.deepEqual(values("account add openai"), ["account add openai", "account add openai-codex"]);
     assert.deepEqual(values("add not-a-provider"), []);
@@ -3344,19 +3182,6 @@ it("stale account ownership never registers null or replaces a foreign Qwen endp
   assert.equal(JSON.parse(readFileSync(join(dir, "models.json"))).providers.qwen.baseUrl, "http://localhost:7777/v1");
 });
 
-it("the thin priority shortcut supports current Codex Sol versions without changing the prompt", async () => {
-  const dir = agentDirWith(transportFiles());
-  writeRotatorConfig(dir, { fastMode: true });
-  const pi = fakePi();
-  piRotator(pi);
-  const live = ctx(CODEX2, "current-fast", { model: { provider: CODEX2, id: "gpt-6.1-sol", api: "openai-codex-responses" } });
-  const payload = { model: "gpt-6.1-sol", input: [{ role: "user", content: "stable prefix" }], prompt_cache_key: "stable" };
-  const result = await fire(pi, "before_provider_request", { payload }, live);
-  assert.deepEqual(result, { ...payload, service_tier: "priority" });
-  assert.equal(result.input, payload.input);
-  assert.equal(payload.service_tier, undefined);
-});
-
 it("startup clears status panels retained by a previous Rotator version", async () => {
   agentDirWith(transportFiles());
   const pi = fakePi();
@@ -3556,11 +3381,11 @@ it("unknown prototype-named families cannot block startup or masquerade as nativ
   assert.deepEqual(pi.setModelCalls, []);
 });
 
-it("manual next honors upstream fast-tier cooldowns while Rotator fast mode is off", async () => {
+it("manual next honors observed fast-tier cooldowns", async () => {
   const base = "anthropic";
   const other = "anthropic-account-2";
   const dir = agentDirWith(transportFiles({ "auth.json": { [base]: {}, [other]: {} } }));
-  writeRotatorConfig(dir, { strategy: "failover", fastMode: false });
+  writeRotatorConfig(dir, { strategy: "failover" });
   const pi = fakePi();
   const live = ctx(base, "manual-upstream-fast", { model: { provider: base, id: "claude-opus-5-5", api: "anthropic-messages" } });
   pi.setModel = async target => {

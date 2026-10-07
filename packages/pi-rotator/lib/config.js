@@ -28,7 +28,7 @@ export function normalizeConfig(raw) {
   const ttlByFamily = familyTtls(raw);
 
   return { enabled: flags.enabled, strategy, cooldownMs, ttlMs, ttlByFamily,
-    debugLog: flags.debugLog, announceSwitches: flags.announceSwitches, fastMode: flags.fastMode };
+    debugLog: flags.debugLog, announceSwitches: flags.announceSwitches };
 }
 
 function configFlags(raw) {
@@ -36,7 +36,6 @@ function configFlags(raw) {
     enabled: !raw || raw.enabled !== false,
     debugLog: !raw || raw.debugLog !== false,
     announceSwitches: Boolean(raw) && raw.announceSwitches === true,
-    fastMode: Boolean(raw) && raw.fastMode === true,
   };
 }
 
@@ -61,17 +60,6 @@ export function loadConfig(agentDir) {
   } catch {
     return normalizeConfig(null);
   }
-}
-
-// A command changes one preference, not a stale snapshot of other settings.
-// Invalid/unwritable config must fail before enabling a potentially paid tier.
-export function saveFastMode(agentDir, enabled) {
-  const path = configPath(agentDir);
-  const raw = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
-
-  if (!raw || Object.getPrototypeOf(raw) !== Object.prototype) throw new Error("pi-rotator config must be a JSON object");
-  mkdirSync(join(agentDir, "config", "pi-rotator"), { recursive: true });
-  atomicStorage(path, { ...raw, fastMode: enabled === true });
 }
 
 export function saveConfig(agentDir, config) {

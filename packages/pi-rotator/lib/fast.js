@@ -1,17 +1,19 @@
 import { parseSlotId } from "./slots.js";
 
+// Observed fast-tier markers, used only to classify failures and scope
+// cooldowns. Rotator never requests a tier itself: OpenAI priority comes
+// from Pi-native samplingParams, Cursor fast and Kimi HighSpeed are
+// distinct models the user selects, and anything else is upstream shaping
+// the router merely observes. Capability marks marker eligibility only;
+// tier use always requires the marker itself (or an explicit fast model).
 export const ANTHROPIC_FAST_BETA = "fast-mode-2026-02-01";
 
-// Verified request capabilities, not a cloned provider/model catalog. Do not
-// infer paid tiers merely from an OpenAI/Anthropic-compatible API shape.
 const CLAUDE_FAST_MODELS = new Set(["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"]);
 
 const CODEX_FAST_MODEL = /^gpt-(?:5\.[456](?:$|[-.])|6(?:\.\d+)?-(?:astra|sol|luna)(?:$|[-.]))/;
 
-const UNAVAILABLE = "No verified fast tier for this provider/model; request unchanged";
+const UNAVAILABLE = "No recognized fast-tier markers for this provider/model";
 
-// Pi owns service-tier transport and pricing. This is only the opt-in shortcut;
-// eligibility remains server-owned and never inferred for unrelated providers.
 function priorityCapability(model, id) {
   const codex = parseSlotId(model.provider)?.base === "openai-codex";
 
@@ -36,9 +38,9 @@ const CAPABILITIES = new Map([
   ["anthropic", claudeCapability],
   ["cursor", (_model, id) => id.endsWith("-fast")
     ? { kind: "native", detail: "Cursor fast model selected; availability depends on this account's catalog/plan" }
-    : { kind: "cursor", detail: "Cursor requires a registered -fast counterpart; no generic tier flag" }],
+    : { kind: "cursor", detail: "Cursor fast models are selected explicitly; no generic tier flag" }],
   ["kimi-coding", (_model, id) => id.endsWith("-highspeed")
-    ? { kind: "native", detail: "Kimi HighSpeed model selected; off does not replace this distinct model" }
+    ? { kind: "native", detail: "Kimi HighSpeed model selected; availability depends on this account's catalog/plan" }
     : { kind: "unavailable", detail: "Kimi HighSpeed is a different model; select it explicitly with /model" }],
 ]);
 
@@ -50,41 +52,18 @@ export function fastCapability(model) {
   return capability ? capability(model, id) : { kind: "unavailable", detail: UNAVAILABLE };
 }
 
-function priorityPayload(payload) {
-  return ["priority", "fast"].includes(payload.service_tier) ? payload : { ...payload, service_tier: "priority" };
-}
-
-function speedPayload(payload) {
-  if (payload.betas !== undefined && !Array.isArray(payload.betas)) return payload;
-  const betas = payload.betas || [];
-
-  if (payload.speed === "fast" && betas.includes(ANTHROPIC_FAST_BETA)) return payload;
-
-  return { ...payload, speed: "fast", betas: [...new Set([...betas, ANTHROPIC_FAST_BETA])] };
-}
-
-export function fastPayload(model, payload, enabled) {
-  if (!enabled || !payload || payload.constructor !== Object) return payload;
-  const capability = fastCapability(model);
-
-  if (capability.kind === "priority") return priorityPayload(payload);
-
-  if (capability.kind === "speed") return speedPayload(payload);
-
-  return payload;
-}
-
 function speedRequested(payload) {
   return payload?.speed === "fast" && payload.betas?.includes(ANTHROPIC_FAST_BETA) === true;
 }
 
+// Whether the delivered payload is already a fast-tier request: an
+// explicitly selected fast model, or tier fields Pi or upstream shaping
+// put there. Never true from Rotator preference alone.
 export function fastRequested(model, payload) {
   const { kind } = fastCapability(model);
 
   if (kind === "native") return true;
 
-  // The delivered payload can request a tier through upstream defaults even
-  // when Rotator's shaping preference is off. Observe that request as-is.
   return (kind === "priority" && ["priority", "fast"].includes(payload?.service_tier)) ||
     (kind === "speed" && speedRequested(payload));
 }

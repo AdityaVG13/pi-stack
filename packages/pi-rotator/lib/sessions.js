@@ -66,11 +66,15 @@ export function ttlFor(family, model) {
 }
 
 
-export function pickNext(family, session, model, excludeCurrent, excluded, fastMode = false) {
+export function pickNext(family, session, model, excludeCurrent, excluded) {
   // One clock per decision: the cooling checks and the router share this
   // instant instead of sampling Date.now() three times.
   const now = Date.now();
-  const checkFast = fastMode || fastCapability(model).kind === "native";
+  // Observed fast usage only: an explicitly selected fast model, or a tier
+  // this session already requested through Pi-native or upstream shaping.
+
+  const checkFast = fastCapability(model).kind === "native" ||
+    session?.fastRequests?.has(fastCooldownKey(model.provider, model.id));
 
   const base = (id) => excluded?.has(id) || isCooling(family.cooldowns, id, now) ||
     (checkFast && isCooling(family.cooldowns, fastCooldownKey(id, model.id), now));

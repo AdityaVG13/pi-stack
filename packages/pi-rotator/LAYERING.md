@@ -120,9 +120,9 @@ No cache entries are transferred between subscriptions. OMP is not certified.
   and transport-owned slots are never hidden. `switch.js` resolves hidden
   targets from sibling defs and repairs restores stranded on hidden slots.
 - `commands.js` dispatches routing controls; `account-commands.js` provisions/manages
-  logins; `command-ui.js` owns transient presentation and speed selection.
-- `requests.js` shapes cache/replay requests; `recovery.js` classifies failures and
-  advances rotation; `switch.js` verifies and commits bounded handoffs. They share
+  logins; `command-ui.js` owns transient presentation.
+- `requests.js` observes request/context fingerprints and projects aliases; `recovery.js`
+  classifies failures and advances rotation; `switch.js` verifies and commits bounded handoffs. They share
   session state without moving credentials into routing metadata.
 - `usage.js` retains its exports while `usage/{common,parsers,fetch,format}.js` separate
   family/value rules, provider JSON, authenticated I/O and user-facing formatting.
@@ -130,7 +130,7 @@ No cache entries are transferred between subscriptions. OMP is not certified.
   owns catalog/effort/pricing data; `diagnostics.js` owns host-event summaries;
   `rpc.js` owns bridge spawning/discovery; `request.js` owns request/history blobs;
   `frames.js` owns Connect framing; `server-messages.js` dispatches decoded messages;
-  `exec.js` and `native-results.js` translate tool requests/results. `stream.js` and
+  `exec.js` and `native-results.js` translate tool requests/results. Cursor-minted dual tool ids pass through verbatim (see `exec.js`); never split or re-key them. `stream.js` and
   `responses.js` collect outputs using shared `completion.js` envelopes and registry
   checkpoint commits. `prompt-usage.js` owns token estimates; `stream-lifecycle.js`
   distinguishes transport housekeeping from useful progress.

@@ -1,6 +1,6 @@
 import { readJson, safeOn } from "./support.js";
 import { appendDebug } from "./store.js";
-import { selectCursorSpeed, showText, hideWidget } from "./commands.js";
+import { showText, hideWidget } from "./commands.js";
 import { nativeFamilyNames, rediscover, syncPreparedAccounts } from "./accounts.js";
 import { onAssistantTurnEnd, onBeforeSettle, onResponse, onTurnEnd, resetRecovery } from "./recovery.js";
 import { onBeforeRequest, onCompact, onContext, onWarmDecision } from "./requests.js";
@@ -117,8 +117,6 @@ async function startTask(pi, dir, state, ctx) {
   if (state.cursor?.credentialIds().length) await state.cursor.restore(ctx?.modelRegistry);
   syncPreparedAccounts(pi, dir, state, ctx);
   resetRecovery(state, ctx);
-
-  if (state.config.fastMode) await selectCursorSpeed(pi, dir, state, true, ctx, { automatic: true, announce: true });
 }
 
 function observeResponse(pi, dir, state, usageEnabled, event, ctx) {

@@ -1,8 +1,6 @@
 // Slash-command dispatch and routing controls. Account operations and transient UI
 // are separate boundaries; public re-exports keep host command wiring unchanged.
-import { showText, fastStatus, selectCursorSpeed, hideWidget, statusText } from "./command-ui.js";
-import { saveFastMode } from "./config.js";
-import { fastCooldownKey } from "./fast.js";
+import { showText, hideWidget, statusText } from "./command-ui.js";
 import { appendJournal } from "./store.js";
 import { addShortcut, confirmAction, accountsCommand, limitsCommand, removeCommand, accountCommand, canChoose } from "./account-commands.js";
 import { familyOf, sessionState, pickNext } from "./sessions.js";
@@ -10,37 +8,8 @@ import { serializeHandoff, applySwitch } from "./switch.js";
 import { rediscover, syncPreparedAccounts } from "./accounts.js";
 import { beginCutover } from "./cutover.js";
 
-async function fastCommand(pi, dir, state, tokens, ctx) {
-  const mode = tokens[0] || "status";
-
-  if (tokens.length > 1 || !["on", "off", "status"].includes(mode)) {
-    return showText(ctx, "Usage: /rotator fast on | off | status");
-  }
-
-  if (mode === "status") return showText(ctx, fastStatus(state, ctx));
-  const enabled = mode === "on";
-
-  // Persist before applying: a failed save must not silently enable paid work.
-  saveFastMode(dir, enabled);
-  state.config.fastMode = enabled;
-  appendJournal(dir, "fast_mode", { enabled });
-  const selection = await selectCursorSpeed(pi, dir, state, enabled, ctx);
-
-  return showText(ctx, [fastStatus(state, ctx), selection].filter(Boolean).join("\n"));
-}
-
-async function fastMenu(pi, dir, state, ctx) {
-  // Opening or cancelling this menu is not consent to a paid tier.
-  const choice = await ctx.ui.select("Fast mode -- " + (state.config.fastMode ? "on" : "off"), ["Status", "Enable fast mode (premium)", "Disable fast mode"]);
-
-  if (!choice) return;
-  const action = { Status: "status", "Enable fast mode (premium)": "on", "Disable fast mode": "off" }[choice];
-
-  if (action) return fastCommand(pi, dir, state, [action], ctx);
-}
-
 async function commandMenu(pi, dir, state, config, ctx) {
-  const options = ["Add account", "Switch account", "Fast mode", "Account status", "Refresh accounts", "Usage / limits", "All accounts"];
+  const options = ["Add account", "Switch account", "Account status", "Refresh accounts", "Usage / limits", "All accounts"];
 
   if (state.mode === "transport") options.push("Cut over from legacy");
   const choice = await ctx.ui.select("Rotator", options);
@@ -49,13 +18,12 @@ async function commandMenu(pi, dir, state, config, ctx) {
 
   if (choice === "Add account") return addShortcut(pi, dir, state, [], ctx);
 
-  if (choice === "Fast mode") return fastMenu(pi, dir, state, ctx);
   const action = { "Switch account": "next", "Account status": "status", "Refresh accounts": "refresh", "Usage / limits": "limits", "All accounts": "accounts", "Cut over from legacy": "cutover" }[choice];
 
   if (action) return onCommand(pi, dir, state, config, action, ctx);
 }
 
-function nextCommand(pi, dir, state, config, _tokens, ctx) {
+function nextCommand(pi, dir, state, _config, _tokens, ctx) {
   const family = ctx?.model && familyOf(state, ctx.model.provider);
   const session = family && sessionState(family, ctx).session;
 
@@ -63,11 +31,9 @@ function nextCommand(pi, dir, state, config, _tokens, ctx) {
 
   return serializeHandoff(session, ctx, async () => {
     const model = ctx.model;
-    const tierKey = fastCooldownKey(model?.provider, model?.id);
-    const fastMode = config.fastMode || (session.upstreamFastRequest === tierKey && session.fastRequests?.has(tierKey));
-  
+
     const picked = familyOf(state, model?.provider) === family
-      ? pickNext(family, session, model, true, undefined, fastMode) : null;
+      ? pickNext(family, session, model, true) : null;
   
     if (!picked) return showText(ctx, "pi-rotator: no other healthy slot to switch to.");
     appendJournal(dir, "route", {
@@ -137,7 +103,6 @@ const COMMANDS = new Map([
   ["accounts", accountsCommand], ["limits", limitsCommand], ["usage", limitsCommand], ["quota", limitsCommand],
   ["remove", removeCommand], ["reset", resetCommand],
   ["add", (pi, dir, state, _config, tokens, ctx) => addShortcut(pi, dir, state, tokens.slice(1), ctx)],
-  ["fast", (pi, dir, state, _config, tokens, ctx) => fastCommand(pi, dir, state, tokens.slice(1), ctx)],
   ["account", (pi, dir, state, _config, tokens, ctx) => accountCommand(pi, dir, state, tokens.slice(1), ctx)],
   ["hide", (_pi, _dir, _state, _config, _tokens, ctx) => {
     hideWidget(ctx);
@@ -158,11 +123,13 @@ export function onCommand(pi, dir, state, config, raw, ctx) {
     return commandMenu(pi, dir, state, config, ctx);
   }
 
+  if (sub === "fast") return showText(ctx, "pi-rotator: fast mode was removed in 0.5.0; request fast tiers natively (samplingParams.service_tier or explicit -fast / -highspeed models).");
+
   const command = COMMANDS.get(sub);
 
   return command ? command(pi, dir, state, config, tokens, ctx) : showText(ctx, statusText(dir, state, config, ctx));
 }
 
-export { showText, hideWidget, selectCursorSpeed, standbyText, standbyTransportText } from "./command-ui.js";
+export { showText, hideWidget, standbyText, standbyTransportText } from "./command-ui.js";
 
 export { commandCompletions } from "./account-commands.js";

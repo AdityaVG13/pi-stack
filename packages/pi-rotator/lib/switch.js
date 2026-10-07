@@ -396,15 +396,12 @@ async function attemptVerifiedSwitch(context, picked) {
 
 export async function switchModel(pi, dir, state, family, from, model, session, reason, ctx, excluded) {
   const context = { pi, dir, state, family, from, model, reason, ctx, excluded, selection: selectionOf(ctx) };
-  // Recovery follows the delivered tier, including upstream preferences that
-  // request premium capacity while Rotator's shaping preference is disabled.
-  const fastMode = state.config.fastMode || session?.fastRequests?.has(fastCooldownKey(model.provider, model.id));
   // Undefined retries; false terminates; a provider id reports the committed target.
 
   for (let attempt = 0; attempt <= family.slots.length; attempt++) {
     if (isAborted(ctx) || !sameSelection(ctx, context.selection)) return false;
 
-    const picked = pickNext(family, session, model, false, excluded, fastMode);
+    const picked = pickNext(family, session, model, false, excluded);
 
     if (!eligiblePick(picked, from)) return false;
     const result = await attemptVerifiedSwitch(context, picked);

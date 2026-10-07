@@ -1,24 +1,21 @@
 import { appendJournal } from "./store.js";
 import { detectDrift, detectInvalidation, fingerprintPayload, messageSignatures } from "./fingerprint.js";
 import { familyOf, sessionIdOf, sessionState, ttlFor } from "./sessions.js";
-import { fastCooldownKey, fastPayload, fastRequested } from "./fast.js";
+import { fastCooldownKey, fastRequested } from "./fast.js";
 import { repairThinking } from "./switch.js";
 
 
-// Apply opt-in tier policy with copy-on-write; fingerprint exactly what we
-// return, never the unshaped request. Prompt/model/cache-key fields are not
+// Observe tier usage for cooldown scoping; fingerprint exactly what was
+// delivered, never a shaped copy. Prompt/model/cache-key fields are not
 // edited here. Also triages any pending thinking repair from
 // the last switch (repairThinking): thinking is global, so this runs for
 // every request regardless of family. The request context also carries the
 // live thinking level: captured here as the next switch's repair target,
 // so the switch path itself never touches the thinking API.
-function recordFastRequest(session, model, requested, upstreamRequested) {
+function recordFastRequest(session, model, requested) {
   const fastChanged = session.lastFast !== undefined && session.lastFast !== requested;
   const tierKey = fastCooldownKey(model.provider, model.id);
   session.fastRequests ??= new Set();
-  // Manual switches must distinguish upstream tier defaults from Rotator's
-  // own shaping, which an explicit fast-off command can disable immediately.
-  session.upstreamFastRequest = upstreamRequested ? tierKey : null;
 
   if (requested) session.fastRequests.add(tierKey);
   else session.fastRequests.delete(tierKey);
@@ -70,18 +67,15 @@ export function onBeforeRequest(pi, dir, state, event, ctx) {
 
   if (!model) return;
   state.requests.set(sessionIdOf(ctx), { ...model });
-  const payload = fastPayload(model, event?.payload, state.config.fastMode);
-  const replacement = payload !== event?.payload ? payload : undefined;
+  const payload = event?.payload;
   const requested = fastRequested(model, payload);
   const family = familyOf(state, model.provider);
 
-  if (!family) return replacement;
+  if (!family) return;
   const { id: sessionId, session } = sessionState(family, ctx);
-  const fastChanged = recordFastRequest(session, model, requested, fastRequested(model, event?.payload));
+  const fastChanged = recordFastRequest(session, model, requested);
   const fingerprint = recordFingerprint(session, model, payload, fastChanged);
   traceRequest(dir, family, sessionId, session, model, ctx, fingerprint, fastChanged, requested);
-
-  return replacement;
 }
 
 

@@ -5,7 +5,7 @@
 [![node](https://img.shields.io/node/v/pi-rotator.svg)](https://nodejs.org)
 [![pi-package](https://img.shields.io/badge/pi--package-extension-7aa2f7)](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md)
 
-Multi-account rotation and opt-in fast tiers for [Pi](https://pi.dev). Every provider family with N logins rotates (Codex, Anthropic, xAI, Kimi, and any future family), with no account cap and a tiny surface: one `/rotator` command.
+Multi-account rotation with observed fast-tier awareness for [Pi](https://pi.dev). Every provider family with N logins rotates (Codex, Anthropic, xAI, Kimi, and any future family), with no account cap and a tiny surface: one `/rotator` command.
 
 ```bash
 pi install npm:pi-rotator
@@ -17,7 +17,7 @@ pi install npm:pi-rotator
 
 1. [Use](#use)
 2. [Install](#install)
-3. [Fast mode](#fast-mode)
+3. [Fast tiers](#fast-tiers)
 4. [Strategies](#strategies)
 5. [Fresh installs and existing logins](#fresh-installs-and-existing-logins)
 6. [Native accounts (Pi 0.99)](#native-accounts-pi-099)
@@ -39,8 +39,6 @@ pi install npm:pi-rotator
 /rotator add         # add an account for the current provider family
 /rotator add openai  # choose a different family explicitly
 /rotator next        # switch to another healthy account, same model; honors an in-flight fast request
-/rotator fast on     # explicitly enable supported premium fast tiers
-/rotator fast off
 /rotator status      # routing status without opening the menu
 /rotator accounts    # per-account usage where supported
 /rotator limits      # active account usage
@@ -51,11 +49,10 @@ pi install npm:pi-rotator
 /rotator refresh     # pick up newly authenticated accounts
 ```
 
-The menu offers **Add account**, **Switch account**, **Fast mode**, **Account
+The menu offers **Add account**, **Switch account**, **Account
 status**, **Refresh accounts**, **Usage / limits**, **All accounts**, and
-**Cut over from legacy** when layered. Escape cancels without changes. Fast mode
-has explicit enable/disable choices; opening its submenu does not enable paid
-work. Add infers the current family (Codex stays Codex); with no model selected,
+**Cut over from legacy** when layered. Escape cancels without changes.
+Add infers the current family (Codex stays Codex); with no model selected,
 the interactive flow asks for a provider. Without interactive UI, bare
 `/rotator` shows status and `add` requires a current model or explicit provider.
 Command arguments and provider names support tab completion.
@@ -101,73 +98,33 @@ claim. See [LAYERING.md](./LAYERING.md) for ownership and migration boundaries.
 
 Do not run alongside another router (pi-failover, pi-account-pool, and similar): two routers fight over `setModel` with split state. pi-rotator detects this from settings and enters standby with an explanation instead of breaking.
 
-## Fast mode
+## Fast tiers
 
-Pi 0.99 already implements OpenAI service tiers and pricing; its 0.99.0 changelog
-fixes inherited fast-tier pricing. Rotator keeps only a saved enable/disable
-shortcut across account aliases, not its own OpenAI transport or pricing engine.
-Native clients can also configure `samplingParams.service_tier` directly.
+Rotator never requests a fast tier itself; it only observes tier use so
+failures cool the right scope. Request fast capacity natively per provider:
 
-Fast mode is independent of rotation strategy. `/rotator fast on` saves
-`"fastMode": true` in the rotator config and applies it to the current process
-and future sessions. It follows account switches, retries and supported-provider
-changes. It is **off by default**, and does not perform a paid eligibility probe.
-Other already-running Pi processes need a reload to read the saved preference.
+- OpenAI API and Codex: `samplingParams.service_tier`, which Pi request
+  shaping carries. Eligibility and pricing are provider-controlled.
+- Cursor and Kimi HighSpeed: distinct `-fast` / `-highspeed` models.
+  Select them explicitly with `/model`; rotation preserves that selection.
+- Claude fast preview has no native Pi path currently; rotator no longer
+  injects its beta.
 
-| Provider | Behavior with fast mode on |
-|----------|----------------------------|
-| OpenAI API | Requests `service_tier: "priority"` on Responses/Chat Completions, including API-key-only sessions |
-| OpenAI Codex | Requests priority for documented GPT-5.4/5.5/5.6 and GPT-6/6.x Astra/Sol/Luna families; subscription credit eligibility remains server-controlled |
-| Anthropic | Adds `speed: "fast"` and `fast-mode-2026-02-01` to existing SDK betas for Claude Opus 5.5, 5 and 4.8 (including dated snapshots) |
-| Cursor | Selects the same account's registered `<current-model>-fast` counterpart; rotation keeps that model id on other accounts; run-start reconciliation skips a cooling fast target (journaled, preference stays on) |
-| Kimi | Does not switch models: its HighSpeed offering is a distinct model. Select it explicitly with `/model`; rotation preserves that selection |
-| Qwen, Ollama, other compatible endpoints | Unchanged; no verified same-model fast-tier switch is inferred from API compatibility or a "fast" model name |
-
-The provider table follows currently documented capabilities, not promises of
-account entitlement. In particular, Claude Opus 4.7 rejects fast requests and
-4.6 silently runs at standard speed, so rotator does not advertise either as
-fast-capable. Anthropic's preview requires access; Cursor availability depends
-on the account's catalog and plan. Missing/rejected Cursor variants leave the
-model unchanged and are reported by the command. Cursor preference is also
-applied at the start of a run, never by rewriting an in-flight request. That
-automatic pass skips a fast counterpart whose tier is cooling and journals
-`fast_model_skipped`; an explicit `/rotator fast on` still selects the
-counterpart and fails visibly if the tier rejects it.
-
-`fast off` stops rotator's request additions and, for Cursor, selects a
-registered standard counterpart if available. OpenAI/Codex off observes the
-actual response `service_tier` rather than assuming standard. It does not
-override upstream project defaults or replace an explicitly chosen Kimi
-HighSpeed model.
-
-**Billing and cache boundaries:** fast mode can incur premium token pricing or
-increased subscription credits. Pi's displayed costs may still use standard
-catalog estimates; provider billing is authoritative. Status and the journal
-report **requested**, not confirmed delivered speed. OpenAI/Claude request
-shaping preserves the model id, prompt, signatures, reasoning settings and
-cache key. Anthropic nevertheless isolates fast and standard caches, so changing
-speed causes a cache miss. Cursor switches real model ids and can likewise go
-cold. Rotator invalidates local warmth on speed changes; it does not promise
-cross-account or cross-speed server cache sharing.
-
-Fast-specific entitlement failures and Claude's separate fast-capacity limits
-use model/account-scoped fast cooldowns, not standard-account cooldowns. OpenAI
-rate/billing limits are shared across tiers and still cool the whole account.
-Automatic recovery honors those fast-tier cooldowns: a cooling fast slot is
-not retried as if it were a standard account. Both use the configured
-`cooldownMs` and the existing bounded recovery budget. Manual `/rotator next`
-keeps an in-flight `upstreamFastRequest` rather than dropping back to
-standard mid-handoff.
-If every account rejects fast mode, the failure remains visible; there is **no
-silent downgrade** to standard. Use `/rotator fast off` deliberately instead.
+Whatever the source, the journal reports observed tier use (`fastRequested`),
+not confirmed delivered speed. A tier-only denial cools that tier on that
+account instead of benching standard capacity, while shared rate/billing
+limits still cool the whole account, and rotation honors both. If every
+account rejects the tier, the failure remains visible; there is no silent
+downgrade. Anthropic isolates fast and standard caches, and switching
+Cursor models changes real model ids, so changing speed can go cold
+either way. Rotator invalidates local warmth on observed speed changes;
+it does not promise cross-account or cross-speed server cache sharing.
 
 Sources: [OpenAI API fast mode](https://developers.openai.com/api/docs/guides/fast-mode),
 [Codex speed](https://developers.openai.com/codex/speed),
 [Claude fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode),
 [Cursor models](https://cursor.com/docs/models),
-[Kimi Code models](https://www.kimi.com/code/docs/en/),
-[Qwen settings](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/),
-and [Ollama cloud](https://docs.ollama.com/cloud).
+and [Kimi Code models](https://www.kimi.com/code/docs/en/).
 
 ## Strategies
 
@@ -180,7 +137,6 @@ Set in `~/.pi/agent/config/pi-rotator/config.json`:
   "ttlByFamily": { "openai-codex": 300000 },
   "cooldownMs": 21600000,
   "announceSwitches": false,
-  "fastMode": false,
   "debugLog": true
 }
 ```
@@ -192,9 +148,8 @@ Set in `~/.pi/agent/config/pi-rotator/config.json`:
 | `ttlByFamily` | `{}` | Per-family `ttlMs` overrides, keyed by literal family base id |
 | `cooldownMs` | `21600000` | How long an exhausted slot sits out |
 | `announceSwitches` | `false` | `true` shows a transient notice per automatic rotation |
-| `fastMode` | `false` | Explicit opt-in to the provider-aware fast policy above, preserved across account switches |
 | `debugLog` | `true` | `false` silences routine debug lines (journal and errors stay) |
-| `enabled` | `true` | `false` disables routing and fast-tier policy entirely |
+| `enabled` | `true` | `false` disables the extension entirely |
 | `showUsage` | `true` | Display standalone usage in the footer where supported; provider errors never display credentials |
 
 Millisecond windows must be finite and at least 1 ms. Larger fractional values
@@ -310,7 +265,7 @@ restart. Slot 1 always belongs to the base provider and is not replaced.
 Existing `openai-codex-account-N` and `anthropic-account-N` logins retain their
 identity. The new `openai` ChatGPT flow is a **separate family**, not an implicit
 credential rename. Use separate browser profiles for separate subscriptions.
-`fast` preference, cooldowns and per-response round-robin remain the same policy
+Cooldowns and per-response round-robin remain the same policy
 on native aliases. No remote cache transfer or speed/entitlement claim is made.
 
 If pi-multi-account is still configured, legacy transport ownership wins:
@@ -349,8 +304,8 @@ cannot authorize new accounts.
 
 This is a provider-registration compatibility boundary, not a certification of
 every downloadable package or remote service. Slots still need matching model
-availability and usable credentials. Fast mode never guesses paid-tier support
-from an API shape. Cursor's independent bundled transport is implemented and
+availability and usable credentials. Tier observation never guesses paid-tier
+support from an API shape. Cursor's independent bundled transport is implemented and
 offline-tested. A live standalone smoke on Pi 1.0.0 completed one synthetic
 `cursor-grok-4.6` / low tool round trip over HTTP/2. That narrow check does not
 certify other models, accounts, live login or future remote availability.
@@ -460,8 +415,8 @@ refresh, protobuf protocol, tool translation, session identity and compaction/
 switch/fork/tree/shutdown cleanup are reused. New account preparations preserve
 working provider definitions and do not duplicate cleanup hooks. Duplicate Cursor
 subjects (or identical opaque tokens) are refused before discovery/persistence.
-`/rotator fast on` selects a real registered fast counterpart; account rotation
-keeps that model ID. Backend speed, entitlement and remote cache transfer remain
+Explicitly selected fast models are served as picked; account rotation keeps
+that model ID. Backend speed, entitlement and remote cache transfer remain
 provider-owned, not guaranteed.
 
 Sources/structural compilation hashes: `lib/cursor/PROVENANCE.json`. MIT notices
@@ -485,7 +440,7 @@ not live migration sign-off.
 
 Fingerprint projection **v2** removes volatile fields only from the root envelope; nested IDs, tool arguments and schema keys are preserved. Message signatures retain all fields. Serialization follows JSON wire semantics and lengths count UTF-8 bytes. Cycles and BigInt are rejected rather than assigned a fabricated fingerprint. Do not compare v1 and v2 journals: hashes identify canonical projections under a collision assumption, not byte-for-byte wire equality or provider cache hits.
 
-Response usage/quota observations and drain/recovery are attributed to an explicit response model when supplied, otherwise the model captured by `before_provider_request`, not a live model that a rescue already changed. Duplicate failure signals for an attempted account cannot bench the replacement. Automatic and manual `next` handoffs and Cursor fast-variant changes are serialized per session, and settle awaits them before checking continuation. Queued fast-mode changes select the account that is current after the preceding handoff. Newer manual selections are respected, including changes while offline account
+Response usage/quota observations and drain/recovery are attributed to an explicit response model when supplied, otherwise the model captured by `before_provider_request`, not a live model that a rescue already changed. Duplicate failure signals for an attempted account cannot bench the replacement. Automatic and manual `next` handoffs are serialized per session, and settle awaits them before checking continuation. Newer manual selections are respected, including changes while offline account
 eligibility refreshes are pending. Superseded handoffs do not quarantine healthy
 targets; target model metadata is resolved after refresh. Delayed usage completions
 cannot overwrite a newer footer request or a different selected account/session.
@@ -503,7 +458,7 @@ Pi-ai normally treats account aliases as different providers and strips signed r
 
 Prefix identity is load-bearing, so pi-rotator does zero per-account prompt shaping: same model id on every slot, same session, same bytes. Drain is counted in served turns (the response hook carries no token usage, and same-model same-session turns are prefix-dominated). Compaction resets every prefix at once, which makes post-compaction turns free routing choices that `balanced` spends on the least-drained slot.
 
-An unserviceable account is signaled by status `429`/`402`/`401`/`403` seen on `after_provider_response`, or a quota/rate-limit error in the finalized assistant message when a transport reports failure inside an HTTP 200 stream. Other HTTP response errors neither drain nor trigger continuation, except recognized fast-tier denials in a finalized error can try the next eligible fast account. Only a real 1xx-3xx status counts as a served turn; a missing status records nothing. Cooling slots sit out for `cooldownMs`. Every response lands in the credential-free debug log at `~/.pi/agent/pi-rotator-debug.log` with its routing decision, so a turn's missing drain is always explainable.
+An unserviceable account is signaled by status `429`/`402`/`401`/`403` seen on `after_provider_response`, or a quota/rate-limit error in the finalized assistant message when a transport reports failure inside an HTTP 200 stream. Other HTTP response errors neither drain nor trigger continuation, except recognized fast-tier denials in a finalized error cool only the tier and can try the next eligible account. Only a real 1xx-3xx status counts as a served turn; a missing status records nothing. Cooling slots sit out for `cooldownMs`. Every response lands in the credential-free debug log at `~/.pi/agent/pi-rotator-debug.log` with its routing decision, so a turn's missing drain is always explainable.
 
 Before every automatic or manual switch, the target is verified against Pi's own registry (registered provider, resolvable credential). Dead targets are skipped with journal evidence instead of failing your next turn, and a turn that dies before its first request cools its slot the same way exhaustion does. Manual `/rotator next` verifies and awaits the same confirmed handoff.
 
@@ -553,9 +508,7 @@ Every request and routing decision is journaled to `~/.pi/agent/pi-rotator-journ
 
 | Kind | Meaning |
 |------|---------|
-| `request` | Fingerprint of the tier-shaped payload per slot, plus `fastRequested` and `fastChanged`; requested speed is not confirmation of backend speed |
-| `fast_mode` / `fast_model` | Saved preference or confirmed/rejected Cursor model selection; no request bodies |
-| `fast_model_skipped` | Automatic fast reconciliation skipped a cooling fast tier (preference stays on) |
+| `request` | Fingerprint of the delivered payload per slot, plus observed `fastRequested` and `fastChanged`; requested speed is not confirmation of backend speed |
 | `route` | From/to slot, reason (`rotate`, `exhausted`, `manual`, `hidden-restore`), warmth |
 | `rediscover` | Family slots, status, mechanism and the slot carrying the visible catalog (`carrier`) |
 | `switch_rejected` / `switch_error` | The switch never landed (a `route` entry is the intent, these are the outcome) |
@@ -620,6 +573,17 @@ install/upgrade fixtures use fake credentials and temporary agent directories.
 Pure slot, strategy, router, and config logic with unit tests; the Pi edge (`registerProvider`, `setModel`, hooks) lives in `index.js` and `lib/` runtime/account modules.
 
 ## Release notes
+
+### 0.5.0
+
+Fast mode is removed: Pi-native tiers (`samplingParams.service_tier`)
+and explicit `-fast` / `-highspeed` models are the only fast paths now,
+so rotator never changes your model or shapes a request for speed. The
+`/rotator fast` command, the Fast mode menu, and the `fastMode` preference
+are gone; a stale `fastMode` key in config is ignored. (Claude fast
+preview currently has no Pi path; see Fast tiers.) Tier use is still
+observed so tier-only denials cool just the tier instead of benching
+standard capacity.
 
 ### 0.4.0
 

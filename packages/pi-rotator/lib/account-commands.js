@@ -115,10 +115,9 @@ export function canChoose(ctx) {
 
 export function commandCompletions(prefix, names) {
   const input = prefix.trimStart();
-  let values = ["add", "next", "fast", "status", "refresh", "hide", "menu", "rediscover", "account add", "accounts", "limits", "remove", "reset", "cutover"];
+  let values = ["add", "next", "status", "refresh", "hide", "menu", "rediscover", "account add", "accounts", "limits", "remove", "reset", "cutover"];
 
-  if (input.startsWith("fast ")) values = ["fast on", "fast off", "fast status"];
-  else if (input.startsWith("add ")) values = names.map(name => "add " + name);
+  if (input.startsWith("add ")) values = names.map(name => "add " + name);
   else if (input.startsWith("account add ")) values = names.map(name => "account add " + name);
 
   const matches = values.filter(value => value.startsWith(input));
