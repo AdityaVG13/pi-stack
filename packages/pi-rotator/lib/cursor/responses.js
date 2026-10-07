@@ -225,7 +225,7 @@ export async function handleNonStreamingResponse(payload, accessToken, modelId, 
     const stalled = (kind, silentForMs) => {
       if (settled) return;
       discardConversation();
-      nonStreamError = new Error(`Cursor Run stalled: no ${kind} for ${formatStallDuration(silentForMs)}`);
+      nonStreamError = new Error(`Cursor Run stalled: no ${kind} for ${formatStallDuration(silentForMs)} (workspace and session state unchanged)`);
       settle();
     };
     const transportWatchdog = startUpstreamWatchdog(ms => stalled("upstream frames", ms), resolveTransportStallTimeoutMs());

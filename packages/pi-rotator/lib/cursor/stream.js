@@ -111,7 +111,7 @@ export function writeSSEStream(bridge, heartbeatTimer, blobStore, mcpTools, mode
   const failStalledRun = (kind, silentForMs) => {
     if (closed) return;
     const missing = kind === "transport" ? "upstream frames" : "useful output";
-    const message = `Cursor Run stalled: no ${missing} for ${formatStallDuration(silentForMs)}; stream timed out`;
+    const message = `Cursor Run stalled: no ${missing} for ${formatStallDuration(silentForMs)}; stream timed out (workspace and session state unchanged)`;
 
     debugLog("stream.upstream_stall", {
       requestId,

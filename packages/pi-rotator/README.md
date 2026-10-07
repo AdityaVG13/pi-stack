@@ -164,7 +164,7 @@ Warmth TTL resolves per model: the model's own cache lifetime when Pi knows it (
 
 Round-robin switches at `turn_end`, after the stream and tools finish, and the host awaits the switch before the next request. `agent_end` does not rotate it again. Balanced chooses at `agent_end`, so a healthy multi-request run stays on one account. Unserviceable-account responses (`429`/`402`/`401`/`403`, or a finalized quota/rate-limit stream error) rescues the active run: await a healthy account switch, then continue the existing conversation automatically. Recovery works in all three strategies.
 
-Automatic continuation uses Pi's `agent_before_settle` boundary (Pi 0.87+), after native retries and queued work. It omits only the failed assistant attempt from model context, retaining the raw error/partial output in history and all completed tool results. It adds no synthetic user message and does not replay completed tools. If Pi already retried on the new account, rotator does not add another continuation.
+Automatic continuation uses Pi's `agent_before_settle` boundary (Pi 0.87+), after native retries and queued work. It omits only the failed assistant attempt from model context, retaining the raw error/partial output in history and all completed tool results. On cursor rescues that pi-core does not retry first, the omission carries a short handoff note (failed cause, account switch, workspace unaffected) instead of a silent gap. It adds no synthetic user message and does not replay completed tools. If Pi already retried on the new account, rotator does not add another continuation.
 
 An exhausted or rejected account is not revisited within the same activity, even if its cooldown expires. If no eligible switch lands, the original failure remains visible and the activity stops. Aborts, deliberate model changes, unrelated errors and other sessions never inherit a pending continuation. A new user turn starts a fresh attempt budget; shared cooldowns still apply.
 
@@ -342,6 +342,14 @@ already authenticated: same-account/same-model streaming continuations retain it
 while account/model changes rebuild from Pi's transcript with a fresh conversation
 identity. Non-streaming continuations rebuild instead of emitting SSE. This may
 cost cache warmth; server checkpoints and caches are not portable across accounts.
+Cursor usage carries no cache breakdown (the protocol exposes none), so Pi cache
+metrics stay at zero for these slots; efficiency comes from server-side
+conversation reuse, not reported cache hits. Pi request-compat flags such as
+sendSessionAffinityHeaders likewise do not apply: the loopback proxy terminates
+the HTTP request and builds cursor requests itself, so affinity headers cannot
+flow upstream. Cache-optimizer warnings suggesting them for rotator cursor slots
+can be ignored.
+
 Reuse also requires unchanged instructions, tools and prior transcript, including
 the last completed answer. A paused Run accepts results only for its unchanged
 current turn; abandoned pauses rebuild instead of carrying unfinished execs.
@@ -573,6 +581,13 @@ install/upgrade fixtures use fake credentials and temporary agent directories.
 Pure slot, strategy, router, and config logic with unit tests; the Pi edge (`registerProvider`, `setModel`, hooks) lives in `index.js` and `lib/` runtime/account modules.
 
 ## Release notes
+
+### 0.5.1
+
+Cursor stall timeouts now state that workspace and session state are unchanged.
+Cursor rescues that pi-core does not retry substitute a short handoff note
+(failed cause, account switch, workspace unaffected) instead of a silent
+omission; retried failures keep pi-core silent omission.
 
 ### 0.5.0
 

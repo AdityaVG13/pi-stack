@@ -799,6 +799,56 @@ describe("activation", () => {
       assert.equal((await fire(pi, "agent_before_settle", boundary(), live))?.continue, true);
     });
 
+    it("cursor rescue substitutes an explanatory note instead of silently omitting the failed attempt", async () => {
+      const dir = agentDirWith(transportFiles({ "auth.json": { cursor: {}, "cursor-account-2": {} } }));
+      const pi = fakePi();
+      const models = new Map();
+
+      for (const provider of ["cursor", "cursor-account-2"]) models.set(provider + "/cursor-grok-4.6", { provider, id: "cursor-grok-4.6", api: "openai-completions" });
+
+      const live = ctx("cursor", "cursor-rescue-note", {
+        model: models.get("cursor/cursor-grok-4.6"),
+        modelRegistry: { find: (provider, id) => models.get(provider + "/" + id) },
+      });
+
+      pi.setModel = async model => {
+        pi.setModelCalls.push(model);
+        live.model = model;
+
+        return true;
+      };
+
+      piRotator(pi);
+      await fire(pi, "session_start", {}, live);
+      await fire(pi, "after_provider_response", { status: 429 }, live);
+      assert.equal(live.model.provider, "cursor-account-2", "the rescue lands before settle");
+
+      const message = {
+        role: "assistant", provider: "cursor", model: "cursor-grok-4.6", stopReason: "error",
+        errorMessage: "Cursor Run stalled: no upstream frames for 1m; stream timed out",
+        content: [{ type: "text", text: "" }],
+      };
+
+      const event = {
+        outcome: "error",
+        entries: [],
+        context: { contextEntries: [{ sourceEntry: { type: "message", id: "failed-attempt", message }, messages: [message] }] },
+      };
+
+      await fire(pi, "agent_end", { messages: [message] }, live);
+
+      const result = await fire(pi, "agent_before_settle", event, live);
+
+      assert.equal(result?.continue, true);
+      assert.equal(result.entries.length, 1);
+      assert.equal(result.entries[0].type, "context_edit");
+      assert.equal(result.entries[0].targetId, "failed-attempt");
+      assert.match(result.entries[0].replacement.content, /cursor-account-2/, "the note names the rescue target");
+      assert.match(result.entries[0].replacement.content, /unaffected/, "the note counters workspace-loss confabulation");
+      assert.match(result.entries[0].replacement.content, /stalled/, "the note carries the failure cause");
+      assert.equal(ofKind(dir, "resume").length, 1);
+    });
+
     it("awaits a landed switch, then resumes once without another balanced rotation", async () => {
       const { pi, live } = await setup();
       const normalSwitch = pi.setModel;

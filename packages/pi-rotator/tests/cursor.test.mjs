@@ -722,7 +722,7 @@ test("Cursor empty deltas cannot keep an unproductive Run alive", async t => {
         }, 5);
         await bounded("empty-output deadline", f.done);
 
-        if (stream) assert.ok(f.packets().some(packet => packet.error?.type === "upstream_error" && /stalled/.test(packet.error.message)));
+        if (stream) assert.ok(f.packets().some(packet => packet.error?.type === "upstream_error" && /stalled.*workspace and session state unchanged/.test(packet.error.message)), "streaming stall errors reassure against workspace-loss confabulation");
         else assert.equal(json.error?.type, "upstream_error");
 
         if (rejectedTools) {
@@ -1088,7 +1088,7 @@ test("Cursor non-streaming stalls are bounded and kill the abandoned Run", async
     const port = await startProxy(async () => "review-stalled-key");
     const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, { method: "POST", signal: AbortSignal.timeout(250), headers: { "content-type": "application/json", "user-agent": "OpenAI File Downloader, XaiImageApiFetch/1.0" }, body: JSON.stringify({ pi_session_id: "review-stalled", model: "fixture", messages: [{ role: "user", content: "fixture" }], stream: false }) });
     assert.equal(response.status, 502);
-    assert.match((await response.json()).error.message, /stalled/);
+    assert.match((await response.json()).error.message, /stalled.*workspace and session state unchanged/, "stall errors reassure against workspace-loss confabulation");
     assert.equal(bridge.alive, false);
     assert.equal(conversationStates.has(deriveConversationKeyFromSessionId("review-stalled")), false);
   } finally {

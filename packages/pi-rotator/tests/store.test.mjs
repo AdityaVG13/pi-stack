@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applySwitch, branchSelection, repairHiddenRestore, resolveTarget } from "../lib/switch.js";
+import { rescueNote } from "../lib/recovery.js";
 import { safeOn } from "../lib/support.js";
 import {
   EXHAUSTED_STATUS,
@@ -19,6 +20,34 @@ import {
   pruneSessions,
   recordTurn,
 } from "../lib/store.js";
+
+describe("rescueNote", () => {
+  it("names the rescue target, cause and unaffected workspace", () => {
+    const note = rescueNote(
+      { from: "cursor", to: "cursor-account-2", modelId: "cursor-grok-4.6" },
+      { errorMessage: "Cursor Run stalled: no upstream frames for 1m; stream timed out" },
+    );
+
+    assert.match(note, /\[pi-rotator\] Previous attempt failed/);
+    assert.match(note, /cursor-account-2/);
+    assert.match(note, /same model/);
+    assert.match(note, /stalled/);
+    assert.match(note, /unaffected; continue the task/);
+  });
+
+  it("never claims a switch it did not make and bounds the cause", () => {
+    const same = rescueNote({ from: "cursor", to: "cursor", modelId: "m" }, { errorMessage: "" });
+
+    assert.match(same, /retrying on the same account/);
+    assert.match(same, /unknown error/);
+    assert.doesNotMatch(same, /from cursor to cursor/);
+    const long = rescueNote({ from: "a", to: "b", modelId: "m" }, { errorMessage: `first line\nsecond line\n${"x".repeat(500)}` });
+
+    assert.match(long, /first line/);
+    assert.doesNotMatch(long, /second line/);
+    assert.ok(long.length < 400);
+  });
+});
 
 describe("store", () => {
   it("recordTurn counts drain and stamps warmth", () => {

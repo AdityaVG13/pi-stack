@@ -94,6 +94,21 @@ function matchingFailure(message, source, pending) {
     message.stopReason === "error" && message.provider === pending.from && message.model === pending.modelId;
 }
 
+// A scrubbed failure leaves the model a silent gap after a slot change;
+// Grok repeatedly fills it with workspace-loss fiction. Cursor rescues that
+// reach this boundary (failures pi-core does not retry first) substitute a
+// truthful handoff note instead of a silent omission. Retried failures keep
+// pi-core null-omission: the retry request consumes pending before settle.
+export function rescueNote(pending, message) {
+  const cause = String(message?.errorMessage || "unknown error").split("\n", 1)[0].slice(0, 200).trim() || "unknown error";
+
+  const moved = pending.to && pending.to !== pending.from
+    ? `automatically switched account from ${pending.from} to ${pending.to} (same model)`
+    : "retrying on the same account";
+
+  return `[pi-rotator] Previous attempt failed (${cause}); ${moved}. Workspace, files and session state are unaffected; continue the task.`;
+}
+
 function failedContextTail(event, pending) {
   const tail = event.context?.contextEntries?.findLast(entry => entry.messages.length > 0);
   const message = tail?.messages.at(-1);
@@ -195,8 +210,12 @@ export async function onBeforeSettle(dir, state, event, ctx) {
     session: String(sessionIdOf(ctx)).slice(0, 8),
   });
 
+  const replacement = family.base === "cursor"
+    ? { content: rescueNote(pending, source.message) }
+    : null;
+
   return {
-    entries: [...event.entries, { type: "context_edit", targetId: source.id, replacement: null }],
+    entries: [...event.entries, { type: "context_edit", targetId: source.id, replacement }],
     continue: true,
   };
 }

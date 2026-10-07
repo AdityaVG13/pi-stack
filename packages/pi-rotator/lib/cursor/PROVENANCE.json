@@ -257,7 +257,8 @@
       "Unhandled execs and failed native result encodings report through best-effort opt-in debug logs, never stderr.",
       "Non-success HTTP2 responses become status-only Connect errors for streaming and nonzero unary exits with no retained body; streamed 401/402/403/429 failures retain account-recovery semantics.",
       "Effort resolution never double-appends: a model id already ending in the live effort (stale raw ids restored from older sessions) resolves as-is instead of addressing a nonexistent `-high-high` variant.",
-      "Unified model listing: slot catalogs resolve through a per-slot policy (carrier lists the family union, siblings list nothing), sibling discovery re-lists the carrier best-effort, discovery marks feed saved-id supersede, and setup returns a reregister handle for carrier sync. Requests still authenticate per slot."
+      "Unified model listing: slot catalogs resolve through a per-slot policy (carrier lists the family union, siblings list nothing), sibling discovery re-lists the carrier best-effort, discovery marks feed saved-id supersede, and setup returns a reregister handle for carrier sync. Requests still authenticate per slot.",
+      "Stall timeout errors state that workspace and session state are unchanged, giving the model evidence against workspace-loss confabulation after transport timeouts."
     ]
   },
   "shippedModules": [
@@ -335,7 +336,7 @@
     },
     {
       "path": "responses.js",
-      "sha256": "7ac862a21c909d46c3f4b5db7bad2d69bf7bf7a8d4d164eecfa9f72a75cd88ea"
+      "sha256": "ea378bd88b8881e25cdca87c0f81da10891eea8b0de3a0484c57e4f5ef05862a"
     },
     {
       "path": "rpc.js",
@@ -359,7 +360,7 @@
     },
     {
       "path": "stream.js",
-      "sha256": "847da72d66eafd32612acd40c5b9ddab52fc39ebdccf690f3b8df562cb3ff8d3"
+      "sha256": "a90f1d8ea039b5f15059737c93c079c85d4f674ba7f408ba73a8434abbb23fcc"
     },
     {
       "path": "upstream-watchdog.js",

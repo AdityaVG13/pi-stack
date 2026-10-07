@@ -10,7 +10,7 @@ Current versions this file was written against:
 | [pi-papercuts](../packages/pi-papercuts) | 0.4.0 | Agent-filed friction log |
 | [pi-deferred-context-engine](../packages/pi-deferred-context-engine) | 0.5.0 | Defer tools/skills; promote for one run |
 | [pi-supernova](../packages/pi-supernova) | 0.11.0 | One CodeMode tool: `read` / `edit` / `write` / `bash` |
-| [pi-rotator](../packages/pi-rotator) | 0.5.0 | Standalone account management and rotation, including Cursor |
+| [pi-rotator](../packages/pi-rotator) | 0.5.1 | Standalone account management and rotation, including Cursor |
 | [pi-cliffcompaction](../packages/pi-cliffcompaction) | 0.2.0 | Mechanical autocompaction (no LLM summary) |
 | [pi-model-sync](../packages/pi-model-sync) | 0.1.1 | `/model-sync` live provider catalogs into `models.json` |
 | [pi-lakers-theme](../packages/pi-lakers-theme) | 0.2.0 | Pi theme |
