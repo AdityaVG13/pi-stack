@@ -93,7 +93,10 @@ export function parseMessages(messages, debug, toolErrors) {
   const turns = [];
   let currentTurn;
   for (const message of messages.filter(message => message.role !== "system")) {
-    if (message.role === "user") {
+    if (message.role === "custom" && message.customType === "pi-rotator/rescue-note") {
+      if (currentTurn) turns.push(stripTurnRuntimeState(currentTurn));
+      currentTurn = newTurn(message);
+    } else if (message.role === "user") {
       if (currentTurn) turns.push(stripTurnRuntimeState(currentTurn));
       currentTurn = newTurn(message);
     } else if (currentTurn) {

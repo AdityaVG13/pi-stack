@@ -1058,11 +1058,12 @@ test("Cursor failed Runs return errors rather than successful partial answers", 
         const packets = text.split("\n").flatMap(line => line.startsWith("data: {") ? [JSON.parse(line.slice(6))] : []);
         const error = packets.find(packet => packet.error)?.error;
         assert.equal(error?.type, "upstream_error");
-        assert.equal(error.message, code === 1 ? "Bridge connection lost" : "Cursor Run ended before turnEnded");
+        assert.equal(error.message, (code === 1 ? "Bridge connection lost" : "Cursor Run ended before turnEnded") + " (workspace and session state unchanged)");
         assert.ok(!packets.some(packet => packet.choices?.[0]?.finish_reason === "stop"));
       } else {
         assert.equal(response.status, 502);
         assert.equal(JSON.parse(text).error.type, "upstream_error");
+        assert.match(JSON.parse(text).error.message, /workspace and session state unchanged/, "non-streaming terminal errors carry the same reassurance");
       }
 
       assert.equal(conversationStates.has(deriveConversationKeyFromSessionId("review-failed")), false, "failed Runs cannot supply a reusable checkpoint");
@@ -2380,6 +2381,19 @@ test("Cursor protobuf and MCP maps preserve special JSON keys end to end", async
     assert.equal(Object.getPrototypeOf(map), Object.prototype);
     assert.deepEqual(Object.fromEntries(Object.entries(map).map(([name, value]) => [name, toJson(ValueSchema, fromBinary(ValueSchema, value))])), args, "history serialization cannot silently remove arguments");
   });
+});
+
+test("cursor rescue notes parse as user turns while other custom messages stay dropped", () => {
+  const parsed = parseMessages([
+    { role: "user", content: "do the thing" },
+    { role: "custom", customType: "unrelated/contract", content: "must not leak into cursor turns" },
+    { role: "custom", customType: "pi-rotator/rescue-note", content: "[pi-rotator] switched account; continue." },
+  ]);
+
+  assert.equal(parsed.turns.length, 1);
+  assert.equal(parsed.turns[0].userText, "do the thing");
+  assert.equal(parsed.userText, "[pi-rotator] switched account; continue.");
+  assert.ok(!JSON.stringify(parsed).includes("must not leak"));
 });
 
 test("cursor-minted dual tool ids round-trip verbatim and match results by the full id", async () => {

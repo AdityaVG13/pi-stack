@@ -141,7 +141,7 @@
       "outputBytes": 11895,
       "outputSha256": "8d9b7b258961159973c7b6634bb7255c43593ea288c370459412190541d766cd",
       "transform": "Node stripTypeScriptTypes(mode:strip)",
-      "shippedSha256": "fae8b746f859e47767999b3329ae7b531b378b6523555660da2db23fe15163f2"
+      "shippedSha256": "2d92b00fff0a0057c205c541969a6f12efb3f3ca4d8eae1cf1ebe8908e91c9a4"
     },
     {
       "source": "cursor/prompt-usage.ts",
@@ -258,7 +258,8 @@
       "Non-success HTTP2 responses become status-only Connect errors for streaming and nonzero unary exits with no retained body; streamed 401/402/403/429 failures retain account-recovery semantics.",
       "Effort resolution never double-appends: a model id already ending in the live effort (stale raw ids restored from older sessions) resolves as-is instead of addressing a nonexistent `-high-high` variant.",
       "Unified model listing: slot catalogs resolve through a per-slot policy (carrier lists the family union, siblings list nothing), sibling discovery re-lists the carrier best-effort, discovery marks feed saved-id supersede, and setup returns a reregister handle for carrier sync. Requests still authenticate per slot.",
-      "Stall timeout errors state that workspace and session state are unchanged, giving the model evidence against workspace-loss confabulation after transport timeouts."
+      "Terminal Run errors (stalls, missing turnEnded, lost bridge, unprocessable responses) state that workspace and session state are unchanged, giving the model evidence against workspace-loss confabulation after transport failures.",
+      "Rescue handoff notes (custom type pi-rotator/rescue-note) parse as user turns so rebuilt cursor conversations keep the explanation; all other custom message types stay dropped as before."
     ]
   },
   "shippedModules": [
@@ -308,7 +309,7 @@
     },
     {
       "path": "message-parsing.js",
-      "sha256": "fae8b746f859e47767999b3329ae7b531b378b6523555660da2db23fe15163f2"
+      "sha256": "2d92b00fff0a0057c205c541969a6f12efb3f3ca4d8eae1cf1ebe8908e91c9a4"
     },
     {
       "path": "models.js",
@@ -336,7 +337,7 @@
     },
     {
       "path": "responses.js",
-      "sha256": "ea378bd88b8881e25cdca87c0f81da10891eea8b0de3a0484c57e4f5ef05862a"
+      "sha256": "bb75b45c1ae2a0e69429ac44c0411ed867b20a289301cf95a3e7013165e77660"
     },
     {
       "path": "rpc.js",
@@ -360,7 +361,7 @@
     },
     {
       "path": "stream.js",
-      "sha256": "a90f1d8ea039b5f15059737c93c079c85d4f674ba7f408ba73a8434abbb23fcc"
+      "sha256": "e7076f28f77afb0e57dc2777930f9e70997a61a5f8926b9c6fb6bbe8a608164b"
     },
     {
       "path": "upstream-watchdog.js",

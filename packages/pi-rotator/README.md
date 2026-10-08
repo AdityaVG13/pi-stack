@@ -164,7 +164,7 @@ Warmth TTL resolves per model: the model's own cache lifetime when Pi knows it (
 
 Round-robin switches at `turn_end`, after the stream and tools finish, and the host awaits the switch before the next request. `agent_end` does not rotate it again. Balanced chooses at `agent_end`, so a healthy multi-request run stays on one account. Unserviceable-account responses (`429`/`402`/`401`/`403`, or a finalized quota/rate-limit stream error) rescues the active run: await a healthy account switch, then continue the existing conversation automatically. Recovery works in all three strategies.
 
-Automatic continuation uses Pi's `agent_before_settle` boundary (Pi 0.87+), after native retries and queued work. It omits only the failed assistant attempt from model context, retaining the raw error/partial output in history and all completed tool results. On cursor rescues that pi-core does not retry first, the omission carries a short handoff note (failed cause, account switch, workspace unaffected) instead of a silent gap. It adds no synthetic user message and does not replay completed tools. If Pi already retried on the new account, rotator does not add another continuation.
+Automatic continuation uses Pi's `agent_before_settle` boundary (Pi 0.87+), after native retries and queued work. It omits only the failed assistant attempt from model context, retaining the raw error/partial output in history and all completed tool results. On cursor rescues after transient failures that pi-core does not retry first, a short handoff note (failed cause, account switch, workspace unaffected) follows the omission instead of a silent gap; quota rescues and other families keep silent omission. Apart from that note, it adds no synthetic user message and does not replay completed tools. If Pi already retried on the new account, rotator does not add another continuation.
 
 An exhausted or rejected account is not revisited within the same activity, even if its cooldown expires. If no eligible switch lands, the original failure remains visible and the activity stops. Aborts, deliberate model changes, unrelated errors and other sessions never inherit a pending continuation. A new user turn starts a fresh attempt budget; shared cooldowns still apply.
 
@@ -466,7 +466,7 @@ Pi-ai normally treats account aliases as different providers and strips signed r
 
 Prefix identity is load-bearing, so pi-rotator does zero per-account prompt shaping: same model id on every slot, same session, same bytes. Drain is counted in served turns (the response hook carries no token usage, and same-model same-session turns are prefix-dominated). Compaction resets every prefix at once, which makes post-compaction turns free routing choices that `balanced` spends on the least-drained slot.
 
-An unserviceable account is signaled by status `429`/`402`/`401`/`403` seen on `after_provider_response`, or a quota/rate-limit error in the finalized assistant message when a transport reports failure inside an HTTP 200 stream. Other HTTP response errors neither drain nor trigger continuation, except recognized fast-tier denials in a finalized error cool only the tier and can try the next eligible account. Only a real 1xx-3xx status counts as a served turn; a missing status records nothing. Cooling slots sit out for `cooldownMs`. Every response lands in the credential-free debug log at `~/.pi/agent/pi-rotator-debug.log` with its routing decision, so a turn's missing drain is always explainable.
+An unserviceable account is signaled by status `429`/`402`/`401`/`403` seen on `after_provider_response`, or a quota/rate-limit error in the finalized assistant message when a transport reports failure inside an HTTP 200 stream. Other HTTP response errors neither drain nor trigger continuation, except recognized fast-tier denials in a finalized error cool only the tier and can try the next eligible account. Transport deaths (stalls, runs ending before turnEnded, lost bridges, timeouts) rescue like quota failures but bench only briefly (`transient` scope, five minutes) so one flake cannot retire an account for hours; abort-flavored errors never rescue. Only a real 1xx-3xx status counts as a served turn; a missing status records nothing. Cooling slots sit out for `cooldownMs` (transient benches excepted). Every response lands in the credential-free debug log at `~/.pi/agent/pi-rotator-debug.log` with its routing decision, so a turn's missing drain is always explainable.
 
 Before every automatic or manual switch, the target is verified against Pi's own registry (registered provider, resolvable credential). Dead targets are skipped with journal evidence instead of failing your next turn, and a turn that dies before its first request cools its slot the same way exhaustion does. Manual `/rotator next` verifies and awaits the same confirmed handoff.
 
@@ -581,6 +581,18 @@ install/upgrade fixtures use fake credentials and temporary agent directories.
 Pure slot, strategy, router, and config logic with unit tests; the Pi edge (`registerProvider`, `setModel`, hooks) lives in `index.js` and `lib/` runtime/account modules.
 
 ## Release notes
+
+### 0.5.2
+
+Transport deaths (stalls, runs ending before turnEnded, lost bridges,
+timeouts) now rescue like quota failures but bench only briefly (`transient`
+scope, five minutes) so one flake cannot retire an account for hours;
+abort-flavored errors never rescue. Terminal cursor Run errors state that
+workspace and session state are unchanged. Cursor transient rescues append
+a short handoff note after omitting the failed attempt instead of leaving a
+silent gap; quota rescues and other families keep silent omission. This
+replaces 0.5.1 assistant-slot substitution, which blocked auto-continuation
+(pi-core only continues past a non-assistant tail).
 
 ### 0.5.1
 

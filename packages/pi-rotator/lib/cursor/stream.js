@@ -101,8 +101,11 @@ export function writeSSEStream(bridge, heartbeatTimer, blobStore, mcpTools, mode
     if (cancelled || turnFinished) return;
     cancelled = true;
     discardConversation();
+    // Terminal Run errors reach the model verbatim; the suffix counters
+    // workspace-loss confabulation after transport failures.
+    const reassured = `${message} (workspace and session state unchanged)`;
     // An invalid finish_reason makes the host discard the actual failure message.
-    sendSSE({ error: { message, type: "upstream_error", code: "cursor_error" } });
+    sendSSE({ error: { message: reassured, type: "upstream_error", code: "cursor_error" } });
     sendSSE(makeUsageChunk());
     sendDone();
     closeResponse();
@@ -111,7 +114,7 @@ export function writeSSEStream(bridge, heartbeatTimer, blobStore, mcpTools, mode
   const failStalledRun = (kind, silentForMs) => {
     if (closed) return;
     const missing = kind === "transport" ? "upstream frames" : "useful output";
-    const message = `Cursor Run stalled: no ${missing} for ${formatStallDuration(silentForMs)}; stream timed out (workspace and session state unchanged)`;
+    const message = `Cursor Run stalled: no ${missing} for ${formatStallDuration(silentForMs)}; stream timed out`;
 
     debugLog("stream.upstream_stall", {
       requestId,

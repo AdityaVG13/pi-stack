@@ -96,9 +96,9 @@ function matchingFailure(message, source, pending) {
 
 // A scrubbed failure leaves the model a silent gap after a slot change;
 // Grok repeatedly fills it with workspace-loss fiction. Cursor rescues that
-// reach this boundary (failures pi-core does not retry first) substitute a
-// truthful handoff note instead of a silent omission. Retried failures keep
-// pi-core null-omission: the retry request consumes pending before settle.
+// reach this boundary (failures pi-core does not retry first) append a
+// truthful handoff note after the omission. Retried failures keep pi-core
+// null-omission: the retry request consumes pending before settle.
 export function rescueNote(pending, message) {
   const cause = String(message?.errorMessage || "unknown error").split("\n", 1)[0].slice(0, 200).trim() || "unknown error";
 
@@ -144,22 +144,23 @@ function backfillWarmth(family, session, model) {
   return backfilled;
 }
 
-function coolFailedTurn(dir, state, family, session, model, failure) {
+export function coolFailedTurn(dir, state, family, session, model, failure) {
   const ours = failure.slot !== null && family.slots.includes(failure.slot);
   const sharedQuota = failure.unauthorized || (failure.exhausted && fastCapability({ ...model, provider: failure.slot, id: failure.modelId }).kind !== "speed");
   const cooldownKey = sharedQuota ? failure.slot : failureCooldownKey(session, failure.slot, failure.modelId);
+  const transientAccount = failure.transient && cooldownKey === failure.slot;
 
-  if (ours) markCooling(family.cooldowns, cooldownKey, Date.now() + state.config.cooldownMs);
+  if (ours) markCooling(family.cooldowns, cooldownKey, Date.now() + (transientAccount ? TRANSIENT_COOLDOWN_MS : state.config.cooldownMs));
   appendJournal(dir, "turn_failed", {
     family: family.base, slot: failure.slot, message: failure.message, cooled: ours,
-    cooldownScope: cooldownKey === failure.slot ? "account" : "fast-tier",
+    cooldownScope: transientAccount ? "transient" : cooldownKey === failure.slot ? "account" : "fast-tier",
   });
 
   return { ours, cooldownKey };
 }
 
 function recoveryNeeded(failure, cooldownKey) {
-  return failure.exhausted || (cooldownKey !== failure.slot && failure.fastRejected);
+  return failure.exhausted || failure.transient || (cooldownKey !== failure.slot && failure.fastRejected);
 }
 
 function confirmedHandoff(session, slot) {
@@ -210,14 +211,25 @@ export async function onBeforeSettle(dir, state, event, ctx) {
     session: String(sessionIdOf(ctx)).slice(0, 8),
   });
 
-  const replacement = family.base === "cursor"
-    ? { content: rescueNote(pending, source.message) }
-    : null;
+  // An assistant-slot substitution would block continuation (pi-core only
+  // continues past a non-assistant tail), so the omission stays silent and
+  // the explanation rides a separate custom message, which projects as a
+  // user-role turn. Quota failures keep pure omission: narrating them risks
+  // model refusal on the healthy account.
+  const explain = family.base === "cursor" && failureInfo(source.message, model).transient;
+  const entries = [...event.entries, { type: "context_edit", targetId: source.id, replacement: null }];
 
-  return {
-    entries: [...event.entries, { type: "context_edit", targetId: source.id, replacement }],
-    continue: true,
-  };
+  if (explain) {
+    entries.push({
+      type: "custom_message",
+      customType: "pi-rotator/rescue-note",
+      content: rescueNote(pending, source.message),
+      display: false,
+      details: { from: pending.from, to: pending.to, modelId: pending.modelId },
+    });
+  }
+
+  return { entries, continue: true };
 }
 
 
@@ -270,15 +282,24 @@ function failedTurn(event, model) {
   return failureInfo(failure, model);
 }
 
+// Transport deaths (cursor runs that stall, lose their bridge or end without
+// turnEnded) are transient flakes, not quota: rescuable with a short bench so
+// one flake cannot bench an account for hours. Never triggered by quota text
+// (checked first) or anything abort-flavored (user cancels never rescue).
+export const TRANSIENT_COOLDOWN_MS = 5 * 60 * 1000;
+
 function failureInfo(failure, model) {
   const slot = failure.provider ?? (model ? model.provider : null);
+  const text = failure.errorMessage || "";
+  const exhausted = /\bHTTP\s+(?:401|402|403|429)\b|usage[_\s-]*limit|insufficient[_\s-]*quota|quota.{0,30}(?:exceed|exhaust)|(?:exceed|exhaust).{0,30}quota|rate[_\s-]*limit|too many requests|credit balance.{0,30}(?:low|exhaust)/i.test(text);
 
   return {
     slot,
     modelId: failure.model ?? model?.id,
-    unauthorized: /\bHTTP\s+401\b/i.test(failure.errorMessage || ""),
-    fastRejected: fastTierError(failure.errorMessage || ""),
-    exhausted: /\bHTTP\s+(?:401|402|403|429)\b|usage[_\s-]*limit|insufficient[_\s-]*quota|quota.{0,30}(?:exceed|exhaust)|(?:exceed|exhaust).{0,30}quota|rate[_\s-]*limit|too many requests|credit balance.{0,30}(?:low|exhaust)/i.test(failure.errorMessage || ""),
+    unauthorized: /\bHTTP\s+401\b/i.test(text),
+    fastRejected: fastTierError(text),
+    exhausted,
+    transient: !exhausted && !/abort/i.test(text) && /\bstalled\b|\btimed?\s?out\b|ended before turnEnded|bridge connection lost|no upstream frames|no useful output|connect error/i.test(text),
     message: String(
       failure.errorMessage === undefined || failure.errorMessage === null
         ? "turn error"

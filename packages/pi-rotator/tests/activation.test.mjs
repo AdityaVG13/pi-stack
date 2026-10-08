@@ -799,7 +799,7 @@ describe("activation", () => {
       assert.equal((await fire(pi, "agent_before_settle", boundary(), live))?.continue, true);
     });
 
-    it("cursor rescue substitutes an explanatory note instead of silently omitting the failed attempt", async () => {
+    it("cursor rescue appends a handoff note after omitting the failed attempt", async () => {
       const dir = agentDirWith(transportFiles({ "auth.json": { cursor: {}, "cursor-account-2": {} } }));
       const pi = fakePi();
       const models = new Map();
@@ -840,13 +840,165 @@ describe("activation", () => {
       const result = await fire(pi, "agent_before_settle", event, live);
 
       assert.equal(result?.continue, true);
-      assert.equal(result.entries.length, 1);
+      assert.equal(result.entries.length, 2);
       assert.equal(result.entries[0].type, "context_edit");
       assert.equal(result.entries[0].targetId, "failed-attempt");
-      assert.match(result.entries[0].replacement.content, /cursor-account-2/, "the note names the rescue target");
-      assert.match(result.entries[0].replacement.content, /unaffected/, "the note counters workspace-loss confabulation");
-      assert.match(result.entries[0].replacement.content, /stalled/, "the note carries the failure cause");
+      assert.equal(result.entries[0].replacement, null);
+      assert.equal(result.entries[1].type, "custom_message");
+      assert.equal(result.entries[1].customType, "pi-rotator/rescue-note");
+      assert.equal(result.entries[1].display, false);
+      assert.match(result.entries[1].content, /cursor-account-2/, "the note names the rescue target");
+      assert.match(result.entries[1].content, /unaffected/, "the note counters workspace-loss confabulation");
+      assert.match(result.entries[1].content, /stalled/, "the note carries the failure cause");
       assert.equal(ofKind(dir, "resume").length, 1);
+    });
+
+    it("transient cursor transport failures rescue with a short bench instead of dead-stopping", async () => {
+      const dir = agentDirWith(transportFiles({ "auth.json": { cursor: {}, "cursor-account-2": {} } }));
+      const pi = fakePi();
+      const models = new Map();
+
+      for (const provider of ["cursor", "cursor-account-2"]) models.set(provider + "/cursor-grok-4.6", { provider, id: "cursor-grok-4.6", api: "openai-completions" });
+
+      const live = ctx("cursor-account-2", "cursor-transient-rescue", {
+        model: models.get("cursor-account-2/cursor-grok-4.6"),
+        modelRegistry: { find: (provider, id) => models.get(provider + "/" + id) },
+      });
+
+      pi.setModel = async model => {
+        pi.setModelCalls.push(model);
+        live.model = model;
+
+        return true;
+      };
+
+      piRotator(pi);
+      await fire(pi, "session_start", {}, live);
+
+      const message = {
+        role: "assistant", provider: "cursor-account-2", model: "cursor-grok-4.6", stopReason: "error",
+        errorMessage: "Cursor Run ended before turnEnded",
+        content: [{ type: "text", text: "" }],
+      };
+
+      const event = {
+        outcome: "error",
+        entries: [],
+        context: { contextEntries: [{ sourceEntry: { type: "message", id: "failed-transient", message }, messages: [message] }] },
+      };
+
+      await fire(pi, "agent_end", { messages: [message] }, live);
+      assert.equal(live.model.provider, "cursor", "transient transport death rescues like quota exhaustion");
+
+      const result = await fire(pi, "agent_before_settle", event, live);
+
+      assert.equal(result?.continue, true);
+      assert.equal(result.entries.length, 2);
+      assert.equal(result.entries[0].replacement, null);
+      assert.equal(result.entries[1].customType, "pi-rotator/rescue-note");
+      assert.match(result.entries[1].content, /ended before turnEnded/);
+      assert.equal(ofKind(dir, "turn_failed").at(-1).cooldownScope, "transient");
+    });
+
+    it("abort-flavored errors never trigger rescue continuation", async () => {
+      const dir = agentDirWith(transportFiles({ "auth.json": { cursor: {}, "cursor-account-2": {} } }));
+      const pi = fakePi();
+      const models = new Map();
+
+      for (const provider of ["cursor", "cursor-account-2"]) models.set(provider + "/cursor-grok-4.6", { provider, id: "cursor-grok-4.6", api: "openai-completions" });
+
+      const live = ctx("cursor", "cursor-abort-text", {
+        model: models.get("cursor/cursor-grok-4.6"),
+        modelRegistry: { find: (provider, id) => models.get(provider + "/" + id) },
+      });
+
+      piRotator(pi);
+      await fire(pi, "session_start", {}, live);
+
+      const message = {
+        role: "assistant", provider: "cursor", model: "cursor-grok-4.6", stopReason: "error",
+        errorMessage: "Operation aborted by upstream stall monitor",
+        content: [{ type: "text", text: "" }],
+      };
+
+      const event = {
+        outcome: "error",
+        entries: [],
+        context: { contextEntries: [{ sourceEntry: { type: "message", id: "failed-abort-text", message }, messages: [message] }] },
+      };
+
+      await fire(pi, "agent_end", { messages: [message] }, live);
+      assert.equal(await fire(pi, "agent_before_settle", event, live), undefined);
+      assert.equal(ofKind(dir, "resume").length, 0);
+    });
+
+    it("cursor quota rescues keep silent omission without a handoff note", async () => {
+      agentDirWith(transportFiles({ "auth.json": { cursor: {}, "cursor-account-2": {} } }));
+      const pi = fakePi();
+      const models = new Map();
+
+      for (const provider of ["cursor", "cursor-account-2"]) models.set(provider + "/cursor-grok-4.6", { provider, id: "cursor-grok-4.6", api: "openai-completions" });
+
+      const live = ctx("cursor", "cursor-quota-silent", {
+        model: models.get("cursor/cursor-grok-4.6"),
+        modelRegistry: { find: (provider, id) => models.get(provider + "/" + id) },
+      });
+
+      pi.setModel = async model => {
+        pi.setModelCalls.push(model);
+        live.model = model;
+
+        return true;
+      };
+
+      piRotator(pi);
+      await fire(pi, "session_start", {}, live);
+      await fire(pi, "after_provider_response", { status: 429 }, live);
+
+      const message = {
+        role: "assistant", provider: "cursor", model: "cursor-grok-4.6", stopReason: "error",
+        errorMessage: "HTTP 429 rate limit exceeded",
+        content: [{ type: "text", text: "" }],
+      };
+
+      const event = {
+        outcome: "error",
+        entries: [],
+        context: { contextEntries: [{ sourceEntry: { type: "message", id: "failed-quota", message }, messages: [message] }] },
+      };
+
+      await fire(pi, "agent_end", { messages: [message] }, live);
+
+      const result = await fire(pi, "agent_before_settle", event, live);
+
+      assert.equal(result?.continue, true);
+      assert.equal(result.entries.length, 1, "quota failures omit without narrating");
+      assert.equal(result.entries[0].replacement, null);
+    });
+
+    it("non-cursor transient rescues keep silent omission", async () => {
+      const { pi, live } = await setup({}, [CODEX, CODEX2]);
+
+      const message = {
+        role: "assistant", provider: CODEX, model: MODEL, stopReason: "error",
+        errorMessage: "request timed out after 30000ms",
+        content: [{ type: "text", text: "" }],
+      };
+
+      const event = {
+        outcome: "error",
+        entries: [],
+        context: { contextEntries: [{ sourceEntry: { type: "message", id: "failed-timeout", message }, messages: [message] }] },
+      };
+
+      await fire(pi, "agent_end", { messages: [message] }, live);
+      assert.equal(live.model.provider, CODEX2, "transient timeouts rescue on every family");
+
+      const result = await fire(pi, "agent_before_settle", event, live);
+
+      assert.equal(result?.continue, true);
+      assert.equal(result.entries.length, 1, "only cursor gets the handoff note");
+      assert.equal(result.entries[0].replacement, null);
     });
 
     it("awaits a landed switch, then resumes once without another balanced rotation", async () => {

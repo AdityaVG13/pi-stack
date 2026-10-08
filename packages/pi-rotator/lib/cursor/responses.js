@@ -200,9 +200,11 @@ export async function handleNonStreamingResponse(payload, accessToken, modelId, 
         res.writeHead(502, {
           "Content-Type": "application/json"
         });
+        // Terminal errors reach the model verbatim; the suffix counters
+        // workspace-loss confabulation after transport failures.
         res.end(JSON.stringify({
           error: {
-            message: nonStreamError.message,
+            message: `${nonStreamError.message} (workspace and session state unchanged)`,
             type: "upstream_error",
             code: "cursor_error"
           }
@@ -225,7 +227,7 @@ export async function handleNonStreamingResponse(payload, accessToken, modelId, 
     const stalled = (kind, silentForMs) => {
       if (settled) return;
       discardConversation();
-      nonStreamError = new Error(`Cursor Run stalled: no ${kind} for ${formatStallDuration(silentForMs)} (workspace and session state unchanged)`);
+      nonStreamError = new Error(`Cursor Run stalled: no ${kind} for ${formatStallDuration(silentForMs)}`);
       settle();
     };
     const transportWatchdog = startUpstreamWatchdog(ms => stalled("upstream frames", ms), resolveTransportStallTimeoutMs());

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applySwitch, branchSelection, repairHiddenRestore, resolveTarget } from "../lib/switch.js";
-import { rescueNote } from "../lib/recovery.js";
+import { TRANSIENT_COOLDOWN_MS, coolFailedTurn, rescueNote } from "../lib/recovery.js";
 import { safeOn } from "../lib/support.js";
 import {
   EXHAUSTED_STATUS,
@@ -46,6 +46,31 @@ describe("rescueNote", () => {
     assert.match(long, /first line/);
     assert.doesNotMatch(long, /second line/);
     assert.ok(long.length < 400);
+  });
+});
+
+describe("transient cooling", () => {
+  it("benches transient flakes briefly while quota keeps the full cooldown", async t => {
+    const now = Date.now;
+    let clock = 1_000_000;
+
+    Date.now = () => clock;
+    t.after(() => { Date.now = now; });
+    const dir = mkdtempSync(join(tmpdir(), "rotator-transient-cool-"));
+    const family = { base: "cursor", slots: ["cursor", "cursor-account-2"], cooldowns: new Map() };
+    const session = {};
+    const model = { provider: "cursor", id: "cursor-grok-4.6", api: "openai-completions" };
+    const state = { config: { cooldownMs: 21_600_000 } };
+
+    coolFailedTurn(dir, state, family, session, model, { slot: "cursor", modelId: "cursor-grok-4.6", exhausted: false, transient: true, fastRejected: false });
+    coolFailedTurn(dir, state, family, session, model, { slot: "cursor-account-2", modelId: "cursor-grok-4.6", exhausted: true, transient: false, fastRejected: false });
+    assert.equal(TRANSIENT_COOLDOWN_MS, 300_000);
+    assert.equal(family.cooldowns.get("cursor"), 1_000_000 + 300_000);
+    assert.equal(family.cooldowns.get("cursor-account-2"), 1_000_000 + 21_600_000);
+    const rows = readFileSync(journalPath(dir), "utf8").trim().split("\n").map(line => JSON.parse(line));
+
+    assert.equal(rows[0].cooldownScope, "transient");
+    assert.equal(rows[1].cooldownScope, "account");
   });
 });
 
