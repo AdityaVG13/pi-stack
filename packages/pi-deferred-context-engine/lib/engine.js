@@ -182,6 +182,12 @@ export function createDeferredController(pi, initialConfig) {
     }
   }
 
+  function deferredByPolicy(name) {
+    if (!config.enabled || pinNames().has(name) || demoteGuardNames().has(name) || promoted.has(name)) return false;
+
+    return shouldDefer(name, config) || manuallyDeferred.has(name);
+  }
+
   function synchronize({ resetPromotions = false } = {}) {
     if (resetPromotions) promoted.clear();
     deferred.clear();
@@ -468,6 +474,7 @@ export function createDeferredController(pi, initialConfig) {
     demote: (names) => transitions.serialize(() => demote(names)),
     hasDeferred,
     isNameBlocked: nameIsBlocked,
+    isNameDeferred: deferredByPolicy,
     promote: (names) => transitions.serialize(() => promote(names)),
     promotedNames,
     sessionUnblock: (names, options) => transitions.serialize(() => sessionUnblock(names, options)),

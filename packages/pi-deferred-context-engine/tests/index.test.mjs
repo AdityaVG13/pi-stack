@@ -1393,6 +1393,30 @@ test("request boundaries remove captured declarations that synchronization re-de
 });
 
 
+test("request boundaries drop deferred declarations a host re-activated during the request", async t => {
+  const runtime = await reviewRuntime(t, {}, [{ name: "alpha", parameters: {} }, { name: "beta", parameters: {} }]);
+  const native = { type: "web_search_20250305", name: "web_search", max_uses: 5 };
+  const tools = [...["search_tools", "alpha", "beta"].map(name => ({ type: "function", function: { name, parameters: {} } })), native];
+
+  runtime.pi.setActiveTools(["search_tools", "alpha", "beta"]);
+  runtime.pi.setActiveTools = async () => {};
+  const final = await runtime.handlers.get("before_provider_request")({ payload: { tools } }) ?? { tools };
+
+  assert.deepEqual(final.tools.map(tool => tool.function?.name ?? tool.name), ["search_tools", "web_search"]);
+  assert.deepEqual(final.tools[1], native, "provider-native declarations unknown to the registry pass unchanged");
+});
+
+test("OMP agent_end resets run promotions unless the run continues", async t => {
+  const runtime = await reviewRuntime(t, {}, [{ name: "alpha", parameters: {} }]);
+  const busy = { isIdle: () => false };
+
+  await runtime.registered.get("promote_tools").execute("p", { names: ["alpha"] });
+  await runtime.handlers.get("agent_end")({ messages: [], willContinue: true }, busy);
+  assert.ok(runtime.pi.getActiveTools().includes("alpha"), "a continuing run keeps its promotions");
+  await runtime.handlers.get("agent_end")({ messages: [], willContinue: undefined }, busy);
+  assert.ok(!runtime.pi.getActiveTools().includes("alpha"), "a final agent_end resets run promotions");
+});
+
 test("disabled audit reports no prompt pruning for native and legacy prompts", async t => {
   const runtime = await reviewRuntime(t, { enabled: false, deferSkills: true, deduplicateContext: true });
   const contextFiles = [{ path: "/a/AGENTS.md", content: "same rules" }, { path: "/b/AGENTS.md", content: "same rules" }];
