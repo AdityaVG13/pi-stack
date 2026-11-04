@@ -32,7 +32,9 @@ omp install ./packages/pi-deferred-context-engine
 - Defers tool schemas (and prompt snippets) that are not pinned
 - Strips the global skill index from the turn prompt; `search_tools` can load a matching skill
 - Drops byte-identical duplicate `AGENTS.md` blocks (keeps distinct files)
-- After `agent_settled`, run-scoped promotions clear (default)
+- After `agent_settled`, run-scoped promotions clear (default). OMP has no
+  `agent_settled`; a final `agent_end` (`willContinue` present and not `true`)
+  is the same boundary. A continuing OMP run (`willContinue: true`) keeps promotions.
 
 An intermediate `agent_end` while Pi is still busy does not clear promotions or
 open a keep-pinned dialog. Legacy hosts use `agent_end` when idle, or when the
@@ -88,10 +90,12 @@ codemode/deferred tools into the prompt or attempting to activate hidden tools.
 Already activated codemode/deferred tools remain active when DCE is disabled.
 
 `search_tools`, `promote_tools` and `demote_tools` are model-only loadout
-controllers. `search_tools.prepareLoadout()` omits blocked declarations from
-modern requests; the `tool_call` guard also denies **nested** calls through the
-host dispatcher. This blocks named host tools, not equivalent capabilities
-inside an allowed tool (such as Supernova's owned file operations).
+controllers. `search_tools.prepareLoadout()` omits blocked, hidden, and
+policy-deferred declarations from modern requests; request-boundary filters do
+the same for captured payloads. Names unknown to the registry (provider-native
+declarations) pass through. The `tool_call` guard also denies **nested** calls
+through the host dispatcher. This blocks named host tools, not equivalent
+capabilities inside an allowed tool (such as Supernova's owned file operations).
 
 DCE does not enable native codemode, tool search, or MCP, and does not rewrite
 other packages' exposures. Native tool-search promotions are not DCE pins:
@@ -294,7 +298,7 @@ More: [residual risks](https://github.com/AdityaVG13/pi-stack/blob/main/docs/RES
 
 Controller mutations (`promote`, `demote`, `synchronize`, config changes, schema compaction and session unblocks) serialize while an asynchronous host update is pending. Synchronous hosts retain synchronous returns; callers must await a returned Promise. A rejected or silently ignored update is not reported as an added/removed tool: results list `rejected` names and `setActiveError`, and promotion/schema bookkeeping follows observed active names. Session unblock reports activation only after it settles. A human unblock changes policy even if its separate activation request fails.
 
-This coordinates DCE's own operations, not independent extensions calling `setActiveTools` behind it. Hard blocks still require the tool-call guard when a host refuses to deactivate a tool.
+This coordinates DCE's own operations, not independent extensions calling `setActiveTools` behind it. Catalog and promotion bookkeeping still follow observed host activation. Request and loadout filters still drop registered tools that policy would defer, so an unreconciled host write (OMP re-enabling a server's tools on MCP refresh, or an ignored `setActiveTools`) cannot put those schemas on the wire. Hard blocks still require the tool-call guard when a host refuses to deactivate a tool.
 
 ## License
 

@@ -662,7 +662,11 @@ test("keep-promotion does not pin a tool that left the registry", async () => {
     active = active.filter(name => name !== "weather");
 
     await handlers.get("agent_settled")({}, {
-      ui: { notify() {}, confirm: async (_title, message) => { prompts.push(message); return true; } },
+      ui: { notify() {}, confirm: async (_title, message) => {
+        prompts.push(message);
+
+        return true;
+      } },
     });
 
     assert.deepEqual(prompts, [], "unregistered promotions must not be offered for alwaysActive");
@@ -779,7 +783,9 @@ test("modern discovery respects hidden exposure and hard blocks direct and neste
       getExposure: name => tools.find(t => t.name === name).exposure ?? "direct",
     };
 
-    assert.deepEqual(new Set(search.prepareLoadout(loadout).hiddenDeclarations), new Set(["blocked_tool", "hidden_tool"]));
+    assert.deepEqual(new Set(search.prepareLoadout(loadout).hiddenDeclarations), new Set([
+      "blocked_tool", "hidden_tool", "demote_tools", "list_capabilities", "promote_tools",
+    ]), "blocked, hidden, and still-deferred controllers are omitted; the promoted tool is not");
 
     for (const name of ["search_tools", "promote_tools", "demote_tools"]) {
       assert.equal(registered.get(name).exposure, "model-only", "loadout controllers cannot be nested");
@@ -1045,11 +1051,18 @@ test("keep-pin does not persist a session-unblocked name that remains config-blo
       getAllTools: () => [{ name: "blocked", parameters: {} }, ...registered.values()],
       getActiveTools: () => active, setActiveTools: async names => { active = [...names]; } });
     const prompts = [];
-    const ctx = { hasUI: true, ui: { notify() {}, confirm: async (_title, message) => { prompts.push(message); return true; } } };
+
+    const ctx = { hasUI: true, ui: { notify() {}, confirm: async (_title, message) => {
+      prompts.push(message);
+
+      return true;
+    } } };
+
     await handlers.get("session_start")({}, ctx);
     await commands.get("deferred").handler("unblock blocked", ctx);
     assert.ok(active.includes("blocked"));
     await handlers.get("agent_settled")({}, ctx);
+
     assert.deepEqual(prompts, [], "session unblock is not a pin; alwaysActive cannot override blockedTools");
     const saved = JSON.parse(fs.readFileSync(file, "utf8"));
     assert.equal(saved.alwaysActive, undefined);
@@ -1392,6 +1405,42 @@ test("request boundaries remove captured declarations that synchronization re-de
   assert.deepEqual(settled.tools.map(tool => tool.name), ["read"], "expired promotions cannot survive in captured declarations");
 });
 
+
+test("request boundaries drop deferred declarations a host re-activated during the request", async t => {
+  const runtime = await reviewRuntime(t, {}, [{ name: "alpha", parameters: {} }, { name: "beta", parameters: {} }]);
+  const native = { type: "web_search_20250305", name: "web_search", max_uses: 5 };
+  const tools = [...["search_tools", "alpha", "beta"].map(name => ({ type: "function", function: { name, parameters: {} } })), native];
+
+  runtime.pi.setActiveTools(["search_tools", "alpha", "beta"]);
+  runtime.pi.setActiveTools = async () => {};
+
+  const payload = { tools };
+  const final = await runtime.handlers.get("before_provider_request")({ payload }) ?? payload;
+
+  assert.deepEqual(final.tools.map(tool => tool.function?.name ?? tool.name), ["search_tools", "web_search"]);
+  assert.deepEqual(final.tools[1], native, "provider-native declarations unknown to the registry pass unchanged");
+
+  const loadout = {
+    declared: [{ name: "search_tools" }, { name: "alpha" }, { name: "beta" }, { name: "web_search" }],
+    getExposure: () => "direct",
+  };
+
+  const hidden = new Set(runtime.registered.get("search_tools").prepareLoadout(loadout).hiddenDeclarations);
+
+  assert.ok(hidden.has("alpha") && hidden.has("beta"), "prepareLoadout hides registered tools deferred by policy");
+  assert.ok(!hidden.has("search_tools") && !hidden.has("web_search"), "spine and unknown native names stay in the loadout");
+});
+
+test("OMP agent_end resets run promotions unless the run continues", async t => {
+  const runtime = await reviewRuntime(t, {}, [{ name: "alpha", parameters: {} }]);
+  const busy = { isIdle: () => false };
+
+  await runtime.registered.get("promote_tools").execute("p", { names: ["alpha"] });
+  await runtime.handlers.get("agent_end")({ messages: [], willContinue: true }, busy);
+  assert.ok(runtime.pi.getActiveTools().includes("alpha"), "a continuing run keeps its promotions");
+  await runtime.handlers.get("agent_end")({ messages: [], willContinue: undefined }, busy);
+  assert.ok(!runtime.pi.getActiveTools().includes("alpha"), "a final agent_end resets run promotions");
+});
 
 test("disabled audit reports no prompt pruning for native and legacy prompts", async t => {
   const runtime = await reviewRuntime(t, { enabled: false, deferSkills: true, deduplicateContext: true });

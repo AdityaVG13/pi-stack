@@ -135,11 +135,13 @@ export default function piDeferredContextEngine(pi) {
 
   // Captured declarations may predate reconciliation. Exclude registered tools
   // outside the live loadout, but leave provider-native tools unknown to Pi intact.
+  // Policy deferral still wins when the host re-activated a tool (OMP MCP refresh,
+  // or a setActiveTools write that did not land).
   function requestDeclarationFilter() {
     const active = new Set(pi.getActiveTools());
 
     const excluded = new Set(pi.getAllTools()
-      .filter(tool => tool.exposure === "hidden" || !active.has(tool.name))
+      .filter(tool => tool.exposure === "hidden" || !active.has(tool.name) || controller.isNameDeferred(tool.name))
       .map(tool => tool.name));
 
     return name => excluded.has(name) || controller.isNameBlocked(name);
@@ -245,7 +247,10 @@ export default function piDeferredContextEngine(pi) {
   pi.on("agent_end", (event, ctx) => {
     // Pi stays busy through retries/continuations; its agent_settled is final.
     // Older hosts without settlement keep the idle agent_end fallback.
-    if (isFunction(ctx?.isIdle) && !ctx.isIdle()) return;
+    // OMP reports busy at agent_end and marks continuations with willContinue.
+    if (event && Object.hasOwn(event, "willContinue")) {
+      if (event.willContinue === true) return;
+    } else if (isFunction(ctx?.isIdle) && !ctx.isIdle()) return;
 
     return onAgentSettled(event, ctx);
   });

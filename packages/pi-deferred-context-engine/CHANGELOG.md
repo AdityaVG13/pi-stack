@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+### Fixed
+
+- Request and loadout filters drop registered tools that policy would defer even when the host still reports them active, so an OMP MCP refresh (or a `setActiveTools` write that did not land) cannot put the full tool set on the wire. Provider-native declarations unknown to the registry still pass through.
+- OMP `agent_end` resets run-scoped promotions when the event carries `willContinue` and it is not `true`. OMP emits no `agent_settled` and reports busy during `agent_end`, so promotions previously stayed active for the whole session. Pi `agent_end` has no such key; its idle/`agent_settled` behaviour is unchanged.
+
 ## 0.5.0
 
 ### Changed

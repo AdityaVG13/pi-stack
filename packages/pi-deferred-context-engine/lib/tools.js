@@ -167,7 +167,7 @@ export function registerDeferredTools(pi, controller, getConfig, getSkills) {
       if (!getConfig().enabled) return;
 
       return { hiddenDeclarations: loadout.declared.filter(tool =>
-        controller.isNameBlocked(tool.name) || loadout.getExposure(tool.name) === "hidden",
+        controller.isNameBlocked(tool.name) || loadout.getExposure(tool.name) === "hidden" || controller.isNameDeferred(tool.name),
       ).map(tool => tool.name) };
     },
     label: "Search capabilities",
