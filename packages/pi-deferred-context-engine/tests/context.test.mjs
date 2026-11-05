@@ -41,6 +41,21 @@ test("removes duplicate context and the visible skill index exactly", () => {
   assert.ok(optimized.stats.removedChars > 0);
 });
 
+test("removes duplicate CRLF context blocks", () => {
+  const file = { path: "/global/AGENTS.md", content: "same rules" };
+  const block = contextBlock(file).replace(/\n/g, "\r\n");
+  const prompt = "base" + block + block + "end";
+
+  const optimized = optimizeSystemPrompt(prompt, { contextFiles: [file, file] }, {
+    deduplicateContext: true,
+    deferSkills: false,
+  });
+
+  assert.equal([...optimized.systemPrompt.matchAll(/<project_instructions/g)].length, 1);
+  assert.equal(optimized.stats.duplicateFiles, 1);
+  assert.match(optimized.systemPrompt, /same rules/);
+});
+
 test("strips the compressed skill index form", () => {
   const skills = [
     { name: "alpha", description: "A", filePath: "/root-a/alpha/SKILL.md" },

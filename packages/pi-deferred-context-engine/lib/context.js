@@ -109,6 +109,16 @@ function removeOnce(text, needle) {
   return text.slice(0, index) + text.slice(index + needle.length);
 }
 
+function removeContextBlock(prompt, file) {
+  for (const needle of newlineVariants(contextBlock(file))) {
+    const next = removeOnce(prompt, needle);
+
+    if (next !== prompt) return next;
+  }
+
+  return prompt;
+}
+
 export { toolPriorityGuidance, toolPriorityText, prioritizePayload, prioritizeContext } from "./routing.js";
 
 function deduplicatePrompt(prompt, files) {
@@ -119,7 +129,7 @@ function deduplicatePrompt(prompt, files) {
   for (const file of files) {
     if (!seen.has(file.content)) { seen.add(file.content); continue; }
 
-    const next = removeOnce(prompt, contextBlock(file));
+    const next = removeContextBlock(prompt, file);
 
     if (next !== prompt) {
       duplicateFiles++;
@@ -131,12 +141,21 @@ function deduplicatePrompt(prompt, files) {
   return { prompt, duplicateFiles, duplicateContextChars };
 }
 
+function newlineVariants(text) {
+  if (!text) return [];
+
+  const crlf = text.replace(/\n/g, "\r\n");
+
+  return crlf === text ? [text] : [text, crlf];
+}
+
 function findSkillIndex(prompt, skills) {
   for (const format of [formatSkillIndex, formatCompressedSkillIndex]) {
-    const text = format(skills);
-    const at = text ? prompt.indexOf(text) : -1;
+    for (const text of newlineVariants(format(skills))) {
+      const at = prompt.indexOf(text);
 
-    if (at >= 0) return { text, at };
+      if (at >= 0) return { text, at };
+    }
   }
 
   return null;
@@ -150,7 +169,8 @@ function deferPromptSkills(prompt, skills, config) {
   const count = skills.length - pinned.length;
 
   if (!index) return { prompt, count, chars: 0 };
-  const replacement = pinned.length > 0 ? formatSkillIndex(pinned) : "";
+  const lf = pinned.length > 0 ? formatSkillIndex(pinned) : "";
+  const replacement = index.text.includes("\r\n") && lf ? lf.replace(/\n/g, "\r\n") : lf;
 
   return { prompt: prompt.slice(0, index.at) + replacement + prompt.slice(index.at + index.text.length),
     count, chars: index.text.length - replacement.length };

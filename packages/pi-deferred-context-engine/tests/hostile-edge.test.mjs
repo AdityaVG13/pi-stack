@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 import { loadConfig, mergeConfig } from "../lib/config.js";
 import { createDeferredController } from "../lib/engine.js";
-import { formatSkillIndex, optimizeSystemPrompt, readSkill } from "../lib/context.js";
+import { formatCompressedSkillIndex, formatSkillIndex, optimizeSystemPrompt, readSkill } from "../lib/context.js";
 
 function mockPi(toolNames) {
   const tools = toolNames.map((name) => ({ name, description: name }));
@@ -160,14 +160,19 @@ test("fixed: setActiveTools throw escapes synchronize", () => {
   assert.doesNotThrow(() => controller.synchronize({ resetPromotions: true }));
 });
 
-test("document: skill strip is exact-match (CRLF does not strip)", () => {
+test("skill strip removes CRLF skill indexes", () => {
   const skills = [{ name: "alpha", description: "A", filePath: "/r/alpha/SKILL.md" }];
   const exact = formatSkillIndex(skills);
   const crlf = "base" + exact.replace(/\n/g, "\r\n") + "\nend";
   const optimized = optimizeSystemPrompt(crlf, { skills }, { deferSkills: true });
-  // Current behavior: strip fails on CRLF -- residual risk for Windows hosts.
-  assert.match(optimized.systemPrompt, /available_skills/, "documents current exact-match limitation");
-  assert.equal(optimized.stats.deferredSkillChars, 0);
+  assert.doesNotMatch(optimized.systemPrompt, /available_skills/);
+  assert.equal(optimized.systemPrompt, "base\nend");
+  assert.ok(optimized.stats.deferredSkillChars > 0);
+  const compressed = formatCompressedSkillIndex(skills);
+  const crlfCompressed = "pre" + compressed.replace(/\n/g, "\r\n") + "post";
+  const compact = optimizeSystemPrompt(crlfCompressed, { skills }, { deferSkills: true });
+  assert.doesNotMatch(compact.systemPrompt, /Skills under/);
+  assert.equal(compact.systemPrompt, "prepost");
 });
 
 test("document: replaceAlwaysActive [] soft-locks to spine only", () => {

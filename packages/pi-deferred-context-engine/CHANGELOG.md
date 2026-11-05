@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.2
+
+### Fixed
+
+- Skill-index deferral matches CRLF (Windows) copies of both the verbose
+  `<available_skills>` block and the compressed `Skills under` form.
+- Duplicate context removal matches CRLF `project_instructions` blocks.
+
 ## 0.5.1
 
 ### Fixed
