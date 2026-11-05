@@ -188,6 +188,25 @@ async function assertExpectedSignature(vfs, logicalPath, target, stat) {
   }
 }
 
+// Native rebuilders compare source vs object mtime. Rename can keep or
+// decrease mtime on coarse clocks, so restorations would look older than the
+// object they are meant to replace.
+async function ensureNewerMtime(target, previous) {
+  if (previous?.mtimeMs == null) return;
+
+  const published = await fs.stat(target);
+
+  if (published.mtimeMs > previous.mtimeMs) return;
+
+  const next = new Date(Math.max(Date.now(), previous.mtimeMs + 1000));
+
+  try { await fs.utimes(target, next, next); }
+  catch (error) {
+    if (error.code === "EPERM" || error.code === "EACCES") return;
+    throw error;
+  }
+}
+
 async function installStaged(vfs, staged) {
   for (const entry of staged) {
     if (entry.existed) await assertStageReady(vfs, entry);
@@ -209,6 +228,9 @@ async function installStaged(vfs, staged) {
     }
 
     entry.replaced = true;
+
+    if (entry.existed) await ensureNewerMtime(entry.target, entry.observed);
+
     // Record publication first so invalidation during awaited I/O triggers recovery.
     vfs.assertCurrent?.();
     vfs.signal?.throwIfAborted();

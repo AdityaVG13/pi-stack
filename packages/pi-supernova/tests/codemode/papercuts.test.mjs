@@ -2,7 +2,7 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { runCommand } from "../../src/fs/workspace.js";
+import { commandSpawnError, runCommand } from "../../src/fs/workspace.js";
 import { engineFixture, modelText } from "../helpers/engine.mjs";
 import { quickCheck } from "../../src/fs/check.js";
 import { jsonErrorContext, parsePosition } from "../../src/shared/syntax-context.js";
@@ -281,6 +281,22 @@ it("shell commands inherit the program timeout while explicit command limits sti
   await f.tool.execute("short-command", {code, data:{timeoutMs:1200}, timeoutMs:300000}, undefined, undefined, {cwd:f.root});
   assert.equal(delays.filter(ms => ms === 300000).length, 1);
   assert.ok(delays.includes(1200), "an explicit per-command deadline must remain authoritative");
+});
+
+it("foreground bash rejects a command timeout larger than the program deadline", async t => {
+  const f = await engineFixture(t);
+  const started = Date.now();
+  await assert.rejects(
+    f.execute('return await bash({command:"sleep 10",timeoutMs:5000});'),
+    /bash timeoutMs 5000 exceeds the program timeoutMs 2000/,
+  );
+  assert.ok(Date.now() - started < 1500, "must fail before the program deadline elapses");
+});
+
+it("background bash may request a timeout longer than the program deadline", async t => {
+  const f = await engineFixture(t);
+  const result = await f.execute('const job = await bash({command:"sleep 0.2",background:true,timeoutMs:5000}); return job.sessionId || job;');
+  assert.match(result.details.result, /\S/);
 });
 
 it("oversized data reports serialized size and a lossless chunked-write recovery", async t => {
@@ -621,6 +637,26 @@ it("filesystem permission failures name the path or command with guidance", asyn
   });
   assert.equal(await fs.readFile(path.join(f.root,"ro-dir/new.txt"),"utf8"),"original");
   await restoreDir();
+});
+
+it("unusable spawn codes name the command instead of leaking spawn UNKNOWN", () => {
+  const error = commandSpawnError({code:"UNKNOWN",message:"spawn UNKNOWN"}, "rg.exe");
+  assert.match(error.message, /cannot execute rg\.exe/);
+  assert.match(error.message, /not usable/);
+  assert.doesNotMatch(error.message, /UNKNOWN/);
+  assert.doesNotMatch(error.message, /spawn /);
+});
+
+it("published writes strictly increase mtime so external rebuilds notice restores", async t => {
+  const f = await engineFixture(t);
+  const target = path.join(f.root, "addon.cpp");
+  await f.execute('await write("addon.cpp","int x=1;\\n");');
+  const first = (await fs.stat(target)).mtimeMs;
+  await fs.utimes(target, new Date(first + 10_000), new Date(first + 10_000));
+  const frozen = (await fs.stat(target)).mtimeMs;
+  await f.execute('await write("addon.cpp","int x=2;\\n");');
+  const restored = (await fs.stat(target)).mtimeMs;
+  assert.ok(restored > frozen, "mtime " + restored + " should exceed frozen " + frozen + " after restore");
 });
 
 it("bash cwd must be a directory and never leaks spawn codes", async t => {

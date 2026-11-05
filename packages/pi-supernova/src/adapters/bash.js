@@ -21,6 +21,11 @@ export function createBash(ctx) {
       params = normalizeBash(params);
 
       if (params.background === true || params.action !== undefined) return background(params, signal);
+
+      if (params.timeoutMs !== undefined && params.timeoutMs > config.timeoutMs) {
+        throw new Error("bash timeoutMs " + params.timeoutMs + " exceeds the program timeoutMs " + config.timeoutMs + "; increase the outer supernova timeoutMs, or split the work. Sleeps count toward the deadline");
+      }
+
       const cwd = getCwd();
       const command = String(params.command);
       const literal = Array.isArray(params.args);

@@ -195,7 +195,7 @@ function fuzzySnapMiss(exact, query, paths, pathContext, relativeRoot, empty) {
 
 async function snapListing(needsPaths, truncated, diskFiles, includeHidden, dir, run, signal) {
   const listing = needsPaths && !truncated && diskFiles
-    ? await run(["rg", "--files", "--null", ...(includeHidden ? ["--hidden"] : []), "-g", "!.git/**", "-g", "!**/.git/**", dir], { cwd: dir, signal, timeoutMs: 15000, maxOutputChars: MAX_SEARCH_CHARS })
+    ? await run(["rg", "--files", "--null", ...(includeHidden ? ["--hidden"] : []), "-g", "!.git/**", "-g", "!**/.git/**", "."], { cwd: dir, signal, timeoutMs: 15000, maxOutputChars: MAX_SEARCH_CHARS })
     : { stdout: "", exitCode: 1 };
 
   if (listing.exitCode !== 0 && listing.exitCode !== 1) throw new Error("source file listing failed: " + listing.stderr.trim());

@@ -53,7 +53,7 @@ error: ${outcome.error}${logsBlock(outcome)}`);
 }
 
 function successText(outcome, call) {
-  const truncated = outcome.returnTruncated ? " [return truncated]" : "";
+  const truncated = outcome.returnTruncated ? " [return truncated] (display capped; write large results to a file, or reread with offset/limit/json)" : "";
   const hint = outcome.undefinedReturn ? " (no return statement; add `return` to get a value)" : "";
 
   return `ok #${call} ${outcome.wallMs}ms${truncated}${mutationText(outcome, false)}${splitTurnHint(outcome)}${logsBlock(outcome, "\n--- result")}\n${outcome.resultText}${hint}`;

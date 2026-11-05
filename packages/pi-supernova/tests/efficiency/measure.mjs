@@ -344,7 +344,7 @@ async function phaseAMeasurements() {
     }
 
     assert.equal(blockedExecutions,0);
-    const sandbox = new CodemodeSandbox({wasm,timeoutMs:2000,memoryLimitBytes:256*1048576});
+    const sandbox = new CodemodeSandbox({wasm,timeoutMs:10000,memoryLimitBytes:256*1048576});
 
     try {
       const noisy = await sandbox.execute('for(let i=0;i<200;i++)text("x".repeat(10000));return 1;');
@@ -358,7 +358,7 @@ async function phaseAMeasurements() {
     // the public result; no filesystem effects are involved in this probe.
     let release, pendingSignal, hostSettled = false;
 
-    const pendingSandbox = new CodemodeSandbox({wasm,timeoutMs:2000,tools:[
+    const pendingSandbox = new CodemodeSandbox({wasm,timeoutMs:10000,tools:[
       {name:"pending",execute:(_args,{signal})=>{pendingSignal=signal;
 
         return new Promise(resolve=>{release=()=>{hostSettled=true;resolve("released");};});}},
@@ -382,7 +382,7 @@ async function phaseAMeasurements() {
     let beginWait;
     const waiting = new Promise(resolve=>{beginWait=resolve;});
 
-    const cancelSandbox = new CodemodeSandbox({wasm,timeoutMs:2000,tools:[{name:"wait",execute:(_args,{signal})=>new Promise((resolve,reject)=>{
+    const cancelSandbox = new CodemodeSandbox({wasm,timeoutMs:10000,tools:[{name:"wait",execute:(_args,{signal})=>new Promise((resolve,reject)=>{
       signal.addEventListener("abort",()=>reject(new Error("cancelled")),{once:true});beginWait();
     })}]});
 

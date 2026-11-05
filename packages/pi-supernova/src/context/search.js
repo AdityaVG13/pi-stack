@@ -73,6 +73,8 @@ export async function referencesForNames({ root, names, excludePath, overlayText
   const add = (file, line, text) => {
     if (file === excludePath) return;
 
+    if (/\.(?:patch|diff)$/i.test(file)) return;
+
     for (let i = 0; i < names.length; i++) {
       const hits = references.get(names[i]);
 
@@ -80,7 +82,7 @@ export async function referencesForNames({ root, names, excludePath, overlayText
     }
   };
 
-  const result = await run(["rg", "--json", "--fixed-strings", ...names.flatMap(name => ["-e", name]), "--", root],
+  const result = await run(["rg", "--json", "--fixed-strings", "-g", "!*.patch", "-g", "!*.diff", ...names.flatMap(name => ["-e", name]), "--", "."],
     { cwd: root, signal, timeoutMs: 5000, maxOutputChars: 65536 });
 
   if (result.exitCode !== 0 && result.exitCode !== 1) throw new Error(result.stderr.trim() || "reference search failed");
@@ -105,10 +107,20 @@ function pushGrepFlags(args, pattern, params) {
   if (Number.isInteger(limit) && limit > 0) args.push("--max-count", String(Math.min(limit, 2000)));
 }
 
-export function rgGrepArgs(pattern, params, searchPath) {
+/** rg matches --glob against names relative to cwd. An absolute search path makes src/** miss. */
+export function rgSearchPath(searchDir, cwd) {
+  if (path.resolve(cwd, searchDir) === path.resolve(cwd)) return ".";
+  const relative = path.relative(cwd, searchDir);
+
+  if (relative && !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(".." + path.sep)) return relative;
+
+  return searchDir;
+}
+
+export function rgGrepArgs(pattern, params, searchPath, cwd) {
   const args = ["--line-number", "--no-heading", "--color", "never"];
   pushGrepFlags(args, pattern, params);
-  args.push("--", pattern, searchPath);
+  args.push("--", pattern, cwd ? rgSearchPath(searchPath, cwd) : searchPath);
 
   return args;
 }
@@ -143,7 +155,7 @@ async function listDisk(searchDir, pattern, cwd, signal) {
   const args = ["--files", "--null"];
 
   if (pattern) args.push("-g", pattern);
-  const res = await runCommand(["rg", ...args, searchDir], { cwd, timeoutMs: 30_000, signal }).catch(() => null);
+  const res = await runCommand(["rg", ...args, rgSearchPath(searchDir, cwd)], { cwd, timeoutMs: 30_000, signal }).catch(() => null);
 
   if (res && (res.exitCode === 0 || res.exitCode === 1)) return { stdout: res.stdout, via: "rg", outputTruncated: res.outputTruncated === true };
   const findArgs = [searchDir];

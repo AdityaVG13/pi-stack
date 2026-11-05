@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.11.1
+
+### Fixed
+
+- Fallback `rg --files` / `rg` grep now search `.` when the target is already the
+  cwd, so include globs such as `src/**.js` and `{src/**,other*.txt}` match.
+  Passing the absolute directory made ripgrep 15 match globs against full paths
+  and drop every hit. Index listings, snap listings, and `.git` excludes use the
+  same relative search path.
+- Foreground `bash` rejects `timeoutMs` larger than the program deadline before
+  the command starts, instead of running until the outer 60s cap.
+- Truncated model returns name the display cap and the recovery (`write` to a
+  file, or reread with `offset`/`limit`/`json`). Guest computation is unchanged.
+- Published replacements bump mtime when the filesystem would not, so external
+  rebuilds notice restores.
+- `spawn UNKNOWN` names the unusable executable instead of leaking the OS code.
+- Edit reference hints skip `.patch` / `.diff` artifacts so benchmark inputs and
+  patch files are not reported as callers.
+
 ## 0.11.0
 
 ### Changed

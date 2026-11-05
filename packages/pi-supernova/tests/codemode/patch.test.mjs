@@ -130,6 +130,17 @@ it("patches preserve literal carriage returns on lines without a final newline",
   assert.deepEqual(await fs.readFile(path.join(f.root, "tail.txt")), Buffer.from("after\r\n"));
 });
 
+it("edit reference hints ignore patch artifacts even without an ignore file", async t => {
+  const f = await engineFixture(t);
+  await f.write("api.js", "export function oldApi() { return 1; }\n");
+  await f.write("callers.js", "oldApi(); newApi();\n");
+  await f.write("change.patch", "@@ -1 +1 @@\n-export function oldApi() { return 1; }\n+export function newApi() { return 2; }\n");
+  const result = await f.execute('return await edit("api.js", "oldApi", "newApi");');
+  assert.match(result.details.result, /oldApi also referenced in callers\.js:1/);
+  assert.match(result.details.result, /newApi also referenced in callers\.js:1/);
+  assert.doesNotMatch(result.details.result, /change\.patch/);
+});
+
 it("patch reference lookups scan source linearly and retain late declarations in both versions", async t => {
   const f = await engineFixture(t);
   const marker = "// reference-scan-fixture\n";

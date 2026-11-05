@@ -231,7 +231,7 @@ export class WorkspaceIndex {
     const args = ["rg", "--files", "--null"];
 
     if (includeHidden) args.push("--hidden");
-    args.push("-g", "!.git/**", "-g", "!**/.git/**", "--", root);
+    args.push("-g", "!.git/**", "-g", "!**/.git/**", "--", ".");
 
     try {
       return parseRgFiles(await this.runCommand(args, { cwd: root, timeoutMs: 15_000, signal }), root);

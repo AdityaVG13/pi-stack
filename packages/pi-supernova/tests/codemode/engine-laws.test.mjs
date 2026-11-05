@@ -346,3 +346,10 @@ it("internal edit and patch reads cannot forgive an external change through an a
     assert.equal(await fs.readFile(path.join(f.root, "real", mode + ".txt"), "utf8"), "stable\nexternal:new\n");
   }
 });
+
+it("foreground bash returns bare text, not a Node-style result object", async t => {
+  const f = await engineFixture(t);
+  const result = await f.execute(`const r = await bash({command: "printf hello"}); return {type: typeof r, text: r, stdout: r.stdout};`);
+
+  assert.deepEqual(result.details.result, {type: "string", text: "hello", stdout: undefined});
+});

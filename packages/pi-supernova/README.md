@@ -68,11 +68,11 @@ between operating systems or CPU architectures. Published-package installation
 resolves these dependencies through the host's package manager.
 
 Git pushes do not update npm installations. Publish the new npm version first,
-then reinstall it in your host. To pin **0.11.0** after it is published:
+then reinstall it in your host. To pin **0.11.1** after it is published:
 
 ```bash
-pi install npm:pi-supernova@0.11.0
-omp install npm:pi-supernova@0.11.0
+pi install npm:pi-supernova@0.11.1
+omp install npm:pi-supernova@0.11.1
 ```
 
 In Pi, `pi list` shows the configured package sources. A local path uses that
@@ -494,7 +494,9 @@ authoritative and may have their own output limits.
 Foreground shell commands inherit the current program `timeoutMs` unless they
 specify their own; increasing the outer deadline no longer
 leaves a hidden 60-second shell cap. Set the inner `bash` timeout shorter than the
-outer program timeout (for example 10 seconds inside a 20-second program). The outer
+outer program timeout (for example 10 seconds inside a 20-second program).
+A foreground `bash` `timeoutMs` larger than the program `timeoutMs` is rejected
+before the command starts. The outer
 deadline covers **all** waits and commands, including `sleep`; a shell's own `timeout`
 command does not extend it. On a deadline or cancellation, the worker stops and
 pending host calls get a bounded 250ms drain to retain owned-shell diagnostics and

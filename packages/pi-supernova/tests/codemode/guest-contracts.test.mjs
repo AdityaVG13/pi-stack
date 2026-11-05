@@ -162,7 +162,7 @@ it("oversized multi-file returns keep every sentinel in its own framed slot", as
   assert.equal(result.details.ok, true);
   assert.equal(result.details.returnTruncated, true);
   assert.ok(text.length <= 32000, text.length);
-  assert.match(text, /^ok #\d+ \d+ms \[return truncated\]\nstrings\[6\]\n/);
+  assert.match(text, /^ok #\d+ \d+ms \[return truncated\] \(display capped; write large results to a file, or reread with offset\/limit\/json\)\nstrings\[6\]\n/);
 
   for (let i = 0; i < names.length; i++) {
     assert.match(text, new RegExp("\\[" + i + "\\] \\d+ UTF-16 units\\n" + sentinels[i]));

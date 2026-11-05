@@ -87,7 +87,10 @@ By group, cl100k_base:
 
 Standing tool definition per request: 908 -> 645 tokens (o200k_base) and
 901 -> 633 (cl100k_base). That serialized definition is resent on every model
-request. Source and result text are not compressed.
+request. Source and result text are not compressed. Expanding the standing
+reference without re-running `npm run test:tokens --prefix packages/pi-supernova`
+will fail the replay-inclusive savings gate (at least 65% vs unbatched, at most
+35% of unbatched traffic, and at least 19% vs frozen `d444eb7`).
 
 ### Shared source and data
 

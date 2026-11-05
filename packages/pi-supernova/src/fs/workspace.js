@@ -146,6 +146,8 @@ export function commandSpawnError(error, command) {
 
   if (error?.code === "ENOENT") return new Error("command not found: " + command);
 
+  if (error?.code === "UNKNOWN") return new Error("cannot execute " + command + ": the resolved executable is not usable");
+
   if (error?.code === "ENOTDIR") return new Error("cannot run " + command + ": the working directory is not a directory");
 
   return error;

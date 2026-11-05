@@ -57,7 +57,7 @@ export function createList(ctx) {
   }
 
   async function grepWithRg(pattern, params, searchPath, cwd, signal) {
-      const res = await runCommand(["rg", ...rgGrepArgs(pattern, params, searchPath)], { cwd, timeoutMs: 30_000, signal });
+      const res = await runCommand(["rg", ...rgGrepArgs(pattern, params, searchPath, cwd)], { cwd, timeoutMs: 30_000, signal });
 
       if (res.exitCode !== 0 && res.exitCode !== 1) {
         throw new Error(res.stderr.trim() || `rg exited ${res.exitCode}`);
