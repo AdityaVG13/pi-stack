@@ -330,10 +330,12 @@ test("review regression: FIFO readers fail without blocking", { skip: process.pl
   const fifo = path.join(tmp(), "blocked.jsonl");
   assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
   const source = new URL("../lib/store.js", import.meta.url).href;
-  const script = `import {readEvents} from ${JSON.stringify(source)};try{readEvents(${JSON.stringify(fifo)});console.log('accepted')}catch(error){console.log(JSON.stringify({code:error.code}))}`;
+  const script = `import {readEvents} from ${JSON.stringify(source)};try{readEvents(${JSON.stringify(fifo)});console.log('accepted')}catch(error){console.log(JSON.stringify({code:error.code,message:error.message}))}`;
   const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { timeout: 2000, killSignal: "SIGKILL", encoding: "utf8" });
   assert.equal(child.status, 0, child.error?.message ?? child.stderr);
-  assert.equal(JSON.parse(child.stdout).code, "usage");
+  const failure = JSON.parse(child.stdout);
+  assert.equal(failure.code, "usage");
+  assert.match(failure.message, /FIFO\/pipe/);
 });
 
 test("review regression: missing logs are empty but devices and directories are refused", () => {

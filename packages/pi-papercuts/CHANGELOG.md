@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+### Fixed
+
+- FIFO readers name the pipe on the opened descriptor (`FIFO/pipe (would hang)`)
+  instead of the generic regular-file refusal.
+
 ## 0.4.0
 
 ### Changed

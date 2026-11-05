@@ -103,8 +103,13 @@ export function readEvents(filePath) {
 
   try {
     fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+    const st = fs.fstatSync(fd);
 
-    if (!fs.fstatSync(fd).isFile()) throw Object.assign(new Error("papercuts log path is not a regular file: " + filePath), { code: "usage" });
+    if (isFunction(st.isFIFO) && st.isFIFO()) {
+      throw Object.assign(new Error("papercuts log path is a FIFO/pipe (would hang): " + filePath), { code: "usage" });
+    }
+
+    if (!st.isFile()) throw Object.assign(new Error("papercuts log path is not a regular file: " + filePath), { code: "usage" });
     raw = fs.readFileSync(fd);
   } catch (error) {
     if (error.code === "ENOENT") {
