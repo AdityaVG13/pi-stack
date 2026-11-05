@@ -12,7 +12,8 @@ import { bridgeFactory, callCursorUnaryRpc } from "../lib/cursor/rpc.js";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
+import { resolvePiHost } from "./host-modules.mjs";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { createPayloadStream, prepareCursorPayload } from "../lib/provider-payload-stream.js";
@@ -210,6 +211,7 @@ test("standalone Cursor preparation reuses real catalogs, OAuth and cleanup with
     } } });
 
     assert.match(failed, /registration rejected/);
+    assert.match(failed, /host lookup unavailable/);
     const foreign = { id: "cursor", customProtocol: true };
     const refusal = await foreignCommand("add cursor", { modelRegistry: { getProvider: id => id === "cursor" ? foreign : undefined } });
     assert.match(refusal, /provider package owns cursor/);
@@ -2495,8 +2497,7 @@ test("Cursor payload transport binds the host API before its first request witho
     return { body: fixture.body(), message };
   });
 
-  const command = (process.env.PATH || "").split(delimiter).map(dir => join(dir, "pi")).find(existsSync);
-  const entry = process.env.PI_ROTATOR_TEST_HOST || command && realpathSync(command);
+  const entry = resolvePiHost();
   assert.ok(entry, "the installed Pi host supplies the runtime peer");
   const host = new URL(entry.endsWith(".ts") ? "./index.ts" : "./index.js", pathToFileURL(entry)).href;
   const dir = mkdtempSync(join(tmpdir(), "rotator-host-peer-"));

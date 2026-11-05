@@ -573,14 +573,29 @@ node --import ./tests/host-modules.mjs --test tests/*.test.mjs
 PI_ROTATOR_TEST_HOST=/path/to/pi/dist/cli.js npm test
 ```
 
-Tests bind Pi AI imports to the SDK of `pi` on PATH, or the explicit host entry,
-without installing a second runtime peer. Bare `node --test` without
-`--import ./tests/host-modules.mjs` fails. Use Pi 0.99.x and Node 22.19+. Fresh
-install/upgrade fixtures use fake credentials and temporary agent directories.
+Tests bind `@earendil-works/pi-ai` (and the coding-agent SDK) through
+`tests/host-modules.mjs`. That hook does **not** install those packages in
+`packages/pi-rotator/node_modules`. It uses, in order:
+
+1. `PI_ROTATOR_TEST_HOST` if set (a coding-agent `dist/index.js` or `pi` launcher)
+2. `pi` on PATH -- including the managed shell wrapper at `~/.pi/agent/bin/pi`,
+   which is followed via `install/current-version` to
+   `@earendil-works/pi-coding-agent/dist/index.js`
+
+Do not `require.resolve('@earendil-works/pi-coding-agent')` from the repo root
+or this package; inspect `resolvePiHost()` instead. Bare `node --test` without
+the import fails. Use Pi 0.99.x+ and Node 22.19+. Fresh install/upgrade fixtures
+use fake credentials and temporary agent directories.
 
 Pure slot, strategy, router, and config logic with unit tests; the Pi edge (`registerProvider`, `setModel`, hooks) lives in `index.js` and `lib/` runtime/account modules.
 
 ## Release notes
+
+### 0.5.3
+
+Failed Cursor/native account preparation now includes the host error (truncated)
+instead of only "registration rejected". Standalone tests bind `pi-ai` through
+the managed Pi release package, not the `~/.pi/agent/bin/pi` shell wrapper.
 
 ### 0.5.2
 

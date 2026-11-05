@@ -40,6 +40,13 @@ function accountProvider(base, ctx, state) {
   return { provider, owned: !provider && packageOwns(base, ctx) };
 }
 
+function rejectionDetail(error) {
+  const cause = error instanceof Error ? error.message : String(error);
+  const detail = cause.replace(/\s+/g, " ").trim().slice(0, 240);
+
+  return detail ? " " + detail : "";
+}
+
 function nextAvailableAccount(auth, state, base, ctx) {
   let n = 2; // Slot 1 remains owned by the base provider.
   let id = slotId(base, n);
@@ -62,8 +69,8 @@ async function prepareCursorAccount(dir, state, ctx) {
     ready = await state.cursor.prepare([id], ctx?.modelRegistry);
 
     if (!ready) return showText(ctx, "pi-rotator: the provider package owns cursor; use its account registration flow.");
-  } catch {
-    return showText(ctx, "pi-rotator: Cursor registration rejected; account not created.");
+  } catch (error) {
+    return showText(ctx, "pi-rotator: Cursor registration rejected; account not created." + rejectionDetail(error));
   } finally {
     if (!ready) state.preparedAccounts.delete(id);
   }
@@ -100,8 +107,8 @@ export function accountCommand(pi, dir, state, tokens, ctx) {
     // family listing; discovery promotes a carrier once one logs in.
     registerOwnedAlias(pi, state, base, provider, id, n, true);
     state.preparedAccounts.add(id);
-  } catch {
-    return showText(ctx, "pi-rotator: native registration rejected; account not created.");
+  } catch (error) {
+    return showText(ctx, "pi-rotator: native registration rejected; account not created." + rejectionDetail(error));
   }
 
   prefillLogin(ctx, id);
