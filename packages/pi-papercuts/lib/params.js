@@ -1,8 +1,9 @@
 import { isString, isObject } from "./decode.js";
-import { truncateBytes, MAX_EVIDENCE_FIELD_BYTES } from "./store.js";
-import { SEVERITIES, SCHEMA_TARGETS, LIST_STATUSES, LIST_FORMATS, WIRE_ACTIONS, ALLOWED_FIELDS, errorEnvelope } from "./contract.js";
+import { truncateBytes } from "./store.js";
+import { SEVERITIES, SCHEMA_TARGETS, LIST_STATUSES, LIST_FORMATS, WIRE_ACTIONS, ALLOWED_FIELDS, MAX_EVIDENCE_FIELD_BYTES } from "./vocab.js";
+import { errorEnvelope } from "./contract.js";
 
-const usage = (message, fix) => ({ ok: false, error: errorEnvelope("usage", message, fix) });
+const usage = (message, fix) => errorEnvelope("usage", message, fix);
 
 const accepted = (value) => ({ ok: true, value });
 
@@ -104,7 +105,7 @@ function parseSchema(params) {
 
   if (!SCHEMA_TARGETS.includes(target)) return usage(`schema target must be ${SCHEMA_TARGETS.join("|")} (got ${JSON.stringify(target)}).`, "papercuts({action:'schema', target:'all'})");
 
-  return accepted({ action: "schema", target, file: params.file });
+  return accepted({ action: "schema", target });
 }
 
 const PARSERS = {
@@ -115,7 +116,7 @@ const PARSERS = {
 
 /** Null placeholders are absent; reject foreign fields before action-specific parsing. */
 export function parsePapercutsParams(params) {
-  if (params == null || !isObject(params) || Array.isArray(params)) return usage("papercuts params must be an object.", "papercuts({action:'add', text:'…'})");
+  if (!isObject(params)) return usage("papercuts params must be an object.", "papercuts({action:'add', text:'…'})");
   const unknown = Object.keys(params).filter((key) => !WIRE_FIELDS.has(key));
 
   if (unknown.length) return usage(`Unknown papercuts field(s): ${unknown.join(", ")}.`, actionHelp);

@@ -1,4 +1,5 @@
-import { isString, isObject, isFunction } from "./decode.js";
+import { isString, isObject } from "./decode.js";
+import { SEVERITIES, MAX_TEXT_BYTES } from "./vocab.js";
 /**
  * pi-papercuts core store — append-only JSONL papercut log.
  *
@@ -13,13 +14,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
-/** Ascending severity; membership + sort rank share this single ordered list. */
-export const SEVERITIES = ["minor", "major", "blocker"];
-
 /** Highest severity first in sort (blocker=0 … minor=2). Derived from SEVERITIES only. */
 const SEVERITY_RANK = new Map([...SEVERITIES].reverse().map((s, i) => [s, i]));
-
-const MAX_TEXT_BYTES = 10_000;
 
 /** JSON tuple framing preserves tag boundaries and escapes lone UTF-16 surrogates. */
 export function cutId(ts, agent, text, severity, tags) {
@@ -76,7 +72,7 @@ export function parseEvent(line) {
     return { ok: false, reason: "json" };
   }
 
-  if (!parsed || !isObject(parsed) || Array.isArray(parsed)) {
+  if (!parsed || !isObject(parsed)) {
     return { ok: false, reason: "not_object" };
   }
 
@@ -105,7 +101,7 @@ export function readEvents(filePath) {
     fd = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
     const st = fs.fstatSync(fd);
 
-    if (isFunction(st.isFIFO) && st.isFIFO()) {
+    if (st.isFIFO()) {
       throw Object.assign(new Error("papercuts log path is a FIFO/pipe (would hang): " + filePath), { code: "usage" });
     }
 
@@ -189,9 +185,6 @@ const MAX_TAGS = 32;
 
 const MAX_TAG_BYTES = 64;
 
-/** Sole evidence field byte cap (parse uses this; no second constant in index). */
-export const MAX_EVIDENCE_FIELD_BYTES = 4096;
-
 export function normalizeTags(tags) {
   const out = [];
 
@@ -225,7 +218,7 @@ function ensureWritableLog(filePath) {
     return { ok: false, code: "usage", message: "papercuts log path is a directory: " + filePath };
   }
 
-  if (isFunction(st.isFIFO) && st.isFIFO()) {
+  if (st.isFIFO()) {
     return { ok: false, code: "usage", message: "papercuts log path is a FIFO/pipe (would hang): " + filePath };
   }
 
@@ -374,12 +367,8 @@ function pruneUnlocked(filePath, archivePath) {
 
   for (const e of events) (resolvedIds.has(e.id) ? archive : keep).push(e);
 
-  const target =
-    archivePath ??
-    (filePath.endsWith(".jsonl") ? `${filePath.slice(0, -6)}.archive.jsonl` : `${filePath}.archive.jsonl`);
-
   if (archive.length > 0 || tornLines > 0) {
-    appendUnlocked(target, archive);
+    appendUnlocked(archivePath, archive);
     const tmp = `${filePath}.tmp-prune-${process.pid}-${randomUUID()}`;
     const mode = fs.statSync(filePath).mode & 0o777;
     fs.writeFileSync(tmp, keep.length > 0 ? keep.map((e) => JSON.stringify(e)).join("\n") + "\n" : "", { encoding: "utf8", flag: "wx", mode });
@@ -397,7 +386,7 @@ function pruneUnlocked(filePath, archivePath) {
     archivedEvents: archive.length,
     open: items.length - resolvedIds.size,
     tornDropped: tornLines,
-    archiveFile: target,
+    archiveFile: archivePath,
   };
 }
 

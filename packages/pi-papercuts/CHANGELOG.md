@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `schema` now reports the surface that exists: per-action `fields` come from the parser allowlist, `errors` carries the real code list plus the envelope template, and target `exit-codes` is gone. `schema` also rejects `file`, which it never read.
+- One shared text module sanitizes and clips terminal output for both receipts and TUI rows; the drifted markdown-preview and renderer copies are deleted.
+- Wire vocabulary (actions, allowlists, caps, env keys) moved to a leaf `lib/vocab.js`, so `lib/contract.js` no longer imports the storage layer.
+- `parsePapercutsParams` returns the failure envelope directly instead of nesting it in a second `{ ok, error }` wrapper.
+- Worker env snapshot and env restore share one key list.
+
+### Fixed
+
+- Hand-built markdown-list results now use the shared envelope helper.
+- Removed dead archive-path fallback, `typeof`-style FIFO guards, redundant array checks, and single-use renderer wrappers.
+- Hostile tests now assert exact refusals instead of passing when either outcome occurs; shared test helpers live in `tests/helpers.mjs`.
+
 ## 0.4.1
 
 ### Fixed

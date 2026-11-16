@@ -1,6 +1,8 @@
 import * as path from "node:path";
 import * as store from "./store.js";
-import { SEVERITIES, CONTRACT_VERSION, envelope, errorEnvelope, textResult } from "./contract.js";
+import { envelope, errorEnvelope, textResult } from "./contract.js";
+import { SEVERITIES, CONTRACT_VERSION, ERROR_CODES, SCHEMA_TARGETS, ALLOWED_FIELDS, MAX_TEXT_BYTES, MAX_EVIDENCE_FIELD_BYTES } from "./vocab.js";
+import { flattenText, clipText } from "./text.js";
 
 function agentName(params) {
   if (params.agent) return { name: params.agent, source: "param" };
@@ -39,9 +41,7 @@ function doAdd(params, ctx) {
 
   return store.updateEvents(file, (events) => {
     const duplicate = events.find((item) => item.kind === "cut" && item.id === record.id);
-    const flat = mdDigestField(record.text);
-    const end = flat.codePointAt(71) > 0xffff ? 71 : 72;
-    const snippet = flat.length > 72 ? `${flat.slice(0, end)}…` : flat;
+    const snippet = clipText(record.text, 72);
 
     const human = duplicate
       ? `papercut already filed · ${record.id} · ${record.severity}`
@@ -65,19 +65,19 @@ function doList(params, ctx) {
   const shown = items.slice(0, limit);
 
   if (params.format === "md") {
-    const lines = [`# Papercuts (${status}) — ${total} item${total === 1 ? "" : "s"}`, ""];
+    const lines = [`# Papercuts (${status}): ${total} item${total === 1 ? "" : "s"}`, ""];
 
     for (const item of shown) {
-      const agent = mdDigestField(item.agent);
-      const text = mdDigestField(item.text);
-      lines.push(`- [${mdDigestField(item.severity)}] ${mdDigestField(item.id)}${agent ? ` (${agent})` : ""}${text ? ` ${text}` : ""}`);
+      const agent = flattenText(item.agent);
+      const text = flattenText(item.text);
+      lines.push(`- [${flattenText(item.severity)}] ${flattenText(item.id)}${agent ? ` (${agent})` : ""}${text ? ` ${text}` : ""}`);
     }
 
     if (truncated) lines.push(`\n… ${total - shown.length} more (raise limit).`);
 
     const payload = envelope({ count: shown.length, total, truncated }, { file });
 
-    return { content: [{ type: "text", text: lines.join("\n") }], details: payload, structuredContent: payload, isError: false };
+    return textResult(payload, lines.join("\n"));
   }
 
   return textResult(envelope({ items: shown, count: shown.length, total, truncated }, { file }));
@@ -148,40 +148,45 @@ function doDoctor(params, ctx) {
   return textResult(envelope({ healthy, findings, checked_lines: events.length, cuts: items.length, resolves, open: openCount }, { file }));
 }
 
+/** Per-action wire shape. `fields` is derived from the parser's allowlist below. */
+const SCHEMA_COMMANDS = {
+  add: { alias: ["log"], required: ["text"], evidence: "free-note evidence XOR cmd/exit/stderr", appends: true, read_only: false },
+  list: { required: [], read_only: true },
+  resolve: { required: ["ids"], appends: true, read_only: false },
+  doctor: { required: [], read_only: true },
+  prune: { archives: true, read_only: false },
+  schema: { required: [], read_only: true, targets: SCHEMA_TARGETS },
+};
+
 function doSchema(params) {
   const records = {
-    cut: { kind: "cut", id: "pc_<12 lowercase hex>", ts: "RFC3339 UTC milliseconds", agent: "string", text: "string <= 10000 bytes", tags: ["string"], severity: SEVERITIES.join("|"), cwd: "absolute path", repo: "absolute path|null", evidence: `optional free-note {note} XOR tool-failure {cmd?,exit?,stderr?}; fields capped to ${store.MAX_EVIDENCE_FIELD_BYTES} bytes at parse; never env dumps` },
+    cut: { kind: "cut", id: "pc_<12 lowercase hex>", ts: "RFC3339 UTC milliseconds", agent: "string", text: `string <= ${MAX_TEXT_BYTES} bytes`, tags: ["string"], severity: SEVERITIES.join("|"), cwd: "absolute path", repo: "absolute path|null", evidence: `optional free-note {note} XOR tool-failure {cmd?,exit?,stderr?}; fields capped to ${MAX_EVIDENCE_FIELD_BYTES} bytes at parse; never env dumps` },
     resolve: { kind: "resolve", id: "pc_<12 lowercase hex> (the cut id)", ts: "RFC3339 UTC milliseconds", agent: "string", note: "string|null" },
     list_item: { cut: "all cut fields", status: "open|resolved", resolution: "{ts,agent,note}|omitted" },
   };
 
-  const errors = { "shape": { ok: false, error: { code: "string", message: "string", retryable: false, suggested_fix: "string" }, meta: { contract: 1 } }, codes: ["usage", "not_found", "busy", "internal"] };
-  const exitCodes = { 0: "success", 2: "usage", 66: "not found", 70: "internal", 74: "I/O" };
-  const target = params.target; // parsed closed union
+  const commands = Object.fromEntries(Object.entries(SCHEMA_COMMANDS).map(([action, spec]) => [
+    action,
+    { ...spec, fields: [...ALLOWED_FIELDS[action]].filter((field) => field !== "action") },
+  ]));
 
-  if (target === "record") return textResult(envelope({ contract: CONTRACT_VERSION, records }));
+  const errors = {
+    error_envelope: { ok: false, error: { code: ERROR_CODES.join("|"), message: "string", retryable: false, suggested_fix: "optional string" }, meta: { contract: CONTRACT_VERSION } },
+    codes: ERROR_CODES,
+  };
 
-  if (target === "error") return textResult(envelope({ contract: CONTRACT_VERSION, errors }));
+  if (params.target === "record") return textResult(envelope({ contract: CONTRACT_VERSION, records }));
 
-  if (target === "exit-codes") return textResult(envelope({ contract: CONTRACT_VERSION, exit_codes: exitCodes }));
+  if (params.target === "error") return textResult(envelope({ contract: CONTRACT_VERSION, errors }));
 
-  // target === "all"
   return textResult(envelope({
     contract: CONTRACT_VERSION,
-    commands: {
-      add: { alias: ["log"], flags: ["text", "--tag", "--severity", "--cmd", "--exit", "--stderr", "--evidence"], evidence_rule: "free-note evidence XOR cmd/exit/stderr", appends: true, read_only: false },
-      list: { flags: ["--status", "--agent", "--tag", "--severity", "--limit", "--format json|md"], read_only: true },
-      resolve: { positional: "one or more id prefixes", flags: ["--note"], appends: true },
-      doctor: { read_only: true },
-      prune: { archives: true, read_only: false },
-      schema: { positional: "all|record|error|exit-codes", read_only: true },
-    },
+    commands,
     env: { PAPERCUTS_FILE: "log-file override", PAPERCUTS_AGENT: "agent-name fallback", PAPERCUTS_NOW: "clock override" },
     records,
     id: { prefix: "pc_", hex_digits: 12, hash: "SHA-256 first 6 bytes", encoding: "JSON array tuple; lone surrogates escaped", fields_in_order: ["ts", "agent", "text", "severity", "sorted tags array"] },
-    discovery: ["--file", "PAPERCUTS_FILE", "nearest .git then <root>/.papercuts.jsonl", "$HOME/.papercuts/log.jsonl"],
+    discovery: ["file", "PAPERCUTS_FILE", "nearest .git then <root>/.papercuts.jsonl", "$HOME/.papercuts/log.jsonl"],
     errors,
-    exit_codes: exitCodes,
     storage: { format: "JSONL", note: "add/resolve append; prune archives resolved events then rewrites the working log under shared writer locks" },
   }));
 }
@@ -191,10 +196,6 @@ export const ACTIONS = { add: doAdd, list: doList, resolve: doResolve, prune: do
 
 function repoPath(file) {
   return path.basename(file) === ".papercuts.jsonl" ? path.dirname(file) : null;
-}
-
-function mdDigestField(value) {
-  return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
 function listMatches(item, params) {

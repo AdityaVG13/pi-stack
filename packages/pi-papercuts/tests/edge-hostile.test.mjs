@@ -1,48 +1,13 @@
-import { isObject } from "../lib/decode.js";
-/**
- * Hostile edge-case regressions discovered in pre-0.1.0 audit.
- * These assert desired safe behavior and are regressions for store/tool harden.
- * Keep assertions tight.
- */
+/** Hostile edge cases: every test asserts the exact refusal or stored shape. */
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import { afterEach, test } from "node:test";
-import registerPapercuts from "../index.js";
-import * as store from "../lib/store.js";
+import { MAX_EVIDENCE_FIELD_BYTES } from "../lib/vocab.js";
+import { captureTool, dataOf, drainShutdowns, tmpRepo } from "./helpers.mjs";
 
-function tmpRepo() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "papercuts-hostile-"));
-  fs.writeFileSync(path.join(dir, ".git"), "gitdir: /tmp/fake\n");
+afterEach(drainShutdowns);
 
-  return dir;
-}
-
-const shutdowns = [];
-
-afterEach(async () => {
-  for (const close of shutdowns.splice(0)) await close();
-});
-
-function captureTool() {
-  let tool;
-  registerPapercuts({ registerTool: (t) => { tool = t; },
-    on: (event, handler) => { if (event === "session_shutdown") shutdowns.push(handler); } });
-  assert.ok(tool);
-
-  return tool;
-}
-
-function dataOf(result) {
-  if (result.details && isObject(result.details)) return result.details;
-  const text = result.content[0].text;
-  const start = text.indexOf("{");
-
-  return JSON.parse(start >= 0 ? text.slice(start) : text);
-}
-
-test("list limit < 0 must not apply Array.prototype.slice end-semantics", async () => {
+test("list rejects negative limits instead of applying slice end-semantics", async () => {
   const tool = captureTool();
   const repo = tmpRepo();
 
@@ -53,76 +18,33 @@ test("list limit < 0 must not apply Array.prototype.slice end-semantics", async 
 
   delete process.env.PAPERCUTS_NOW;
 
-  const res = dataOf(await tool.execute("x", { action: "list", limit: -1 }, undefined, { cwd: repo }));
+  for (const limit of [-1, -3]) {
+    const res = dataOf(await tool.execute("x", { action: "list", limit }, undefined, { cwd: repo }));
 
-  // BUG (pre-fix): limit=-1 → items.slice(0, -1) → 4 of 5 items, silently drops the last.
-  // Safe behaviors: usage error, clamp to 0 (empty page), or clamp to default/all — never n-1.
-  if (res.ok) {
-    assert.notEqual(
-      res.data.count,
-      res.data.total - 1,
-      "negative limit must not mean slice(0, -1); got count=total-1",
-    );
-    assert.ok(
-      res.data.count === 0 || res.data.count === res.data.total,
-      `negative limit accepted but count=${res.data.count} total=${res.data.total} is neither empty nor full`,
-    );
-  } else {
+    assert.equal(res.ok, false, `limit ${limit} must be rejected`);
     assert.equal(res.error.code, "usage");
   }
 });
 
-test("list limit=-3 must not return first total+limit items via slice", async () => {
-  const tool = captureTool();
-  const repo = tmpRepo();
-
-  for (let i = 0; i < 5; i++) {
-    process.env.PAPERCUTS_NOW = `2026-07-02T00:00:0${i}.000Z`;
-    await tool.execute("x", { action: "add", text: `n-${i}` }, undefined, { cwd: repo });
-  }
-
-  delete process.env.PAPERCUTS_NOW;
-
-  const res = dataOf(await tool.execute("x", { action: "list", limit: -3 }, undefined, { cwd: repo }));
-
-  // BUG: slice(0, -3) on 5 items → 2 items (i4, i3 in severity/newest order).
-  if (res.ok) {
-    assert.notEqual(res.data.count, 2, "limit=-3 must not yield slice(0,-3) length");
-  } else {
-    assert.equal(res.error.code, "usage");
-  }
-});
-
-test("add to /dev/null must not report success with permanent silent data loss", async () => {
-  if (process.platform === "win32" || !fs.existsSync("/dev/null")) {
-    return; // platform N/A
-  }
+test("add and list refuse a character device instead of dropping data", async () => {
+  if (process.platform === "win32" || !fs.existsSync("/dev/null")) return;
 
   const tool = captureTool();
   const repo = tmpRepo();
+  const ctx = { cwd: repo };
+  const add = dataOf(await tool.execute("x", { action: "add", text: "should not vanish", file: "/dev/null" }, undefined, ctx));
+  const list = dataOf(await tool.execute("x", { action: "list", file: "/dev/null", status: "all" }, undefined, ctx));
 
-  const add = dataOf(
-    await tool.execute("x", { action: "add", text: "should not vanish", file: "/dev/null" }, undefined, { cwd: repo }),
-  );
-
-  const list = dataOf(
-    await tool.execute("x", { action: "list", file: "/dev/null", status: "all" }, undefined, { cwd: repo }),
-  );
-
-  // BUG (pre-fix): appendFileSync(/dev/null) succeeds; read always empty → changed:true + count:0.
-  if (add.ok && add.data?.changed) {
-    assert.ok(
-      list.data.total >= 1,
-      "add claimed changed=true on /dev/null but list is empty (silent data loss)",
-    );
-  }
-  // Alternative acceptable fix: add fails with internal/usage for non-regular files.
+  assert.equal(add.ok, false);
+  assert.equal(add.error.code, "usage");
+  assert.equal(list.ok, false);
+  assert.equal(list.error.code, "usage");
 });
 
 test("evidence.cmd is byte-capped (parity with stderr MAX_EVIDENCE_FIELD_BYTES)", async () => {
   const tool = captureTool();
   const repo = tmpRepo();
-  const cap = store.MAX_EVIDENCE_FIELD_BYTES;
+  const cap = MAX_EVIDENCE_FIELD_BYTES;
   const huge = "C".repeat(50_000);
 
   const res = dataOf(

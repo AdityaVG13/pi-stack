@@ -1,53 +1,12 @@
-import { isObject } from "../lib/decode.js";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "node:test";
 import registerPapercuts from "../index.js";
+import { parsePapercutsParams, SCHEMA_TARGETS, SEVERITIES } from "../index.js";
+import { captureTool, dataOf, drainShutdowns, plainTheme, rendered, tmpRepo } from "./helpers.mjs";
 
-function tmpRepo() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "papercuts-repo-"));
-  fs.writeFileSync(path.join(dir, ".git"), "gitdir: /tmp/fake\n");
-
-  return dir;
-}
-
-const shutdowns = [];
-
-afterEach(async () => {
-  for (const close of shutdowns.splice(0)) await close();
-});
-
-function captureTool() {
-  let tool;
-
-  const pi = { registerTool: (t) => { tool = t; },
-    on: (event, handler) => { if (event === "session_shutdown") shutdowns.push(handler); } };
-
-  registerPapercuts(pi);
-  assert.ok(tool, "papercuts tool should register");
-
-  return tool;
-}
-
-function dataOf(result) {
-  // Prefer structured details; text may prefix a human line before the JSON envelope.
-  if (result.details && isObject(result.details)) return result.details;
-  const text = result.content[0].text;
-  const start = text.indexOf("{");
-
-  return JSON.parse(start >= 0 ? text.slice(start) : text);
-}
-
-const plainTheme = {
-  fg: (_color, text) => String(text),
-  bold: (text) => String(text),
-};
-
-function rendered(component, width = 120) {
-  return component.render(width).map((line) => line.trimEnd()).join("\n");
-}
+afterEach(drainShutdowns);
 
 test("registers the papercuts tool with nullable optional fields", () => {
   const tool = captureTool();
@@ -204,16 +163,18 @@ test("schema returns the machine contract", async () => {
   assert.equal(res.ok, true);
   assert.equal(res.data.contract, 1);
   assert.ok(res.data.records.cut);
-  assert.ok(res.data.commands.add);
+  assert.deepEqual(res.data.commands.add.required, ["text"]);
+  assert.ok(res.data.commands.add.fields.includes("text"));
+  assert.equal(res.data.commands.add.fields.includes("limit"), false);
+  assert.equal(res.data.errors.error_envelope.meta.contract, res.data.contract);
+  assert.equal(res.data.exit_codes, undefined);
 });
-
-import { parsePapercutsParams, SCHEMA_TARGETS, SEVERITIES } from "../index.js";
 
 test("parsePapercutsParams rejects list + add-only fields", () => {
   const r = parsePapercutsParams({ action: "list", text: "should not be here", ids: ["pc_abcd"] });
   assert.equal(r.ok, false);
-  assert.equal(r.error.error.code, "usage");
-  assert.match(r.error.error.message, /Illegal field/);
+  assert.equal(r.error.code, "usage");
+  assert.match(r.error.message, /Illegal field/);
 });
 
 test("parsePapercutsParams collapses log → add and requires text", () => {
@@ -229,11 +190,11 @@ test("parsePapercutsParams collapses log → add and requires text", () => {
 test("parsePapercutsParams closes schema target union", () => {
   const bad = parsePapercutsParams({ action: "schema", target: "exit_codes" });
   assert.equal(bad.ok, false);
-  assert.match(bad.error.error.message, /all\|record\|error\|exit-codes/);
-  const ok = parsePapercutsParams({ action: "schema", target: "exit-codes" });
+  assert.match(bad.error.message, /all\|record\|error/);
+  const ok = parsePapercutsParams({ action: "schema", target: "record" });
   assert.equal(ok.ok, true);
-  assert.equal(ok.value.target, "exit-codes");
-  assert.deepEqual(SCHEMA_TARGETS, ["all", "record", "error", "exit-codes"]);
+  assert.equal(ok.value.target, "record");
+  assert.deepEqual(SCHEMA_TARGETS, ["all", "record", "error"]);
 });
 
 test("schema unknown target returns usage (not silent all)", async () => {
@@ -241,6 +202,16 @@ test("schema unknown target returns usage (not silent all)", async () => {
   const res = dataOf(await tool.execute("s", { action: "schema", target: "nope" }, undefined, { cwd: tmpRepo() }));
   assert.equal(res.ok, false);
   assert.equal(res.error.code, "usage");
+});
+
+test("parsePapercutsParams rejects non-object params instead of coercing them", () => {
+  for (const params of [[], ["add"], null, undefined, "add", 7]) {
+    const r = parsePapercutsParams(params);
+
+    assert.equal(r.ok, false);
+    assert.equal(r.error.code, "usage");
+    assert.match(r.error.message, /params must be an object/);
+  }
 });
 
 test("execute rejects resolve + text as illegal combo", async () => {
@@ -259,7 +230,7 @@ test("execute rejects resolve + text as illegal combo", async () => {
 test("evidence free-note XOR tool-failure at parse", () => {
   const mixed = parsePapercutsParams({ action: "add", text: "x", evidence: "note", cmd: "ls" });
   assert.equal(mixed.ok, false);
-  assert.match(mixed.error.error.message, /XOR|mix|free-note/i);
+  assert.match(mixed.error.message, /XOR|mix|free-note/i);
 
   const note = parsePapercutsParams({ action: "add", text: "x", evidence: "just a note" });
   assert.equal(note.ok, true);
@@ -288,13 +259,14 @@ test("joint-illegal combos rejected at parse (action × field product)", () => {
     { action: "list", note: "x" },
     { action: "list", target: "all" },
     { action: "list", tags: ["t"] }, // list uses singular `tag`
-    // doctor/schema only action (+ optional file/target)
+    // doctor/schema only action (+ optional file for doctor, target for schema)
     { action: "doctor", text: "x" },
     { action: "doctor", ids: ["pc_abcd"] },
     { action: "doctor", severity: "major" },
     { action: "doctor", target: "all" },
     { action: "doctor", limit: 1 },
     { action: "schema", ids: ["pc_a"] },
+    { action: "schema", file: ".papercuts.jsonl" },
     { action: "schema", text: "x" },
     { action: "schema", severity: "minor" },
     { action: "schema", limit: 1 },
@@ -383,7 +355,7 @@ test("parsePapercutsParams refuses non-object wire bags", () => {
   for (const bad of [null, undefined, "add", 1, true, ["action", "add"]]) {
     const r = parsePapercutsParams(bad);
     assert.equal(r.ok, false, `expected reject for ${JSON.stringify(bad)}`);
-    assert.equal(r.error.error.code, "usage");
+    assert.equal(r.error.code, "usage");
   }
 });
 
@@ -507,20 +479,26 @@ test("review regression: Markdown lists retain the programmatic envelope", async
 
 test("list TUI more-line counts the full backlog, including limit truncation", () => {
   const tool = captureTool();
+
   const items = Array.from({ length: 3 }, (_, i) => ({
     id: `pc_00000000000${i}`,
     severity: "minor",
     text: `cut ${i}`,
   }));
+
   const result = {
     content: [],
     details: { ok: true, data: { items, count: 3, total: 8, truncated: true } },
   };
+
   const args = { action: "list", limit: 3 };
   const compact = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }));
+
   assert.match(compact, /8 open papercuts/);
   assert.match(compact, /… 5 more/);
+
   const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, { args, expanded: true }));
+
   assert.match(expanded, /8 open papercuts/);
   assert.match(expanded, /… 5 more/);
 });

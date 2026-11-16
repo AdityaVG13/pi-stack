@@ -1,11 +1,12 @@
 import { isObject } from "./lib/decode.js";
-import { PapercutsParams, CONTRACT_VERSION, textResult, errorEnvelope } from "./lib/contract.js";
+import { PapercutsParams, textResult, errorEnvelope } from "./lib/contract.js";
+import { CONTRACT_VERSION } from "./lib/vocab.js";
 import { parsePapercutsParams } from "./lib/params.js";
 import { ACTIONS } from "./lib/actions.js";
 import { createActionExecutor } from "./lib/worker-client.js";
 import { renderPapercutsFrameCall, renderPapercutsFrameResult } from "./lib/render.js";
 
-export { SEVERITIES, SCHEMA_TARGETS } from "./lib/contract.js";
+export { SEVERITIES, SCHEMA_TARGETS } from "./lib/vocab.js";
 
 export { parsePapercutsParams } from "./lib/params.js";
 
@@ -28,12 +29,12 @@ function errorCode(error) {
 
 async function execute(executor, _id, params, _signal, onUpdate, ctx) {
   // Current Pi passes onUpdate then ctx; older SDK hosts pass ctx fourth.
-  const context = ctx ?? (onUpdate && isObject(onUpdate) ? onUpdate : undefined);
+  const context = ctx ?? (isObject(onUpdate) ? onUpdate : undefined);
 
   try {
     const parsed = parsePapercutsParams(params);
 
-    if (!parsed.ok) return textResult(parsed.error);
+    if (!parsed.ok) return textResult(parsed);
 
     if (parsed.value.action === "schema") return ACTIONS.schema(parsed.value);
 

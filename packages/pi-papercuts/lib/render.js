@@ -1,6 +1,6 @@
-import { stripVTControlCharacters } from "node:util";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { isObject } from "./decode.js";
+import { displayText, flattenText, clipText } from "./text.js";
 
 const componentText = new WeakMap();
 
@@ -24,38 +24,15 @@ function textComponent(text, context) {
   return component;
 }
 
-function displayText(value) {
-  // ANSI stripping alone leaves standalone BEL/BS/DEL/C1 controls executable.
-  // Retain tabs/newlines for multiline output, never raw carriage returns.
-  // oxlint-disable-next-line no-control-regex -- matching executable terminal controls is intentional.
-  return stripVTControlCharacters(String(value ?? "")).replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
-}
-
-function cleanDisplayText(value) {
-  return displayText(value).replace(/\s+/g, " ").trim();
-}
-
-function clippedDisplayText(value, maxChars) {
-  const text = cleanDisplayText(value);
-
-  if (text.length <= maxChars) return text;
-  let end = maxChars - 1;
-
-  // Do not introduce a lone surrogate at the preview boundary.
-  if (text.codePointAt(end - 1) > 0xffff) end--;
-
-  return `${text.slice(0, end)}…`;
-}
-
 function resultText(result) {
   return (result?.content ?? []).filter((item) => item?.type === "text").map((item) => item.text).join("\n");
 }
 
 function addCall(args, theme, context) {
-  const severity = cleanDisplayText(args?.severity || "minor");
-  const tags = Array.isArray(args?.tags) ? args.tags.map(cleanDisplayText).filter(Boolean) : [];
+  const severity = flattenText(args?.severity || "minor");
+  const tags = Array.isArray(args?.tags) ? args.tags.map(flattenText).filter(Boolean) : [];
   let text = `\n  ${theme.fg("dim", [severity, ...tags].join(" · "))}`;
-  const body = clippedDisplayText(args?.text, context?.expanded ? 10_000 : 240);
+  const body = clipText(args?.text, context?.expanded ? 10_000 : 240);
 
   if (body) text += `\n  ${theme.fg("toolOutput", body)}`;
 
@@ -63,20 +40,20 @@ function addCall(args, theme, context) {
 }
 
 function resolveCall(args, theme) {
-  return Array.isArray(args?.ids) ? `\n  ${theme.fg("dim", args.ids.map(cleanDisplayText).filter(Boolean).join(", "))}` : "";
+  return Array.isArray(args?.ids) ? `\n  ${theme.fg("dim", args.ids.map(flattenText).filter(Boolean).join(", "))}` : "";
 }
 
 function listCall(args, theme) {
   const filters = [args?.status || "open", args?.severity, args?.tag && `#${args.tag}`].filter(Boolean);
 
-  return `\n  ${theme.fg("dim", filters.map(cleanDisplayText).join(" · "))}`;
+  return `\n  ${theme.fg("dim", filters.map(flattenText).join(" · "))}`;
 }
 
 const CALL_RENDERERS = new Map([["add", addCall], ["resolve", resolveCall], ["list", listCall]]);
 
 /** Full structured arguments remain in the session, not the compact row. */
 export function renderPapercutsCall(args, theme, context) {
-  const action = args?.action === "log" ? "add" : cleanDisplayText(args?.action);
+  const action = args?.action === "log" ? "add" : flattenText(args?.action);
   let text = theme.fg("toolTitle", theme.bold("papercuts"));
 
   if (action) text += ` ${theme.fg("muted", action)}`;
@@ -89,19 +66,19 @@ export function renderPapercutsCall(args, theme, context) {
 
 function errorResult(payload, theme) {
   const error = payload.error ?? {};
-  let text = theme.fg("error", `✗ ${cleanDisplayText(error.message || "Papercuts action failed")}`);
+  let text = theme.fg("error", `✗ ${flattenText(error.message || "Papercuts action failed")}`);
 
-  if (error.suggested_fix) text += `\n  ${theme.fg("dim", cleanDisplayText(error.suggested_fix))}`;
+  if (error.suggested_fix) text += `\n  ${theme.fg("dim", flattenText(error.suggested_fix))}`;
 
   return text;
 }
 
 function expandedRecord(record, payload, theme) {
-  let text = `\n  ${theme.fg("toolOutput", cleanDisplayText(record.text))}`;
+  let text = `\n  ${theme.fg("toolOutput", flattenText(record.text))}`;
 
-  if (record.tags?.length) text += `\n  ${theme.fg("dim", `tags: ${record.tags.map(cleanDisplayText).join(", ")}`)}`;
+  if (record.tags?.length) text += `\n  ${theme.fg("dim", `tags: ${record.tags.map(flattenText).join(", ")}`)}`;
 
-  if (payload.meta?.file) text += `\n  ${theme.fg("dim", `file: ${cleanDisplayText(payload.meta.file)}`)}`;
+  if (payload.meta?.file) text += `\n  ${theme.fg("dim", `file: ${flattenText(payload.meta.file)}`)}`;
 
   return text;
 }
@@ -110,13 +87,13 @@ function addResult({ data, payload, expanded, theme }) {
   if (!data.record) return defaultResult({ payload, expanded, theme });
   const verb = data.changed ? "✓ Filed" : "• Already filed";
   const color = data.changed ? "success" : "muted";
-  const text = theme.fg(color, `${verb} ${cleanDisplayText(data.record.id)} · ${cleanDisplayText(data.record.severity)}`);
+  const text = theme.fg(color, `${verb} ${flattenText(data.record.id)} · ${flattenText(data.record.severity)}`);
 
   return expanded ? text + expandedRecord(data.record, payload, theme) : text;
 }
 
 function listHeading(data, context, theme) {
-  const status = cleanDisplayText(context?.args?.status || "open");
+  const status = flattenText(context?.args?.status || "open");
 
   return theme.fg("muted", `${data.total} ${status} papercut${data.total === 1 ? "" : "s"}`);
 }
@@ -127,13 +104,13 @@ function listResult({ data, payload, result, expanded, context, theme }) {
   const shown = expanded ? data.items : data.items.slice(0, 5);
 
   for (const item of shown) {
-    const body = expanded ? cleanDisplayText(item.text) : clippedDisplayText(item.text, 120);
-    text += `\n  ${theme.fg("accent", cleanDisplayText(item.id))} ${theme.fg("dim", `[${cleanDisplayText(item.severity)}]`)} ${theme.fg("toolOutput", body)}`;
+    const body = expanded ? flattenText(item.text) : clipText(item.text, 120);
+    text += `\n  ${theme.fg("accent", flattenText(item.id))} ${theme.fg("dim", `[${flattenText(item.severity)}]`)} ${theme.fg("toolOutput", body)}`;
 
-    if (expanded && item.tags?.length) text += `\n    ${theme.fg("dim", `tags: ${item.tags.map(cleanDisplayText).join(", ")}`)}`;
+    if (expanded && item.tags?.length) text += `\n    ${theme.fg("dim", `tags: ${item.tags.map(flattenText).join(", ")}`)}`;
   }
 
-  if (expanded && payload.meta?.file) text += `\n  ${theme.fg("dim", `file: ${cleanDisplayText(payload.meta.file)}`)}`;
+  if (expanded && payload.meta?.file) text += `\n  ${theme.fg("dim", `file: ${flattenText(payload.meta.file)}`)}`;
 
   const total = Number.isInteger(data.total) ? data.total : data.items.length;
   const hidden = total - shown.length;
@@ -151,9 +128,9 @@ function resolveResult({ data, theme }) {
     ? theme.fg("success", `✓ Resolved ${resolved.length} papercut${resolved.length === 1 ? "" : "s"}`)
     : theme.fg("muted", "No open papercuts changed");
 
-  if (resolved.length) text += `\n  ${theme.fg("dim", resolved.map(cleanDisplayText).join(", "))}`;
+  if (resolved.length) text += `\n  ${theme.fg("dim", resolved.map(flattenText).join(", "))}`;
 
-  if (already.length) text += `\n  ${theme.fg("dim", `already resolved: ${already.map(cleanDisplayText).join(", ")}`)}`;
+  if (already.length) text += `\n  ${theme.fg("dim", `already resolved: ${already.map(flattenText).join(", ")}`)}`;
 
   return text;
 }
@@ -167,7 +144,7 @@ function pruneResult({ data, expanded, theme }) {
     let text = theme.fg("success", `✓ Pruned ${archived} resolved papercut${archived === 1 ? "" : "s"}`);
     text += `\n  ${theme.fg("dim", `${open} open remain`)}`;
 
-    if (expanded && data.archiveFile) text += `\n  ${theme.fg("dim", `archive: ${cleanDisplayText(data.archiveFile)}`)}`;
+    if (expanded && data.archiveFile) text += `\n  ${theme.fg("dim", `archive: ${flattenText(data.archiveFile)}`)}`;
 
     return text;
   }
@@ -191,7 +168,7 @@ function doctorResult({ data, theme }) {
 }
 
 function schemaResult({ data, expanded, context, theme }) {
-  let text = theme.fg("success", `✓ Schema ready · ${cleanDisplayText(context?.args?.target || "all")}`);
+  let text = theme.fg("success", `✓ Schema ready · ${flattenText(context?.args?.target || "all")}`);
 
   if (expanded) text += `\n${theme.fg("dim", JSON.stringify(data, null, 2))}`;
 
@@ -210,14 +187,10 @@ export function renderPapercutsResult(result, { expanded }, theme, context) {
   if (!payload || !isObject(payload)) return textComponent(theme.fg("toolOutput", displayText(resultText(result))), context);
 
   if (payload.ok === false) return textComponent(errorResult(payload, theme), context);
-  const action = resultAction(context);
-  const render = RESULT_RENDERERS.get(action) ?? defaultResult;
+  const action = context?.args?.action;
+  const render = RESULT_RENDERERS.get(action === "log" ? "add" : action) ?? defaultResult;
 
   return textComponent(render({ data: payload.data ?? {}, payload, result, expanded, context, theme }), context);
-}
-
-function resultAction(context) {
-  return context?.args?.action === "log" ? "add" : context?.args?.action;
 }
 
 

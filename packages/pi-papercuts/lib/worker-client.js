@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { ENV_KEYS } from "./vocab.js";
 
 // A lazy, registration-owned worker keeps synchronous parsing and durable fsync off
 // the UI thread. Nothing is started at extension registration or for schema.
@@ -46,7 +47,7 @@ export function createActionExecutor(url = new URL("./worker.js", import.meta.ur
     if (current?.closing) return Promise.reject(Object.assign(new Error("Papercuts is shutting down; no new work accepted"), { code: "busy" }));
     const session = current ??= start();
     const id = ++nextId;
-    const env = { PAPERCUTS_FILE: process.env.PAPERCUTS_FILE, PAPERCUTS_AGENT: process.env.PAPERCUTS_AGENT, PAPERCUTS_NOW: process.env.PAPERCUTS_NOW };
+    const env = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 
     return new Promise((resolve, reject) => {
       session.pending.set(id, { resolve, reject });
