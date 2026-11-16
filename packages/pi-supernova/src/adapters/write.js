@@ -3,8 +3,10 @@ import { isString } from "../shared/decode.js";
 import { buildWriteDiff } from "../fs/diff.js";
 import { quickCheck } from "../fs/check.js";
 import { resolveWorkspacePath, relativeSlash } from "../fs/workspace.js";
+import { textResult } from "../shared/result.js";
+import { contentLineInfo } from "../fs/lines.js";
 import {
-  textResult, contentLineInfo, boundedWriteDiff,
+  boundedWriteDiff,
   WRITE_DIFF_MAX_READ_BYTES, WRITE_APPEND_MAX_READ_BYTES, QUICK_CHECK_MAX_CHARS,
   writeSnapshot,
 } from "../fs/text-ops.js";

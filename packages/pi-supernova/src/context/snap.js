@@ -2,8 +2,6 @@ import {inScope,makeCandidate,contentCandidates,MAX_SEARCH_CHARS} from './snap-s
 import { tokenizeQuery, stem } from "./query.js";
 import { looksLikePath } from "../shared/decode.js";
 
-export {tokenizeQuery,scorePathTopology,stem} from './query.js';
-
 import * as path from "node:path";
 
 import * as fs from "node:fs/promises";

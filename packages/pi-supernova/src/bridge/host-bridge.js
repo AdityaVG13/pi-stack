@@ -13,10 +13,12 @@ import { resolveInvokeTarget } from "./invoke.js";
 import { buildWriteDiff } from "../fs/diff.js";
 import { WorkspaceIndex } from "../context/repo-index.js";
 import { SeenLedger } from "../context/ledger.js";
-import { CausalVfs, resolveCommitTarget } from "../fs/vfs.js";
+import { CausalVfs } from "../fs/vfs.js";
+import { resolveCommitTarget } from "../fs/commit.js";
 import { resolveWorkspacePath, runCommand, clearPathCache, relativeSlash } from "../fs/workspace.js";
 import { createNativeAdapters } from "../adapters/index.js";
-import { resultDiff, boundedWriteDiff, writeSnapshot, resolveReadPath } from "../fs/text-ops.js";
+import { resultDiff } from "../shared/result.js";
+import { boundedWriteDiff, writeSnapshot, resolveReadPath } from "../fs/text-ops.js";
 
 export function createHostBridge({ pi, config, getCwd, registry, ledger: runLedger, budget, terminalIdentity }) {
   const index = registry?.index ?? new WorkspaceIndex((argv, opts) => runCommand(argv, opts));

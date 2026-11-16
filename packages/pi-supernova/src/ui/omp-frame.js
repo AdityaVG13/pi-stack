@@ -5,7 +5,7 @@
  * (that hung OMP plugin load). Portable geometry matches native edit/write cards.
  */
 
-import { clampLine, measureWidth } from "./render-measure.js";
+import { hardTruncate, measureWidth } from "./render-measure.js";
 import { isFunction, isString } from "../shared/decode.js";
 
 const DEFAULT_BOX = {
@@ -52,7 +52,7 @@ function borderPaint(theme, state, borderColor) {
 
 const STATUS_PREFIX = { error: ["error", "✗ "], running: ["dim", "… "] };
 
-function statusHeader(theme, { title, description, state, icon }) {
+export function statusHeader(theme, { title, description, state, icon }) {
 	const resolved = icon ?? (state === "error" ? "error" : undefined);
 
 	const fg = (key, text) => {
@@ -131,7 +131,7 @@ function frameSectionLines(section, contentWidth, box, border, bgFn, w, paintBar
 
 	for (const raw of section.lines || []) {
 		for (const piece of String(raw).split("\n")) {
-			const body = clampLine(piece, contentWidth);
+			const body = hardTruncate(piece, contentWidth);
 			const pad = Math.max(0, contentWidth - measureWidth(body));
 			lines.push(padLine(`${border(box.vertical)} ${body}${" ".repeat(pad)} ${border(box.vertical)}`, w, bgFn));
 		}
@@ -157,7 +157,7 @@ function collapseNarrowFrame(header, sections, w) {
 		rawLines.push(...(section.lines || []));
 	}
 
-	return rawLines.flatMap((line) => line ? [clampLine(line, w)] : []);
+	return rawLines.flatMap((line) => line ? [hardTruncate(line, w)] : []);
 }
 
 function paintBarFor(box, border, bgFn, w) {
@@ -176,7 +176,7 @@ function paintBarFor(box, border, bgFn, w) {
 
 		const rawLabel = ` ${label} `;
 		const maxLabel = Math.max(0, w - measureWidth(left) - measureWidth(right));
-		const trimmed = clampLine(rawLabel, maxLabel);
+		const trimmed = hardTruncate(rawLabel, maxLabel);
 		const fill = Math.max(0, w - measureWidth(left) - measureWidth(trimmed) - measureWidth(right));
 
 		return padLine(`${border(left)}${trimmed}${border(h.repeat(fill))}${border(right)}`, w, bgFn);
@@ -202,7 +202,7 @@ function renderPortableFrame(theme, { header, sections = [], state = "pending", 
 	];
 }
 
-function createPortableFramedComponent(theme, build) {
+export function createPortableFramedComponent(theme, build) {
 	let cacheWidth;
 	let cacheKey;
 	let cacheLines;
@@ -228,12 +228,4 @@ function createPortableFramedComponent(theme, build) {
 			cacheWidth = undefined;
 		},
 	};
-}
-
-export function novaFramedBlock(theme, build) {
-	return createPortableFramedComponent(theme, build);
-}
-
-export function novaStatusLine(theme, options) {
-	return statusHeader(theme, options);
 }

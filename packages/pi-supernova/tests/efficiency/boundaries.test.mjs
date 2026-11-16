@@ -1,6 +1,7 @@
 import { it } from "node:test";
 import assert from "node:assert/strict";
-import { runGuestProgram, stopWarmGuestWorker } from "../../src/runtime/runtime.js";
+import { runGuestProgram } from "../../src/runtime/runtime.js";
+import { stopWarmGuestWorker } from "../../src/runtime/worker-pool.js";
 import { limits,engineFixture } from "../helpers/engine.mjs";
 import {WorkspaceIndex} from "../../src/context/repo-index.js";
 import fs from "node:fs/promises";

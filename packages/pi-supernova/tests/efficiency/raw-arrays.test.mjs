@@ -2,7 +2,7 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { formatReturn, formatValue } from "../../src/output/format.js";
-import { packageFinalReturn } from "../../src/output/bottleneck.js";
+import { packageFinalReturn } from "../../src/output/final.js";
 import { engineFixture, modelText } from "../helpers/engine.mjs";
 
 it("multiline read arrays deliver unchanged source without JSON escaping or a model-side join", async t => {

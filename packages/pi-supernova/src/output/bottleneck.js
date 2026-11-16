@@ -283,5 +283,3 @@ export function packageHostResult(raw, config, acceptsStructured = false) {
     ? typedHostResult(raw, details)
     : boundedHostResult(raw, details, config, acceptsStructured);
 }
-
-export {packageFinalReturn} from "./final.js";

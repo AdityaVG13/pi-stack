@@ -1,14 +1,6 @@
 import { fileChunks } from "./file-io.js";
 
-export {MAX_DIRECTORY_ENTRIES,formatDirectoryEntry,formatLsEntry} from './directory.js';
-
-export {textResult,resultDiff} from '../shared/result.js';
-
 import {sliceLinesRaw,lineNumberAt,formatNumberedLine,numberedPreview,lineStartIndex,lineEndIndex,lineTextRange,contentLineInfo} from './lines.js';
-
-export * from './lines.js';
-
-export {jsonStringLength,maxJsonStringPrefix} from './json-size.js';
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";

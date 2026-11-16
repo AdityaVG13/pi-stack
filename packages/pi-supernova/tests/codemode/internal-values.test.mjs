@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { engineFixture } from "../helpers/engine.mjs";
-import { packageFinalReturn } from "../../src/output/bottleneck.js";
+import { packageFinalReturn } from "../../src/output/final.js";
 import { packageDefaults } from "../../src/config/config.js";
 
 it("plain read values are complete above the former line and display caps", async t => {
@@ -171,7 +171,7 @@ it("64 large reads, blocked acknowledgements and expanded returns leave a constr
 
   const program=`import assert from "node:assert/strict";
     import {registerCodeMode} from ${JSON.stringify(new URL("../../index.js",import.meta.url).href)};
-    import {stopWarmGuestWorker} from ${JSON.stringify(new URL("../../src/runtime/runtime.js",import.meta.url).href)};
+    import {stopWarmGuestWorker} from ${JSON.stringify(new URL("../../src/runtime/worker-pool.js",import.meta.url).href)};
     let tool; registerCodeMode({registerTool:t=>{tool=t},registerCommand(){},on(){}});
     const ctx={cwd:${JSON.stringify(f.root)}};
     const result=await tool.execute("large-wave",{code:${JSON.stringify(code)},timeoutMs:10000},undefined,undefined,ctx);

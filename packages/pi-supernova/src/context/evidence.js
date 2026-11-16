@@ -40,8 +40,6 @@ const IDENT = /[A-Za-z_$][\w$]*/g;
 // Verb forms only: "call sites" is a concept, "who calls X" is a usage question.
 const RELATION_WORDS = new Set(["calls", "called", "caller", "callers", "uses", "usages", "used", "using", "imports", "imported", "depends", "references", "referenced", "invokes", "invoked"]);
 
-export { stem } from "./query.js";
-
 /** eq.6: query profile with subjects, keywords/stems, answer type, test/doc flags, route. */
 export function profileQuery(query) {
   const { tokens, wantsTest, wantsType, wantsDoc } = tokenizeQuery(query);

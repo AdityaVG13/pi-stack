@@ -15,15 +15,12 @@ function unwrapValue(res) {
   return res;
 }
 
-function unwrapRead(res, args, observe) {
+function unwrapRead(res, args) {
   const value = unwrapValue(res);
 
   if ((args.complete === true || args.json !== undefined) && res?.truncated) throw new Error("incomplete read: complete:true or json refuses truncated host output");
 
-  const decoded = decodeReadItem(args, value, res);
-  observe?.(args,res);
-
-  return decoded;
+  return decodeReadItem(args, value, res);
 }
 
 function decodeReadItem(args, value, res) {
@@ -75,7 +72,7 @@ function settleReadItem(wave, index, res) {
   if (!job) throw new Error("invalid streamed read index: " + index);
   wave[index] = null; // Release resolver closures and their potentially large values.
 
-  try { job.resolve(unwrapRead(res,job.args,job.observe)); }
+  try { job.resolve(unwrapRead(res,job.args)); }
   catch (error) { job.reject(error); }
 }
 
@@ -142,7 +139,7 @@ function enqueueCompatibleRead(readState, flushReads, args) {
   if (readState.queued.length && readState.queued[0].key !== key) flushReads();
 
   const promise = new Promise((resolve, reject) => {
-    readState.queued.push({ args, key, resolve, reject, observe:readState.observe });
+    readState.queued.push({ args, key, resolve, reject });
 
     if (readState.queued.length === 1) queueMicrotask(flushReads);
   });
@@ -230,7 +227,7 @@ export function buildGuestApi(rpc, batchRead) {
   }
 
   // Coalesce already-started compatible reads without rewriting JS control flow.
-  const readState = { queued: [], waves: new Set(), observe:noteReadPath };
+  const readState = { queued: [], waves: new Set() };
 
   function flushReads() {
     const pending = readState.queued;
@@ -265,20 +262,10 @@ export function buildGuestApi(rpc, batchRead) {
     // async boundary, not through another successful-path Promise hop.
     try {
       return !batchRead
-        ? unwrapRead(await invoke("read", args), args, noteReadPath)
+        ? unwrapRead(await invoke("read", args), args)
         : await enqueueCompatibleRead(readState, flushReads, args);
     } catch (error) { throw new Error(error.message, { cause: error.cause }); }
   };
-
-  const readFiles = new Set();
-
-  function noteReadPath(args, envelope) {
-    if (isString(args.path) && args.resolve !== true && args.query === undefined && args.evidence !== true) readFiles.add(args.path);
-
-    // A document may itself contain path/status fields. Only adapter provenance,
-    // carried separately through scalar, inline and streamed replies, names a read.
-    if (isString(envelope.sourcePath)) readFiles.add(envelope.sourcePath);
-  }
 
   const write = async (p, content, options) => {
     if (isObject(p) && (content !== undefined || options !== undefined)) throw new Error("write object form does not accept positional content or options");
@@ -291,10 +278,6 @@ export function buildGuestApi(rpc, batchRead) {
 
     for (const key of ["append", "replace", "allowReadArtifacts"]) {
       if (args[key] !== undefined && args[key] !== true && args[key] !== false) throw new Error("write " + key + " must be a boolean");
-    }
-
-    if (args.append !== true && args.replace !== true && isString(args.path) && readFiles.has(args.path)) {
-      throw new Error("file was already read this program; use edit(oldText, newText) or edit(view, ...). write({path,content,replace:true}) replaces anyway");
     }
 
     return unwrapValue(await invoke("write", args));

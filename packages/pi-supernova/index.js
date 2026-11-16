@@ -12,7 +12,8 @@ import { loadConfig } from "./src/config/config.js";
 import { createHostBridge } from "./src/bridge/host-bridge.js";
 import { NATIVE_NAMES } from "./src/bridge/native-tools.js";
 
-import { runGuestProgram, warmGuestWorker, stopWarmGuestWorker } from "./src/runtime/runtime.js";
+import { runGuestProgram } from "./src/runtime/runtime.js";
+import { warmGuestWorker, stopWarmGuestWorker } from "./src/runtime/worker-pool.js";
 import { renderSupernovaCall, renderSupernovaResult } from "./src/ui/render.js";
 
 export { renderSupernovaCall, renderSupernovaResult };

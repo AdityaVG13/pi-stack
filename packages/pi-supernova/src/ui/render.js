@@ -1,7 +1,5 @@
 import {normalizeCallRenderArgs,normalizeResultRenderArgs} from './host-render.js';
 
-export {normalizeCallRenderArgs} from './host-render.js';
-
 import {formatDiffRows,operationsFromTrace,formatDuration,formatOpRow,cleanBlockText,cleanInlineText} from './trace.js';
 /**
  * Supernova TUI renderers.
@@ -16,13 +14,11 @@ import {formatDiffRows,operationsFromTrace,formatDuration,formatOpRow,cleanBlock
  */
 
 import { isString, isObject } from "../shared/decode.js";
-import { measureWidth, hardTruncate, clampLine, wrapLine } from "./render-measure.js";
-import { novaFramedBlock, novaStatusLine } from "./omp-frame.js";
+import { hardTruncate, wrapLine } from "./render-measure.js";
+import { createPortableFramedComponent, statusHeader } from "./omp-frame.js";
 import { formatBoundedValue, truncateChars } from "../output/format.js";
 
 const MAX_UI_RESULT_CHARS = 32_000;
-
-export { measureWidth, hardTruncate, clampLine };
 
 // The call slot is always empty: the result card owns the whole lifecycle in both hosts.
 const EMPTY_CALL = { render: () => [], invalidate() {} };
@@ -209,17 +205,17 @@ function cardChrome(model) {
 }
 
 function renderCardLines(theme, model, width, view) {
-	const header = novaStatusLine(theme, {
+	const header = statusHeader(theme, {
 		icon: cardIcon(model),
 		title: "nova",
 		description: describeCard(model, view.opCount),
 	});
 
 	// Empty body: one status line, no framed box.
-	if (view.lines.length === 0) return [clampLine(header, width)];
+	if (view.lines.length === 0) return [hardTruncate(header, width)];
 	const chrome = cardChrome(model);
 
-	return novaFramedBlock(theme, () => ({
+	return createPortableFramedComponent(theme, () => ({
 		header,
 		sections: [{ lines: view.lines }],
 		state: chrome.state,
@@ -288,7 +284,7 @@ function bindResultCard(host, options, context) {
 }
 
 export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextArg) {
-	const { result, expanded, isPartial, theme, context, args, options, host } = normalizeResultRenderArgs(
+	const { result, expanded, isPartial, theme, context, options, host } = normalizeResultRenderArgs(
 		resultArg,
 		optionsArg,
 		themeArg,
@@ -301,7 +297,7 @@ export function renderSupernovaResult(resultArg, optionsArg, themeArg, contextAr
 	syncState(context, payload);
 	const isError = hostError || payload?.ok === false;
 	const comp = bindResultCard(host, options, context);
-	comp.set(theme, { payload, context, args, expanded, isPartial, isError, host });
+	comp.set(theme, { payload, context, expanded, isPartial, isError, host });
 
 	return comp;
 }

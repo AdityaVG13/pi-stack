@@ -1,13 +1,11 @@
 import {acquireWorker,killWorker} from './worker-pool.js';
 
-export {warmGuestWorker,stopWarmGuestWorker} from './worker-pool.js';
-
 import {admitGuest,prepareProgram,normalizeGuestLocation} from './program.js';
 
 import { readProgramFile } from "./program-file.js";
 
 import { performance } from "node:perf_hooks";
-import { packageFinalReturn } from "../output/bottleneck.js";
+import { packageFinalReturn } from "../output/final.js";
 import { truncateChars } from "../output/format.js";
 import { errorMessage, isFunction, isObject, isString } from "../shared/decode.js";
 

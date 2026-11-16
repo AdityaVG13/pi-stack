@@ -1,14 +1,17 @@
 import * as path from "node:path";
 import { isString, isNumber } from "../shared/decode.js";
 import { buildEditDiff, buildMultiEditDiff, buildPatchDiff, MAX_DIFF_MATCHES } from "../fs/diff.js";
-import { declaredName, WorkspaceIndex } from "../context/repo-index.js";
+import { WorkspaceIndex } from "../context/repo-index.js";
+import { declaredName } from "../context/source-entry.js";
 import { quickCheck } from "../fs/check.js";
 import { applyPatchToText } from "../fs/patch.js";
 import { resolveWorkspacePath, relativeSlash } from "../fs/workspace.js";
 import { referencesForNames } from "../context/search.js";
+import { textResult } from "../shared/result.js";
+import { sourceLines, contentLineInfo, lineStartIndex, lineEndIndex } from "../fs/lines.js";
 import {
-  textResult, sourceLines, applyReplacements, applyViewReplace,
-  shiftDiffLines, contentLineInfo, boundedEditDiff, QUICK_CHECK_MAX_CHARS, lineStartIndex, lineEndIndex,
+  applyReplacements, applyViewReplace,
+  shiftDiffLines, boundedEditDiff, QUICK_CHECK_MAX_CHARS,
 } from "../fs/text-ops.js";
 
 export function createEdit(ctx) {

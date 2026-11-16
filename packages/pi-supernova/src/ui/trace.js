@@ -1,6 +1,6 @@
 import {stripVTControlCharacters} from 'node:util';
 import {isString,isObject} from '../shared/decode.js';
-import {clampLine,fitPath} from './render-measure.js';
+import {hardTruncate,fitPath} from './render-measure.js';
 
 function diffGut(theme, item) {
   const [sign, color, textColor] = DIFF_STYLES.get(item.type) ?? [" ", "dim", "toolDiffContext"];
@@ -194,12 +194,12 @@ const SHELL_TOOLS = ["bash", "exec"];
 const SEARCH_TOOLS = ["snap", "search"];
 
 function formatTarget(op, budget) {
-	if (SHELL_TOOLS.includes(op.tool)) return clampLine(summarizeCommand(op.target), budget);
+	if (SHELL_TOOLS.includes(op.tool)) return hardTruncate(summarizeCommand(op.target), budget);
 	const text = cleanInlineText(op.target);
 
 	if (!text) return "";
 
-	if (SEARCH_TOOLS.includes(op.tool)) return clampLine(text, budget);
+	if (SEARCH_TOOLS.includes(op.tool)) return hardTruncate(text, budget);
 
 	return fitPath(text, budget);
 }
@@ -248,7 +248,7 @@ function opRowSuffix(theme, op, prefix, budget) {
 
 	if (target) return prefix + theme.fg("muted", target);
 
-	if (op.ok === false && op.error) return prefix + theme.fg("error", clampLine(cleanInlineText(op.error), budget));
+	if (op.ok === false && op.error) return prefix + theme.fg("error", hardTruncate(cleanInlineText(op.error), budget));
 
 	return prefix.trimEnd();
 }

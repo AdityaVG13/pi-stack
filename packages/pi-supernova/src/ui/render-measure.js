@@ -78,10 +78,6 @@ export function hardTruncate(text, maxWidth, ellipsis = ELLIPSIS) {
   return takePrefix(stripVTControlCharacters(raw), width - suffixWidth) + suffix;
 }
 
-export function clampLine(line, width) {
-  return hardTruncate(line, width);
-}
-
 function pushWrapSegment(out, current, columns, segment, size, width) {
   if (columns + size > width && current.text) {
     out.push(current.text);

@@ -2,7 +2,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { resolveWorkspacePath, runCommand } from "../fs/workspace.js";
 import { fuzzyFind, grepIndexed, listIndexed, listWithTools, rgGrepArgs } from "../context/search.js";
-import { textResult, formatDirectoryEntry } from "../fs/text-ops.js";
+import { textResult } from "../shared/result.js";
+import { formatDirectoryEntry } from "../fs/directory.js";
 
 function rawListPattern(op, params) {
   if (op === "glob") return String(params?.pattern || "");

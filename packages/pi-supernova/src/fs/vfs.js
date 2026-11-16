@@ -1,8 +1,6 @@
 import {textSignature,sameSignature,sameFileVersion,fileSignature,tooLargeRead,overlayOrThrow,assertReadableFile,readLimitedBytes,remapReadError} from './file-io.js';
 import {resolveFileIdentity,resolveCommitTarget,assertExpectedSignature,collectMissingAncestors,makeStageEntry,stageReplacement,installStaged,failCommit,cleanupStaged} from './commit.js';
 
-export {resolveCommitTarget} from './commit.js';
-
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";

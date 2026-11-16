@@ -2,7 +2,8 @@ import { it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { runGuestProgram, warmGuestWorker, stopWarmGuestWorker, formatMemoryAttribution } from "../../src/runtime/runtime.js";
+import { runGuestProgram, formatMemoryAttribution } from "../../src/runtime/runtime.js";
+import { warmGuestWorker, stopWarmGuestWorker } from "../../src/runtime/worker-pool.js";
 import { engineFixture, limits } from "../helpers/engine.mjs";
 import { runCommand } from "../../src/fs/workspace.js";
 import { acquireWorker, killWorker } from "../../src/runtime/worker-pool.js";
@@ -270,7 +271,7 @@ it("an I/O safety-limit failure cancels sibling JSON reads without killing the h
 
   await f.write("report.json", JSON.stringify({ rows: Array(20000).fill({ value: "sibling read" }) }));
   const moduleUrl = new URL("../../index.js", import.meta.url).href;
-  const runtimeUrl = new URL("../../src/runtime/runtime.js", import.meta.url).href;
+  const runtimeUrl = new URL("../../src/runtime/worker-pool.js", import.meta.url).href;
 
   const program = `return await edit(async()=>{await write("pending.txt", "must roll back");
     return await Promise.all([

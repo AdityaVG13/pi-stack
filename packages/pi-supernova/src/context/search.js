@@ -3,7 +3,8 @@ import {pendingInScope,overlaySearchEntry,overlaySnapshot} from './search-files.
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isString } from "../shared/decode.js";
-import { WorkspaceIndex, globToRegExp } from "./repo-index.js";
+import { WorkspaceIndex } from "./repo-index.js";
+import { globToRegExp } from "../fs/glob.js";
 import { rankPaths, smartCase, fuzzyMatch } from "./fuzzy.js";
 import { runCommand, relativeSlash } from "../fs/workspace.js";
 

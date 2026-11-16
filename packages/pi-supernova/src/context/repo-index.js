@@ -1,7 +1,3 @@
-export {globToRegExp} from '../fs/glob.js';
-
-export {declaredName} from './source-entry.js';
-
 import {fromText,linesOf,spansOf,surfaceOf} from './source-entry.js';
 import * as fs from "node:fs";
 import * as path from "node:path";

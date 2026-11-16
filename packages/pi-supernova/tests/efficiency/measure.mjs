@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { packageFinalReturn } from "../../src/output/bottleneck.js";
+import { packageFinalReturn } from "../../src/output/final.js";
 import { createHostBridge } from "../../src/bridge/host-bridge.js";
 import { runGuestProgram, warmGuestWorker, stopWarmGuestWorker } from "../../src/runtime/runtime.js";
 import { packageDefaults } from "../../src/config/config.js";

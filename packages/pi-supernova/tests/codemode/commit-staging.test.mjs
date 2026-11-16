@@ -5,7 +5,7 @@ import path from "node:path";
 import { syncBuiltinESMExports } from "node:module";
 import { engineFixture, limits, modelText } from "../helpers/engine.mjs";
 import { CausalVfs } from "../../src/fs/vfs.js";
-import { warmGuestWorker } from "../../src/runtime/runtime.js";
+import { warmGuestWorker } from "../../src/runtime/worker-pool.js";
 
 test("committed edits preserve permissions and unrelated files without leaving staging debris", async t => {
   const f = await engineFixture(t);

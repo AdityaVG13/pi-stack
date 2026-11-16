@@ -145,37 +145,25 @@ test("omp host box leaves no unpainted trailing bar on framed result rows", asyn
     getBgAnsi: () => BG,
   };
 
-  const hostBoxRow = line => `${BG} ${line} \x1b[49m`;
-
-  const trailingUnpainted = row => {
-    const cells = [];
-    let bg = false;
-
-    // eslint-disable-next-line no-control-regex -- intentional ANSI SGR recognition
-    for (const m of row.matchAll(/\x1b\[([0-9;]*)m|[^\x1b]/g)) {
-      if (m[0].startsWith("\x1b")) {
-        if (m[1] === "49" || m[1] === "0" || m[1] === "") bg = false;
-        else if (m[1].startsWith("48")) bg = true;
-      } else cells.push(bg);
-    }
-
-    let trailing = 0;
-
-    for (let i = cells.length - 1; i >= 0 && !cells[i]; i--) trailing++;
-
-    return trailing;
-  };
-
   const f = await engineFixture(t);
   await f.write("doc.md", "line one\nline two\n");
   const result = await f.execute('await edit("doc.md", "line two", "line TWO"); await bash("echo hi"); await bash("echo yo"); return "done";');
-  const card = renderSupernovaResult(result, {expanded:false, isPartial:false}, ompTheme, {code:"x"});
-  const lines = card.render(100);
+  const ompOptions = { expanded: false, isPartial: false, lastComponent: undefined, invalidate() {} };
+  const lines = renderSupernovaResult(result, ompOptions, ompTheme, { code: "x" }).render(100);
   assert.ok(lines.length > 2, "framed card must render header, body and footer rows");
 
   for (const line of lines) {
     assert.equal(stringWidth(line), 100, "framed child row must exactly fill the host content width");
-    assert.equal(trailingUnpainted(hostBoxRow(line)), 0, "host right pad must keep the outer bg on every row");
+    // eslint-disable-next-line no-control-regex -- intentional ANSI SGR recognition
+    assert.doesNotMatch(line, /\x1b\[(48|49)/, "child must not wrap bg; the host tints the block");
+  }
+
+  const piLines = renderSupernovaResult(result, { expanded: false }, ompTheme, { state: {} }).render(100);
+
+  for (const line of piLines) {
+    assert.equal(stringWidth(line), 100, "Pi rows must fill the host content width");
+    // eslint-disable-next-line no-control-regex -- intentional ANSI SGR recognition
+    assert.match(line, /\x1b\[48;5;236m/, "Pi does not tint the block, so the child must paint its own bg");
   }
 });
 

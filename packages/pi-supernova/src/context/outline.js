@@ -1,6 +1,5 @@
 import { WorkspaceIndex } from "./repo-index.js";
-import { tokenizeQuery } from "./snap.js";
-import { stem } from "./evidence.js";
+import { tokenizeQuery, stem } from "./query.js";
 
 // read(path, { about }): one call, whole-file structure, only the relevant bodies expanded.
 // L0 (names) and L1 (signatures + line ranges) for every declaration; L2 (full text) for the

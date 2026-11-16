@@ -18,6 +18,9 @@
 - `spawn UNKNOWN` names the unusable executable instead of leaking the OS code.
 - Edit reference hints skip `.patch` / `.diff` artifacts so benchmark inputs and
   patch files are not reported as callers.
+- OMP results derive the host from the render options instead of the tool
+  arguments, so calls without `code`/`file`/`programs` keep their card state and
+  leave the host background unpainted.
 
 ## 0.11.0
 

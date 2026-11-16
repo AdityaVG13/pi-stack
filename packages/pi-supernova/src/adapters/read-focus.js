@@ -1,6 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import {tokenizeQuery,stem} from '../context/snap.js';
+import {tokenizeQuery,stem} from '../context/query.js';
 import {runCommand} from '../fs/workspace.js';
 import {lineStartIndex,lineTextRange} from '../fs/lines.js';
 import {textResult} from '../shared/result.js';
