@@ -9,6 +9,8 @@ For fat [Pi](https://pi.dev) / [OMP](https://omp.sh) installs: keep a small acti
 
 Needs Pi 0.82+ (or OMP) and Node 22+. Install **last** among tool-owning packages.
 
+`typebox` is a required peer (both hosts ship it); tool schemas are declared with it directly, so there is one schema dialect per install.
+
 ```bash
 pi install npm:pi-deferred-context-engine
 omp install npm:pi-deferred-context-engine

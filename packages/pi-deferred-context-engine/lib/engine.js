@@ -1,16 +1,8 @@
 import { uniqueNames, settleTransition } from "./decode.js";
-import { isBlocked, shouldDefer, SPINE_NAMES as CONFIG_SPINE_NAMES } from "./config.js";
+import { isBlocked, shouldDefer, SPINE_NAMES } from "./config.js";
 import { createSchemaCompactor } from "./compact.js";
 import { createToolTransitions } from "./transitions.js";
-import { formatCatalog } from "./catalog.js";
-
-/**
- * Spine discovery is always pinned and guarded. User pins force activation;
- * guards only prevent demotion/auto-deferral; blocks deny discovery/execution.
- * Promoted/manual-deferred sets are exclusive. Session unblock is human-only
- * and lasts until reload/session reset. Host exposure remains authoritative.
- */
-export const SPINE_NAMES = CONFIG_SPINE_NAMES;
+import { filterRows, formatCatalog } from "./catalog.js";
 
 /**
  * Configured routing order: named tools come first; unlisted tools retain
@@ -47,6 +39,9 @@ export function createDeferredController(pi, initialConfig) {
   const schemaCompactor = createSchemaCompactor(() => allTools(), SPINE_NAMES);
   const applyCompaction = () => schemaCompactor.apply(config, promoted);
   const compactionStats = () => schemaCompactor.stats();
+  /** Rebuilt on config change; policy checks run per declaration. */
+  let pinCache = null;
+  let guardCache = null;
 
   function nameIsBlocked(name) {
     return isBlocked(name, config, { sessionUnblocked });
@@ -64,7 +59,7 @@ export function createDeferredController(pi, initialConfig) {
 
   /** Tools forced into the active set on synchronize (pin). */
   function pinNames() {
-    return new Set([
+    return pinCache ??= new Set([
       ...SPINE_NAMES,
       ...(config.alwaysActive || []),
     ]);
@@ -72,7 +67,7 @@ export function createDeferredController(pi, initialConfig) {
 
   /** Tools that cannot be demoted and are never auto-deferred (demote-guard). */
   function demoteGuardNames() {
-    return new Set([
+    return guardCache ??= new Set([
       ...SPINE_NAMES,
       ...(config.neverDefer || []),
     ]);
@@ -111,19 +106,8 @@ export function createDeferredController(pi, initialConfig) {
     }
   }
 
-  function finishSynchronize(active, names, blocked) {
-    reconcileSets(new Set(active), new Set(names), blocked);
-
-    applyCompaction();
-    const missingPins = missingPinNames(names);
-    const blockedList = [...blocked].sort();
-
-    const out = {
-      active,
-      deferred: [...deferred].sort(),
-      blocked: blockedList,
-      promoted: [...promoted].sort(),
-    };
+  function result(active, { deferred: deferredList = [], blocked = [], missingPins = [] } = {}) {
+    const out = { active, deferred: deferredList, blocked, promoted: [...promoted].sort() };
 
     if (sessionUnblocked.size > 0) out.sessionUnblocked = [...sessionUnblocked].sort();
 
@@ -132,6 +116,14 @@ export function createDeferredController(pi, initialConfig) {
     if (transitions.error) out.setActiveError = transitions.error;
 
     return out;
+  }
+
+  function finishSynchronize(active, names, blocked) {
+    reconcileSets(new Set(active), new Set(names), blocked);
+
+    applyCompaction();
+
+    return result(active, { deferred: [...deferred].sort(), blocked: [...blocked].sort(), missingPins: missingPinNames(names) });
   }
 
   function restoreDeclarations(tools, hidden) {
@@ -146,13 +138,8 @@ export function createDeferredController(pi, initialConfig) {
 
     const done = (active) => {
       applyCompaction();
-      const out = { active, deferred: [], blocked: [], promoted: [...promoted] };
 
-      if (sessionUnblocked.size > 0) out.sessionUnblocked = [...sessionUnblocked].sort();
-
-      if (transitions.error) out.setActiveError = transitions.error;
-
-      return out;
+      return result(active);
     };
 
     return settleTransition(restored, done);
@@ -161,7 +148,7 @@ export function createDeferredController(pi, initialConfig) {
   function refreshDeferred(names, hidden, pins, guards, blocked) {
     for (const name of names) {
       if (blocked.has(name) || hidden.has(name)) {
-        // Unreachable is not deferred: clear promotion / manual-defer residue.
+        // Hidden tools are not deferred: clear promotion / manual-defer residue.
         promoted.delete(name);
         manuallyDeferred.delete(name);
         continue;
@@ -188,6 +175,25 @@ export function createDeferredController(pi, initialConfig) {
     if (!allNames().includes(name)) return false;
 
     return shouldDefer(name, config) || manuallyDeferred.has(name);
+  }
+
+  /** Registered names the policy would defer; one registry pass for request filters. */
+  function deferredNames() {
+    const names = new Set();
+
+    if (!config.enabled) return names;
+
+    const pins = pinNames();
+    const guards = demoteGuardNames();
+
+    for (const tool of allTools()) {
+      const name = tool.name;
+
+      if (promoted.has(name) || pins.has(name) || guards.has(name)) continue;
+      if (shouldDefer(name, config) || manuallyDeferred.has(name)) names.add(name);
+    }
+
+    return names;
   }
 
   function synchronize({ resetPromotions = false } = {}) {
@@ -225,6 +231,8 @@ export function createDeferredController(pi, initialConfig) {
 
   function setConfig(nextConfig, { resetPromotions = true, clearSessionUnblocks = true } = {}) {
     config = nextConfig;
+    pinCache = null;
+    guardCache = null;
 
     if (clearSessionUnblocks) sessionUnblocked.clear();
 
@@ -357,18 +365,24 @@ export function createDeferredController(pi, initialConfig) {
   function catalog({ filter, state } = {}) {
     const active = new Set(activeNames());
     const blocked = blockedNameSet();
-    let rows = formatCatalog(allTools(), deferred, active, blocked);
 
-    if (filter) {
-      const needle = filter.toLowerCase();
-      rows = rows.filter(
-        (row) => String(row.name ?? "").toLowerCase().includes(needle) || String(row.description ?? "").toLowerCase().includes(needle),
-      );
+    return filterRows(formatCatalog(allTools(), deferred, active, blocked), { filter, state });
+  }
+
+  function deferredCount() {
+    const active = new Set(activeNames());
+    const blocked = blockedNameSet();
+    let count = 0;
+
+    for (const tool of allTools()) {
+      const name = tool.name ?? "";
+
+      if (tool.exposure === "hidden" || active.has(name) || blocked.has(name) || !deferred.has(name)) continue;
+
+      count++;
     }
 
-    if (state && state !== "all") rows = rows.filter((row) => row.state === state);
-
-    return rows;
+    return count;
   }
 
   function status() {
@@ -381,7 +395,7 @@ export function createDeferredController(pi, initialConfig) {
       compaction: compactionStats(),
       all: allNames().length,
       active: activeNames().length,
-      deferred: catalog({ state: "deferred" }).length,
+      deferred: deferredCount(),
       blocked: blocked.length,
       blockedNames: blocked,
       promoted: promoted.size,
@@ -474,6 +488,7 @@ export function createDeferredController(pi, initialConfig) {
     compactionStats,
     configuredBlockedNames,
     demote: (names) => transitions.serialize(() => demote(names)),
+    deferredNames,
     hasDeferred,
     isNameBlocked: nameIsBlocked,
     isNameDeferred: deferredByPolicy,

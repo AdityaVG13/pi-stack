@@ -824,10 +824,14 @@ test("TUI lifecycle warnings use the event context and validation failures are e
     assert.match(notices[0].text, /CAUTION.*read/);
     assert.equal(notices[0].level, "warning");
 
-    for (const [name, params] of [["promote_tools", { names: [""] }], ["demote_tools", { names: [""] }], ["search_tools", { query: 1 }]]) {
+    for (const [name, params, message] of [
+      ["promote_tools", { names: [""] }, /names must be a non-empty array/],
+      ["demote_tools", { names: [""] }, /names must be a non-empty array/],
+      ["search_tools", { query: 1 }, /query must be a string/],
+    ]) {
       const failure = await registered.get(name).execute("bad", params);
       assert.equal(failure.isError, true, name + " must select the host error background and error semantics");
-      assert.ok(failure.details.error);
+      assert.match(failure.details.error, message);
     }
 
     const success = await registered.get("promote_tools").execute("ok", { names: ["search_tools"] });

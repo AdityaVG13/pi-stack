@@ -1,7 +1,7 @@
 import { isFunction } from "./decode.js";
 import { parseDeferredCommand } from "./params.js";
 import { blockedToolsCautionWarnings, emptyPinReplaceWarnings, hasBlockedConfig, loadConfig, removeBlockedTools, userConfigPath } from "./config.js";
-import { isNativePromptOptions, projectPromptResources, optimizeSystemPrompt, schemaAudit, normalizeSystemPromptText } from "./context.js";
+import { effectivePolicy, isNativePromptOptions, projectPromptResources, optimizeSystemPrompt, schemaAudit, normalizeSystemPromptText } from "./context.js";
 
 function notifyTransition(ctx, text, state, level = "info") {
   const failure = state?.setActiveError;
@@ -97,7 +97,7 @@ export function createDeferredCommand(pi, controller, getConfig, setConfig) {
     const text = normalizeSystemPromptText(prompt);
     const schemas = schemaAudit(pi.getAllTools(), pi.getActiveTools());
     const config = getConfig();
-    const policy = config.enabled === false ? { ...config, deduplicateContext: false, deferSkills: false } : config;
+    const policy = effectivePolicy(config);
     let summary;
 
     if (isNativePromptOptions(options)) {

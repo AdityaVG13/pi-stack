@@ -5,7 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { formatCatalog, rankCapabilities } from "../lib/catalog.js";
 import { registerDeferredTools } from "../lib/tools.js";
-import { formatCompressedSkillIndex, formatSkillIndex, optimizeSystemPrompt, prioritizePayload, readSkill, schemaAudit } from "../lib/context.js";
+import { formatCompressedSkillIndex, formatSkillIndex, optimizeSystemPrompt, readSkill, schemaAudit } from "../lib/context.js";
+import { prioritizePayload } from "../lib/routing.js";
 
 function contextBlock(file) {
   return `<project_instructions path="${file.path}">\n${file.content}\n</project_instructions>\n\n`;
@@ -254,7 +255,7 @@ test("list_capabilities does not crash on null params or a non-string filter", a
 
 
 test("native priority sections preserve transcript patches without duplicating text", async () => {
-  const { prioritizeContext, toolPriorityText } = await import("../lib/context.js");
+  const { prioritizeContext, toolPriorityText } = await import("../lib/routing.js");
   const text = toolPriorityText(["read"]);
 
   const messages = [{ role: "system", content: "", sections: { dce_tool_priority: "stale", retired: null, custom: "Keep this instruction" },
@@ -275,7 +276,7 @@ test("native priority sections preserve transcript patches without duplicating t
 
 
 test("native priority sections drop stale guidance when toolPriority is cleared", async () => {
-  const { prioritizeContext } = await import("../lib/context.js");
+  const { prioritizeContext } = await import("../lib/routing.js");
   const messages = [{ role: "system", content: "", sections: { dce_tool_priority: "stale", retired: null, custom: "Keep this instruction" } }];
   const original = structuredClone(messages);
   const projected = prioritizeContext(messages, [], () => false);
@@ -343,7 +344,7 @@ test("multi-block system instructions remove stale priority from every text bloc
 
 
 test("priority changes remove stale guidance from earlier system and developer messages", async () => {
-  const { prioritizeContext, toolPriorityGuidance } = await import("../lib/context.js");
+  const { prioritizeContext, toolPriorityGuidance } = await import("../lib/routing.js");
   const old = "Base instruction\n\n" + toolPriorityGuidance(["read"]);
   const user = { role: "user", content: old };
   const assistant = { role: "assistant", content: old };

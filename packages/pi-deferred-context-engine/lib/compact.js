@@ -50,7 +50,7 @@ function isReversible(target, descriptors) {
 /** Shared subgraphs may also be literal data or belong to a full-schema tool.
  * Conservatively leave them intact; accessors are never invoked by this scan.
  */
-export function sharedSchemaNodes(schemas) {
+function sharedSchemaNodes(schemas) {
   const seen = new Set();
   const protectedNodes = new Set();
 
@@ -187,6 +187,8 @@ export function restorePrunedSchema(undo) {
 /** Rebase full schemas before each policy pass; no name-local undo owns an aliased object. */
 export function createSchemaCompactor(getTools, spine) {
   const compacted = new Map();
+  /** Snapshot of the last applied policy; identical input makes apply a no-op. */
+  let applied = null;
 
   function compactTool(tool, options, protectedNodes) {
     const undo = [];
@@ -210,22 +212,52 @@ export function createSchemaCompactor(getTools, spine) {
   function restore() {
     for (const entry of [...compacted.values()].reverse()) restorePrunedSchema(entry.undo);
     compacted.clear();
+    applied = null;
+  }
+
+  /**
+   * Compaction is idempotent for a stable registry. The fingerprint is the
+   * config object, promoted membership, and each tool's name/parameters
+   * identity: the host replaces either when it rebuilds a tool, and owner
+   * mutations are rebased by restorePrunedSchema before any re-prune.
+   */
+  function unchanged(config, promoted, tools) {
+    if (!applied || applied.config !== config) return false;
+    if (applied.promoted.size !== promoted.size) return false;
+    for (const name of promoted) if (!applied.promoted.has(name)) return false;
+    if (applied.names.length !== tools.length) return false;
+
+    for (let i = 0; i < tools.length; i++) {
+      if (applied.names[i] !== tools[i].name || applied.parameters[i] !== tools[i].parameters) return false;
+    }
+
+    return true;
   }
 
   function apply(config, promoted) {
     const options = config.compactSchemas || {};
     const enabled = Boolean(config.enabled) && options.enabled === true;
-    const keepFull = new Set([...spine, ...(options.keepFull || [])]);
     const tools = getTools();
+
+    if (enabled && unchanged(config, promoted, tools)) return;
+
     restore();
 
     if (!enabled) return;
+    const keepFull = new Set([...spine, ...(options.keepFull || [])]);
     const protectedNodes = sharedSchemaNodes(tools.map(tool => tool.parameters));
 
     for (const tool of tools) {
       if (!compactible(tool, keepFull, promoted)) continue;
       compactTool(tool, options, protectedNodes);
     }
+
+    applied = {
+      config,
+      promoted: new Set(promoted),
+      names: tools.map(tool => tool.name),
+      parameters: tools.map(tool => tool.parameters),
+    };
   }
 
   function stats() {

@@ -8,7 +8,8 @@ import {
   blockedToolsCautionWarnings,
   loadConfig,
 } from "./lib/config.js";
-import { isNativePromptOptions, projectPromptResources, optimizeSystemPrompt, prioritizeContext, prioritizePayload, toolPriorityText, toolPriorityGuidance, normalizeSystemPromptText, projectSystemPrompt } from "./lib/context.js";
+import { isNativePromptOptions, projectPromptResources, optimizeSystemPrompt, normalizeSystemPromptText, projectSystemPrompt } from "./lib/context.js";
+import { prioritizeContext, prioritizePayload, toolPriorityText, toolPriorityGuidance } from "./lib/routing.js";
 import { createDeferredController } from "./lib/engine.js";
 
 import { createDeferredCommand } from "./lib/commands.js";
@@ -30,7 +31,7 @@ function resolveSystemPromptOptions(event, ctx) {
 
       if (options && isObject(options)) return options;
     } catch {
-      // Host without options -- searchable skills stay empty until slash/Jeffrey.
+      // Host without options: no skill catalog is available this turn.
     }
   }
 
@@ -38,7 +39,7 @@ function resolveSystemPromptOptions(event, ctx) {
 }
 
 // Stable bytes for Anthropic tools/system cache: do NOT embed a changing
- // deferred-tool count (MCP connect would rewrite the system prefix).
+// deferred-tool count (MCP connect would rewrite the system prefix).
 const DEFERRED_TOOLS_TEXT =
   "Some registered tools are deferred (schemas hidden). " +
   "Call search_tools with the capability you need; matching tools are promoted for this run. " +
@@ -139,9 +140,10 @@ export default function piDeferredContextEngine(pi) {
   // or a setActiveTools write that did not land).
   function requestDeclarationFilter() {
     const active = new Set(pi.getActiveTools());
+    const deferred = controller.deferredNames();
 
     const excluded = new Set(pi.getAllTools()
-      .filter(tool => tool.exposure === "hidden" || !active.has(tool.name) || controller.isNameDeferred(tool.name))
+      .filter(tool => tool.exposure === "hidden" || !active.has(tool.name) || deferred.has(tool.name))
       .map(tool => tool.name));
 
     return name => excluded.has(name) || controller.isNameBlocked(name);

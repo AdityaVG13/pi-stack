@@ -37,6 +37,24 @@ function callable(tool, name, active, blocked) {
     (tool.exposure === "direct" && active.has(name)));
 }
 
+/** Shared row filter for tool and skill catalogs. */
+export function filterRows(rows, { filter, state, kind } = {}) {
+  let filtered = rows;
+
+  if (filter) {
+    const needle = filter.toLowerCase();
+    filtered = filtered.filter((row) =>
+      String(row.name ?? "").toLowerCase().includes(needle) || String(row.description ?? "").toLowerCase().includes(needle),
+    );
+  }
+
+  if (state && state !== "all") filtered = filtered.filter((row) => row.state === state);
+
+  if (kind && kind !== "all") filtered = filtered.filter((row) => row.kind === kind);
+
+  return filtered;
+}
+
 export function formatCatalog(tools, deferred, active, blocked = new Set()) {
   return tools
     .map((tool) => {
@@ -98,17 +116,37 @@ function prepareQuery(query) {
   };
 }
 
-/** Score one tool/skill against a prepared query (sole scorer; used by rankCapabilities). */
+/** Per-tool text prep, reused while the tool definition is unchanged. */
+const preparedTools = new WeakMap();
+
+function prepareTool(tool) {
+  const cached = typeof tool === "object" && tool !== null ? preparedTools.get(tool) : undefined;
+
+  if (cached && cached.name === tool.name && cached.label === tool.label && cached.description === tool.description &&
+    cached.promptSnippet === tool.promptSnippet && cached.promptGuidelines === tool.promptGuidelines) return cached;
+  const name = optionalText(tool.name);
+  const normalizedName = name.replace(/[_-]+/g, " ");
+  const prepared = {
+    name,
+    normalizedName,
+    nameTerms: new Set(terms(normalizedName)),
+    label: optionalText(tool.label),
+    description: optionalText(tool.description),
+    prompt: [tool.promptSnippet, ...(tool.promptGuidelines || [])].filter(Boolean).join(" ").toLowerCase(),
+    promptSnippet: tool.promptSnippet,
+    promptGuidelines: tool.promptGuidelines,
+  };
+
+  if (typeof tool === "object" && tool !== null) preparedTools.set(tool, prepared);
+
+  return prepared;
+}
+
 function scoreToolPrepared(prepared, tool) {
   const { rawQuery, queryTerms, normalizedQuery } = prepared;
 
   if (queryTerms.length === 0) return 0;
-  const name = optionalText(tool.name);
-  const normalizedName = name.replace(/[_-]+/g, " ");
-  const nameTerms = new Set(terms(normalizedName));
-  const label = optionalText(tool.label);
-  const description = optionalText(tool.description);
-  const prompt = [tool.promptSnippet, ...(tool.promptGuidelines || [])].filter(Boolean).join(" ").toLowerCase();
+  const { name, normalizedName, nameTerms, label, description, prompt } = prepareTool(tool);
 
   let score = name === rawQuery ? 64 : normalizedName === normalizedQuery ? 32 : 0;
 
@@ -130,27 +168,40 @@ function requirePositiveLimit(limit) {
   return limit;
 }
 
+function compareMatches(left, right) {
+  return right.score - left.score || left.kind.localeCompare(right.kind) || left.item.name.localeCompare(right.item.name);
+}
+
+/** Bounded top-k: no full sort, no intermediate match array. */
+function insertBounded(top, match, limit) {
+  if (top.length === limit && compareMatches(match, top[limit - 1]) > 0) return;
+  let at = top.length;
+
+  while (at > 0 && compareMatches(match, top[at - 1]) < 0) at--;
+  top.splice(at, 0, match);
+
+  if (top.length > limit) top.pop();
+}
+
 export function rankCapabilities(query, tools, skills, limit) {
   limit = requirePositiveLimit(limit);
-  // Lever D: hoist query lower/split/join once -- was re-done per tool/skill (O(T×Q)).
   const prepared = prepareQuery(query);
+  const top = [];
 
-  return [
-    ...tools.map((tool) => ({ kind: "tool", item: tool, score: scoreToolPrepared(prepared, tool) })),
-    ...skills.map((skill) => ({ kind: "skill", item: skill, score: scoreToolPrepared(prepared, skill) })),
-  ]
-    .filter((match) => match.score > 0 && isString(match.item.name) && match.item.name.length > 0)
-    .sort((left, right) =>
-      right.score - left.score ||
-      left.kind.localeCompare(right.kind) ||
-      left.item.name.localeCompare(right.item.name),
-    )
-    .slice(0, limit)
-    .map((match) => ({
-      kind: match.kind,
-      name: match.item.name,
-      description: descriptionPreview(match.item.description, 160),
-      score: match.score,
-      item: match.item,
-    }));
+  for (const [kind, items] of [["tool", tools], ["skill", skills]]) {
+    for (const item of items) {
+      if (!isString(item.name) || item.name.length === 0) continue;
+      const score = scoreToolPrepared(prepared, item);
+
+      if (score > 0) insertBounded(top, { kind, item, score }, limit);
+    }
+  }
+
+  return top.map((match) => ({
+    kind: match.kind,
+    name: match.item.name,
+    description: descriptionPreview(match.item.description, 160),
+    score: match.score,
+    item: match.item,
+  }));
 }

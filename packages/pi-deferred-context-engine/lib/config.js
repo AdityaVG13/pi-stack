@@ -13,9 +13,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Hard spine tool name(s). Never blockable; always pin+demote-guard in the engine.
- * Keep in sync with engine SPINE_NAMES (engine re-exports this set).
  */
-export const SPINE_TOOL_NAMES = Object.freeze(["search_tools"]);
+const SPINE_TOOL_NAMES = Object.freeze(["search_tools"]);
 
 export const SPINE_NAMES = new Set(SPINE_TOOL_NAMES);
 
@@ -177,7 +176,7 @@ export function packageDefaults() {
 }
 
 export function loadConfig(configPath = userConfigPath(), { strict = false } = {}) {
-  const defaults = loadDefaults();
+  const defaults = packageDefaults();
 
   try {
     if (!fs.lstatSync(configPath, { throwIfNoEntry: false })) return defaults;
@@ -231,7 +230,7 @@ export function shouldDefer(name, config) {
 function sessionAllows(name, names) {
   if (!names) return false;
 
-  return (names instanceof Set ? names : new Set(names)).has(name);
+  return names instanceof Set ? names.has(name) : names.includes(name);
 }
 
 export function isBlocked(name, config, opts = {}) {

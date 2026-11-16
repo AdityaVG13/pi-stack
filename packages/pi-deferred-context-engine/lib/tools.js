@@ -1,58 +1,25 @@
+import { Type } from "typebox";
 import { isObject, isString } from "./decode.js";
-import { descriptionPreview, rankCapabilities } from "./catalog.js";
+import { descriptionPreview, filterRows, rankCapabilities } from "./catalog.js";
 import { deferredRenderer } from "./render.js";
-import { projectPromptResources, readSkill } from "./context.js";
-import { SPINE_NAMES } from "./engine.js";
+import { effectivePolicy, partitionSkills, readSkill } from "./context.js";
+import { SPINE_NAMES } from "./config.js";
 import { SEARCH_KIND_VALUES, SEARCH_LIMIT_HARD_CAP, LIST_CAPABILITY_STATES, parseToolNames, parseSearchToolsParams } from "./params.js";
-
-/** typebox is provided by the Pi host; fall back to loose JSON Schema if missing. */
-let Type;
-
-try {
-  Type = (await import("typebox")).Type;
-} catch {
-  Type = {
-    Object: (props, opts) => ({ type: "object", properties: props || {}, additionalProperties: false, ...opts }),
-    String: (opts) => ({ type: "string", ...opts }),
-    Integer: (opts) => ({ type: "integer", ...opts }),
-    Array: (items, opts) => ({ type: "array", items: items || {}, ...opts }),
-    Optional: (s) => ({ ...s }),
-    Union: (arr) => ({ anyOf: arr }),
-    Literal: (v) => ({ const: v }),
-  };
-}
-
 
 function result(text, details) { return { content: [{ type: "text", text }], details }; }
 
 function invalidParams(error) { return { ...result(error, { error }), isError: true }; }
 
 function skillRows(skills, config) {
-  const active = new Set(projectPromptResources({ skills }, config.enabled === false ? { deferSkills: false } : config).promptSkills);
+  const { promptSkills } = partitionSkills(skills, effectivePolicy(config));
+  const active = new Set(promptSkills.map(skill => skill.name));
 
   return skills.map((skill) => ({
     kind: "skill",
     name: skill.name,
-    state: active.has(skill) ? "active" : "deferred",
+    state: active.has(skill.name) ? "active" : "deferred",
     description: descriptionPreview(skill.description, 120),
   }));
-}
-
-function filterRows(rows, { filter, state, kind } = {}) {
-  let filtered = rows;
-
-  if (filter) {
-    const needle = filter.toLowerCase();
-    filtered = filtered.filter((row) =>
-      String(row.name ?? "").toLowerCase().includes(needle) || String(row.description ?? "").toLowerCase().includes(needle),
-    );
-  }
-
-  if (state && state !== "all") filtered = filtered.filter((row) => row.state === state);
-
-  if (kind && kind !== "all") filtered = filtered.filter((row) => row.kind === kind);
-
-  return filtered;
 }
 
 function partitionMatches(matches) {
@@ -166,8 +133,10 @@ export function registerDeferredTools(pi, controller, getConfig, getSkills) {
     prepareLoadout(loadout) {
       if (!getConfig().enabled) return;
 
+      const deferred = controller.deferredNames();
+
       return { hiddenDeclarations: loadout.declared.filter(tool =>
-        controller.isNameBlocked(tool.name) || loadout.getExposure(tool.name) === "hidden" || controller.isNameDeferred(tool.name),
+        controller.isNameBlocked(tool.name) || loadout.getExposure(tool.name) === "hidden" || deferred.has(tool.name),
       ).map(tool => tool.name) };
     },
     label: "Search capabilities",

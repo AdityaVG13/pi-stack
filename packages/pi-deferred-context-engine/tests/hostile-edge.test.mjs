@@ -130,7 +130,7 @@ test("fixed: non-object JSON config is accepted without schema guard", () => {
   }
 });
 
-test("fixed: setActiveTools throw escapes synchronize", () => {
+test("setActiveTools throw is reported as setActiveError, not thrown", () => {
   const tools = [
     { name: "read", description: "R" },
     { name: "search_tools", description: "S" },
@@ -156,8 +156,8 @@ test("fixed: setActiveTools throw escapes synchronize", () => {
     deferredPrefixes: [],
   });
 
-  // Prefer: synchronize should not throw; degrade gracefully.
-  assert.doesNotThrow(() => controller.synchronize({ resetPromotions: true }));
+  const result = controller.synchronize({ resetPromotions: true });
+  assert.match(result.setActiveError, /host refused setActiveTools/);
 });
 
 test("skill strip removes CRLF skill indexes", () => {

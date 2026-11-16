@@ -58,9 +58,6 @@
     },
     "@earendil-works/pi-tui": {
       "optional": true
-    },
-    "typebox": {
-      "optional": true
     }
   },
   "devDependencies": {

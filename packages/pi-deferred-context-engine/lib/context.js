@@ -21,8 +21,7 @@ function visibleSkills(skills = []) {
 
 const XML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" };
 
-// Single pass: each source char maps once, inserted entities are never
-// rescanned -- byte-identical to the chained five-replace version.
+// Single pass: each source char maps once; inserted entities are never rescanned.
 function escapeXml(value) {
   return String(value).replace(/[&<>"']/g, (char) => XML_ESCAPES[char]);
 }
@@ -101,25 +100,15 @@ function contextBlock(file) {
   return `<project_instructions path="${file.path}">\n${file.content}\n</project_instructions>\n\n`;
 }
 
-function removeOnce(text, needle) {
-  const index = text.indexOf(needle);
-
-  if (index < 0) return text;
-
-  return text.slice(0, index) + text.slice(index + needle.length);
-}
-
 function removeContextBlock(prompt, file) {
   for (const needle of newlineVariants(contextBlock(file))) {
-    const next = removeOnce(prompt, needle);
+    const at = prompt.indexOf(needle);
 
-    if (next !== prompt) return next;
+    if (at >= 0) return prompt.slice(0, at) + prompt.slice(at + needle.length);
   }
 
   return prompt;
 }
-
-export { toolPriorityGuidance, toolPriorityText, prioritizePayload, prioritizeContext } from "./routing.js";
 
 function deduplicatePrompt(prompt, files) {
   const seen = new Set();
@@ -161,15 +150,32 @@ function findSkillIndex(prompt, skills) {
   return null;
 }
 
-function deferPromptSkills(prompt, skills, config) {
-  if (config.deferSkills === false || skills.length === 0) return { prompt, count: 0, chars: 0 };
+/** Disabled DCE defers nothing: one policy for projection, audit, and catalogs. */
+export function effectivePolicy(config) {
+  return config.enabled === false ? { ...config, deduplicateContext: false, deferSkills: false } : config;
+}
+
+/** One partition for native options and the legacy text path. */
+export function partitionSkills(allSkills, config) {
+  const visible = visibleSkills(allSkills);
   const pins = new Set(config.activeSkills || []);
-  const pinned = skills.filter(skill => pins.has(skill.name));
-  const index = findSkillIndex(prompt, skills);
-  const count = skills.length - pinned.length;
+  const deferSkills = config.deferSkills !== false;
+
+  return {
+    visible,
+    deferSkills,
+    skills: deferSkills ? allSkills : visible,
+    promptSkills: deferSkills ? visible.filter(skill => pins.has(skill.name)) : visible,
+  };
+}
+
+function stripSkillIndex(prompt, { visible, promptSkills, deferSkills }) {
+  if (!deferSkills || visible.length === 0) return { prompt, count: 0, chars: 0 };
+  const index = findSkillIndex(prompt, visible);
+  const count = visible.length - promptSkills.length;
 
   if (!index) return { prompt, count, chars: 0 };
-  const lf = pinned.length > 0 ? formatSkillIndex(pinned) : "";
+  const lf = promptSkills.length > 0 ? formatSkillIndex(promptSkills) : "";
   const replacement = index.text.includes("\r\n") && lf ? lf.replace(/\n/g, "\r\n") : lf;
 
   return { prompt: prompt.slice(0, index.at) + replacement + prompt.slice(index.at + index.text.length),
@@ -183,36 +189,40 @@ export function isNativePromptOptions(options) {
 
 export function projectPromptResources(options, config) {
   const files = options.contextFiles || [], allSkills = options.skills || [];
-  const seen = new Set(), pins = new Set(config.activeSkills || []);
-  const visible = visibleSkills(allSkills);
+  const seen = new Set();
+  const skills = partitionSkills(allSkills, config);
+  const dedupe = config.deduplicateContext !== false;
 
-  const contextFiles = config.deduplicateContext === false ? files : files.filter(file => {
-    if (seen.has(file.content)) return false;
-    seen.add(file.content);
+  return {
+    contextFiles: dedupe ? files.filter(file => {
+      if (seen.has(file.content)) return false;
+      seen.add(file.content);
 
-    return true;
-  });
-
-  return { contextFiles, skills: config.deferSkills === false ? visible : allSkills,
-    promptSkills: config.deferSkills === false ? visible : visible.filter(skill => pins.has(skill.name)),
-    visibleSkillCount: visible.length };
+      return true;
+    }) : files,
+    skills: skills.skills,
+    promptSkills: skills.promptSkills,
+    visibleSkillCount: skills.visible.length,
+  };
 }
 
 export function optimizeSystemPrompt(systemPrompt, options = {}, config = {}) {
   const prompt = String(systemPrompt || "");
   const beforeChars = prompt.length;
-  const duplicates = deduplicatePrompt(prompt, config.deduplicateContext === false ? [] : options.contextFiles || []);
   const allSkills = options.skills || [];
-  const promptSkills = visibleSkills(allSkills);
-  const deferred = deferPromptSkills(duplicates.prompt, promptSkills, config);
+  const skills = partitionSkills(allSkills, config);
+  const duplicates = config.deduplicateContext === false
+    ? { prompt, duplicateFiles: 0, duplicateContextChars: 0 }
+    : deduplicatePrompt(prompt, options.contextFiles || []);
+  const deferred = stripSkillIndex(duplicates.prompt, skills);
 
   // Hidden skills remain searchable, but never acquire prompt visibility.
   return {
     systemPrompt: deferred.prompt,
-    skills: config.deferSkills === false ? promptSkills : allSkills,
+    skills: skills.skills,
     stats: { beforeChars, afterChars: deferred.prompt.length, removedChars: beforeChars - deferred.prompt.length,
       duplicateFiles: duplicates.duplicateFiles, duplicateContextChars: duplicates.duplicateContextChars,
-      deferredSkills: config.deferSkills === false ? 0 : deferred.count + allSkills.filter(isPromptHiddenSkill).length,
+      deferredSkills: skills.deferSkills ? deferred.count + allSkills.filter(isPromptHiddenSkill).length : 0,
       deferredSkillChars: deferred.chars },
   };
 }

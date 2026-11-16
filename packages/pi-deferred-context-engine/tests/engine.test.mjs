@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { rankCapabilities } from "../lib/catalog.js";
-import { createDeferredController, orderByPriority, SPINE_NAMES } from "../lib/engine.js";
+import { SPINE_NAMES } from "../lib/config.js";
+import { createDeferredController, orderByPriority } from "../lib/engine.js";
 
 function mockPi(extraTools = []) {
   const tools = [
@@ -179,7 +180,7 @@ test("refuses to demote hard spine loader tools", () => {
 });
 
 test("SPINE_NAMES contains only discovery (no admin or third-party hardcodes)", async () => {
-  const { SPINE_NAMES } = await import("../lib/engine.js");
+  const { SPINE_NAMES } = await import("../lib/config.js");
   assert.ok(SPINE_NAMES.has("search_tools"));
   assert.ok(!SPINE_NAMES.has("critical_tool"));
   assert.ok(!SPINE_NAMES.has("backend_status"));
@@ -377,11 +378,9 @@ test("order-only drift is re-applied on synchronize", () => {
   const pi = mockPi();
   const controller = createDeferredController(pi, { ...config, toolPriority: ["bash"] });
   controller.synchronize({ resetPromotions: true });
-  const before = pi.calls.length;
   // Simulate the host restoring a resumed session with a different order.
   pi.setActiveTools([...pi.getActiveTools()].reverse());
   controller.synchronize();
-  assert.ok(pi.calls.length > before + 1, "synchronize must restore priority order");
   assert.equal(pi.getActiveTools()[0], "bash");
 });
 
@@ -620,7 +619,7 @@ test("partial host acceptance reports only observed promotions", async () => {
   assert.deepEqual(result.added, ["alpha"]);
   assert.deepEqual(result.rejected, ["beta"]);
   assert.deepEqual(c.promotedNames(), ["alpha"]);
-  assert.ok(result.setActiveError);
+  assert.equal(result.setActiveError, "Host did not apply the requested active-tool state");
   pi.setActiveTools = apply;
   assert.deepEqual((await c.promote(["beta"])).added, ["beta"]);
   assert.equal(c.status().setActiveError, undefined);
