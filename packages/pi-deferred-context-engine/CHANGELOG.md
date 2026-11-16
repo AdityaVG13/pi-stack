@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.5.3
+
+### Changed
+
+- `typebox` is a required peer instead of an optional one. Tool schemas are
+  declared with it directly, so the loose-JSON-Schema fallback and its
+  top-level await are gone.
+- Prompt projection has one `partitionSkills()` core for native options and the
+  text path: hidden skills stay hidden in both, and `deferSkills: false`
+  exposes the same set either way.
+- Catalog filtering, the synchronize result shape, and the effective policy each
+  have one owner; the copies in `engine.js`, `tools.js`, and `commands.js` are
+  deleted.
+- Imports point at the owning module: the `context.js` re-export barrel and the
+  `engine.js` `SPINE_NAMES` alias are gone.
+
+### Performance
+
+- Schema compaction fingerprints tools and config and skips restore/prune when
+  nothing changed: the per-turn hook drops from 1.68 ms to 0.09 ms on a 91-tool
+  registry.
+- `rankCapabilities` uses a bounded top-k with per-tool preparation cached by
+  identity (53.4 µs to 37.3 µs per search), and `status` counts deferred tools
+  in one registry pass instead of building the catalog.
+
+### Fixed
+
+- `loadConfig` reuses the cached package defaults instead of reading and merging
+  them twice; `sessionAllows` no longer copies the blocked set per call.
+
 ## 0.5.2
 
 ### Fixed

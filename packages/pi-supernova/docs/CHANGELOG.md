@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.11.2
+
+### Changed
+
+- `warmGuestWorker` and `stopWarmGuestWorker` are imported from
+  `src/runtime/worker-pool.js` instead of being re-exported through the runtime
+  barrel.
+- The guest read path drops its `observe` hook and `readFiles` set; the read
+  tracker owns path notes, so a read is decoded once.
+
+### Fixed
+
+- OMP results derive the host from the render context at position 4, or from
+  OMP's render state in the options object, instead of sniffing the tool
+  arguments. Calls without `code`/`file`/`programs` keep their card state and
+  leave the host background unpainted.
+
 ## 0.11.1
 
 ### Fixed
@@ -18,9 +35,6 @@
 - `spawn UNKNOWN` names the unusable executable instead of leaking the OS code.
 - Edit reference hints skip `.patch` / `.diff` artifacts so benchmark inputs and
   patch files are not reported as callers.
-- OMP results derive the host from the render options instead of the tool
-  arguments, so calls without `code`/`file`/`programs` keep their card state and
-  leave the host background unpainted.
 
 ## 0.11.0
 

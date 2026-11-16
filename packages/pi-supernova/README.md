@@ -68,11 +68,11 @@ between operating systems or CPU architectures. Published-package installation
 resolves these dependencies through the host's package manager.
 
 Git pushes do not update npm installations. Publish the new npm version first,
-then reinstall it in your host. To pin **0.11.1** after it is published:
+then reinstall it in your host. To pin **0.11.2** after it is published:
 
 ```bash
-pi install npm:pi-supernova@0.11.1
-omp install npm:pi-supernova@0.11.1
+pi install npm:pi-supernova@0.11.2
+omp install npm:pi-supernova@0.11.2
 ```
 
 In Pi, `pi list` shows the configured package sources. A local path uses that
