@@ -4,7 +4,7 @@ import { CONTRACT_VERSION } from "./lib/vocab.js";
 import { parsePapercutsParams } from "./lib/params.js";
 import { ACTIONS } from "./lib/actions.js";
 import { createActionExecutor } from "./lib/worker-client.js";
-import { renderPapercutsFrameCall, renderPapercutsFrameResult } from "./lib/render.js";
+import { renderPapercutsCall, renderPapercutsResult } from "./lib/render.js";
 
 export { SEVERITIES, SCHEMA_TARGETS } from "./lib/vocab.js";
 
@@ -87,9 +87,8 @@ export default function registerPapercuts(pi) {
         { properties: { ok: { const: false } }, required: ["error"] },
       ],
     },
-    renderShell: "self",
-    renderCall: renderPapercutsFrameCall,
-    renderResult: renderPapercutsFrameResult,
+    renderCall: renderPapercutsCall,
+    renderResult: renderPapercutsResult,
     execute: execute.bind(null, executor),
   });
 }
