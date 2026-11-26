@@ -1,38 +1,22 @@
-import { Box, Text } from "@earendil-works/pi-tui";
 import { isObject } from "./decode.js";
 import { displayText, flattenText, clipText } from "./text.js";
 
-const componentText = new WeakMap();
-
-// Keep Pi's width/layout cache only while the freshly themed text is unchanged.
-// Weak ownership prevents old transcript rows from becoming a global cache.
-function textComponent(text, context) {
-  const previous = context?.lastComponent;
-
-  if (componentText.has(previous)) {
-    if (componentText.get(previous) !== text) {
-      previous.setText(text);
-      componentText.set(previous, text);
-    }
-
-    return previous;
-  }
-
-  const component = new Text(text, 0, 0);
-  componentText.set(component, text);
-
-  return component;
+/** The host repaints a rows object on every draw; each render closes over the
+ * args, expansion and theme it was given, so no cross-row frame is kept.
+ */
+function rowsOf(text) {
+  return { render: () => (text === "" ? [] : text.split("\n")) };
 }
 
 function resultText(result) {
   return (result?.content ?? []).filter((item) => item?.type === "text").map((item) => item.text).join("\n");
 }
 
-function addCall(args, theme, context) {
+function addCall(args, theme, expanded) {
   const severity = flattenText(args?.severity || "minor");
   const tags = Array.isArray(args?.tags) ? args.tags.map(flattenText).filter(Boolean) : [];
   let text = `\n  ${theme.fg("dim", [severity, ...tags].join(" · "))}`;
-  const body = clipText(args?.text, context?.expanded ? 10_000 : 240);
+  const body = clipText(args?.text, expanded ? 10_000 : 240);
 
   if (body) text += `\n  ${theme.fg("toolOutput", body)}`;
 
@@ -52,16 +36,16 @@ function listCall(args, theme) {
 const CALL_RENDERERS = new Map([["add", addCall], ["resolve", resolveCall], ["list", listCall]]);
 
 /** Full structured arguments remain in the session, not the compact row. */
-export function renderPapercutsCall(args, theme, context) {
+export function renderPapercutsCall(args, options, theme) {
   const action = args?.action === "log" ? "add" : flattenText(args?.action);
   let text = theme.fg("toolTitle", theme.bold("papercuts"));
 
   if (action) text += ` ${theme.fg("muted", action)}`;
   const render = CALL_RENDERERS.get(action);
 
-  if (render) text += render(args, theme, context);
+  if (render) text += render(args, theme, options?.expanded);
 
-  return textComponent(text, context);
+  return rowsOf(text);
 }
 
 function errorResult(payload, theme) {
@@ -92,15 +76,15 @@ function addResult({ data, payload, expanded, theme }) {
   return expanded ? text + expandedRecord(data.record, payload, theme) : text;
 }
 
-function listHeading(data, context, theme) {
-  const status = flattenText(context?.args?.status || "open");
+function listHeading(data, args, theme) {
+  const status = flattenText(args?.status || "open");
 
   return theme.fg("muted", `${data.total} ${status} papercut${data.total === 1 ? "" : "s"}`);
 }
 
-function listResult({ data, payload, result, expanded, context, theme }) {
+function listResult({ data, payload, result, expanded, args, theme }) {
   if (!Array.isArray(data.items)) return theme.fg("toolOutput", displayText(resultText(result)));
-  let text = listHeading(data, context, theme);
+  let text = listHeading(data, args, theme);
   const shown = expanded ? data.items : data.items.slice(0, 5);
 
   for (const item of shown) {
@@ -167,8 +151,8 @@ function doctorResult({ data, theme }) {
   return text;
 }
 
-function schemaResult({ data, expanded, context, theme }) {
-  let text = theme.fg("success", `✓ Schema ready · ${flattenText(context?.args?.target || "all")}`);
+function schemaResult({ data, expanded, args, theme }) {
+  let text = theme.fg("success", `✓ Schema ready · ${flattenText(args?.target || "all")}`);
 
   if (expanded) text += `\n${theme.fg("dim", JSON.stringify(data, null, 2))}`;
 
@@ -181,62 +165,14 @@ function defaultResult({ payload, expanded, theme }) {
 
 const RESULT_RENDERERS = new Map([["add", addResult], ["list", listResult], ["resolve", resolveResult], ["prune", pruneResult], ["doctor", doctorResult], ["schema", schemaResult]]);
 
-export function renderPapercutsResult(result, { expanded }, theme, context) {
+export function renderPapercutsResult(result, options, theme, args) {
   const payload = result?.details;
 
-  if (!payload || !isObject(payload)) return textComponent(theme.fg("toolOutput", displayText(resultText(result))), context);
+  if (!payload || !isObject(payload)) return rowsOf(theme.fg("toolOutput", displayText(resultText(result))));
 
-  if (payload.ok === false) return textComponent(errorResult(payload, theme), context);
-  const action = context?.args?.action;
+  if (payload.ok === false) return rowsOf(errorResult(payload, theme));
+  const action = args?.action;
   const render = RESULT_RENDERERS.get(action === "log" ? "add" : action) ?? defaultResult;
 
-  return textComponent(render({ data: payload.data ?? {}, payload, result, expanded, context, theme }), context);
-}
-
-
-const FRAME = Symbol("papercuts.frame");
-
-// The self-rendered shell retains the default Box's padding/background, but does
-// not clear its children on every result wrapper. Two frames preserve both
-// expansion layouts; Pi still owns click/keyboard expansion and invalidation.
-export function renderPapercutsFrameCall(args, theme, context) {
-  if (!context?.state) return renderPapercutsCall(args, theme, context);
-  const frames = context.state[FRAME] ??= new Map();
-  const expanded = Boolean(context.expanded);
-  let frame = frames.get(expanded);
-
-  if (!frame) {
-    frame = { box: new Box(1, 1), empty: new Text("", 0, 0) };
-    frames.set(expanded, frame);
-  }
-
-  // Pi falls back if renderCall throws; then this private box is not mounted.
-  frame.ready = false;
-  const previous = frame.call;
-  frame.call = renderPapercutsCall(args, theme, { ...context, lastComponent: previous });
-
-  if (!previous) frame.box.addChild(frame.call);
-  const color = context.isPartial ? "toolPendingBg" : context.isError ? "toolErrorBg" : "toolSuccessBg";
-  frame.box.setBgFn(text => theme.bg(color, text));
-  frame.ready = true;
-
-  return frame.box;
-}
-
-export function renderPapercutsFrameResult(result, options, theme, context) {
-  const frame = context?.state?.[FRAME]?.get(Boolean(context.expanded));
-
-  if (!frame?.ready) return renderPapercutsResult(result, options, theme, context);
-  const previous = frame.result;
-
-  try { frame.result = renderPapercutsResult(result, options, theme, { ...context, lastComponent: previous }); }
-  catch (error) {
-    // The host will render its fallback after this box. Never retain an old receipt.
-    if (previous) textComponent("", { lastComponent: previous });
-    throw error;
-  }
-
-  if (!previous) frame.box.addChild(frame.result);
-
-  return frame.empty;
+  return rowsOf(render({ data: payload.data ?? {}, payload, result, expanded: options?.expanded, args, theme }));
 }

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Tool rows are `{ render(width) }` row objects instead of pi-tui `Text`/`Box` components
+  and the self-rendered shell: the host repaints them, paints the tool box and its phase
+  background, and owns expansion, so the per-row frame cache and `renderShell` are gone.
+- The optional peer is `@oh-my-pi/pi-tui`, not the removed `@earendil-works/pi-tui` scope.
+
 ## 0.4.2
 
 ### Changed

@@ -53,18 +53,18 @@ test("add uses a compact TUI renderer instead of exposing the JSON envelope", as
     severity: "major",
   };
 
-  const call = rendered(tool.renderCall(args, plainTheme, { expanded: false }));
+  const call = rendered(tool.renderCall(args, { expanded: false }, plainTheme));
   assert.match(call, /papercuts add/);
   assert.match(call, /major · tooling · tui/);
   assert.match(call, /A long tool failure/);
   assert.doesNotMatch(call, /\{"action"/);
 
   const result = await tool.execute("render-add", args, undefined, { cwd: repo });
-  const view = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }));
+  const view = rendered(tool.renderResult(result, { expanded: false }, plainTheme, args));
   assert.match(view, /^✓ Filed pc_[0-9a-f]{12} · major$/);
   assert.doesNotMatch(view, /"ok"|"record"|"cwd"/);
 
-  const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, { args }));
+  const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, args));
   assert.match(expanded, /tags: tooling, tui/);
   assert.match(expanded, /file:/);
 });
@@ -72,7 +72,7 @@ test("add uses a compact TUI renderer instead of exposing the JSON envelope", as
 test("TUI renderer strips terminal control sequences from displayed arguments", () => {
   const tool = captureTool();
   const args = { action: "add", text: "plain \u001b[31mred\u001b[0m text", tags: ["\u001b[2Jtui"] };
-  const call = rendered(tool.renderCall(args, plainTheme, { expanded: false }));
+  const call = rendered(tool.renderCall(args, { expanded: false }, plainTheme));
   assert.equal(call.includes("\u001b"), false);
   assert.match(call, /plain red text/);
   assert.match(call, /minor · tui/);
@@ -82,7 +82,7 @@ test("usage errors render as readable guidance instead of raw JSON", async () =>
   const tool = captureTool();
   const args = { action: "add" };
   const result = await tool.execute("render-error", args, undefined, { cwd: tmpRepo() });
-  const view = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }));
+  const view = rendered(tool.renderResult(result, { expanded: false }, plainTheme, args));
   assert.match(view, /^✗ papercuts add requires non-empty 'text'\./);
   assert.match(view, /papercuts\(\{action:'add'/);
   assert.doesNotMatch(view, /"ok"|"error":\{/);
@@ -492,12 +492,12 @@ test("list TUI more-line counts the full backlog, including limit truncation", (
   };
 
   const args = { action: "list", limit: 3 };
-  const compact = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }));
+  const compact = rendered(tool.renderResult(result, { expanded: false }, plainTheme, args));
 
   assert.match(compact, /8 open papercuts/);
   assert.match(compact, /… 5 more/);
 
-  const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, { args, expanded: true }));
+  const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, args));
 
   assert.match(expanded, /8 open papercuts/);
   assert.match(expanded, /… 5 more/);
@@ -512,9 +512,9 @@ test("expanded list reveals the complete cut instead of retaining the compact pr
   const args = { action: "list" };
   const result = await tool.execute("full-list", args, undefined, undefined, ctx);
   assert.equal(result.isError, false);
-  const compact = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }), 240);
+  const compact = rendered(tool.renderResult(result, { expanded: false }, plainTheme, args), 240);
   assert.equal(compact.includes(ending), false, "collapsed rows remain previews");
-  const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, { args, expanded: true }), 240);
+  const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, args), 240);
   assert.ok(expanded.includes(ending), "expanding must reveal the reason after the 120-character preview");
   assert.equal(expanded.includes("\u001b"), false, "full text remains sanitized for terminal display");
   assert.equal(result.structuredContent.data.items[0].text, body, "display must not modify stored text");
@@ -529,9 +529,9 @@ test("expanded lists expose stored tags and the active log path", async () => {
   const args = { action: "list", file };
   const result = await tool.execute("metadata-list", args, undefined, undefined, ctx);
   assert.equal(result.isError, false);
-  const compact = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }));
+  const compact = rendered(tool.renderResult(result, { expanded: false }, plainTheme, args));
   assert.doesNotMatch(compact, /tags:|file:/, "compact output stays a preview");
-  const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, { args, expanded: true }), 240);
+  const expanded = rendered(tool.renderResult(result, { expanded: true }, plainTheme, args), 240);
   assert.match(expanded, /tags: tooling, ui/);
   assert.ok(expanded.includes(`file: ${file}`), "review must identify the backlog being displayed");
   assert.equal(expanded.includes("\u001b"), false, "stored metadata remains sanitized");
@@ -623,12 +623,12 @@ test("review regression: every call renderer removes terminal control sequences"
   ];
 
   for (const args of calls) {
-    const view = rendered(tool.renderCall(args, plainTheme, { expanded: false }));
+    const view = rendered(tool.renderCall(args, { expanded: false }, plainTheme));
     assert.equal(view.includes("\u001b"), false);
   }
 
   const md = { content: [{ type: "text", text: "# Backlog\n- text\u001b[2J" }], details: { ok: true, data: { total: 1 }, meta: { contract: 1 } } };
-  const view = rendered(tool.renderResult(md, { expanded: true }, plainTheme, { args: { action: "list", format: "md" } }));
+  const view = rendered(tool.renderResult(md, { expanded: true }, plainTheme, { action: "list", format: "md" }));
   assert.equal(view.includes("\u001b"), false);
   assert.match(view, /# Backlog/);
 });
@@ -636,10 +636,10 @@ test("review regression: every call renderer removes terminal control sequences"
 test("review regression: clipping never introduces a lone UTF-16 surrogate", async () => {
   const tool = captureTool();
   const args = { action: "add", text: "a".repeat(238) + "😀😀" };
-  const call = rendered(tool.renderCall(args, plainTheme, { expanded: false }));
+  const call = rendered(tool.renderCall(args, { expanded: false }, plainTheme));
   assert.equal(call.isWellFormed(), true);
   const result = { content: [], details: { ok: true, data: { total: 1, items: [{ id: "pc_abcdef123456", severity: "minor", text: "a".repeat(118) + "😀😀" }] }, meta: { contract: 1 } } };
-  const list = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args: { action: "list" } }));
+  const list = rendered(tool.renderResult(result, { expanded: false }, plainTheme, { action: "list" }));
   assert.equal(list.isWellFormed(), true);
   const added = await tool.execute("unicode-preview", { action: "add", text: "a".repeat(71) + "😀😀" }, undefined, undefined, { cwd: tmpRepo() });
   assert.equal(added.content[0].text.isWellFormed(), true, "model-facing previews must not split an emoji either");
@@ -713,51 +713,39 @@ test("review regression: resolve cannot append an orphan after concurrent prune"
 });
 
 
-test("stable tool rows retain layout while updates, expansion, resize and themes stay fresh", () => {
+test("tool rows redraw updates, expansion and theme changes", () => {
   const tool = captureTool();
-  const args = { action: "add", text: "row 中文 😀 é", tags: ["tooling"] };
+  const args = { action: "add", text: "row 中文 😀 é", tags: ["tooling"] };
   let tint = "\u001b[31m";
   const theme = { fg: (_color, text) => tint + text + "\u001b[0m", bold: text => text };
-  const first = tool.renderCall(args, theme, { expanded: false });
-  const lines = first.render(80);
-  const same = tool.renderCall({ ...args }, theme, { expanded: false, lastComponent: first });
-  assert.equal(same, first, "a stable row must retain its Text layout cache");
-  assert.equal(same.render(80), lines);
+  const first = tool.renderCall(args, { expanded: false }, theme);
+  assert.ok(first.render(80).length > 0);
   args.text = "updated row 😀";
-  const changed = tool.renderCall(args, theme, { expanded: true, lastComponent: same });
+  const changed = tool.renderCall(args, { expanded: true }, theme);
   assert.match(rendered(changed), /updated row 😀/);
   assert.doesNotMatch(rendered(changed), /row 中文/);
   tint = "\u001b[32m";
-  changed.invalidate();
-  const themed = tool.renderCall(args, theme, { expanded: true, lastComponent: changed });
+  const themed = tool.renderCall(args, { expanded: true }, theme);
   assert.ok(themed.render(24).join("").includes("\u001b[32m"));
   assert.ok(!themed.render(24).join("").includes("\u001b[31m"));
   const item = { id: "pc_abcdef123456", severity: "minor", text: "old result 中文 😀" };
   const payload = { ok: true, data: { total: 1, items: [item] }, meta: { contract: 1 } };
-  const context = { args: { action: "list" } };
   const result = () => ({ content: [], details: payload });
-  const list = tool.renderResult(result(), { expanded: false }, plainTheme, context);
-  const listLines = list.render(80);
-  context.lastComponent = list;
-  const again = tool.renderResult(result(), { expanded: false }, plainTheme, context);
-  assert.equal(again, list);
-  assert.equal(again.render(80), listLines);
+  const list = tool.renderResult(result(), { expanded: false }, plainTheme, { action: "list" });
+  assert.ok(list.render(80).length > 0);
   item.text = "changed result 😀";
-  assert.match(rendered(tool.renderResult(result(), { expanded: true }, plainTheme, context), 24), /changed result/);
+  assert.match(rendered(tool.renderResult(result(), { expanded: true }, plainTheme, { action: "list" }), 24), /changed result/);
 
   for (const sample of [
     { content: [], details: { ok: false, error: { message: "failed" } } },
     { content: [{ type: "text", text: "fallback" }] },
     { content: [{ type: "text", text: "# Markdown" }], details: { ok: true, data: { total: 1 } } },
   ]) {
-    const previous = tool.renderResult(sample, { expanded: false }, plainTheme, context);
-    previous.render(80);
-    const reused = tool.renderResult({ ...sample }, { expanded: false }, plainTheme, { ...context, lastComponent: previous });
-    assert.equal(reused, previous);
+    const previous = tool.renderResult(sample, { expanded: false }, plainTheme, { action: "list" });
+    const reused = tool.renderResult({ ...sample }, { expanded: false }, plainTheme, { action: "list" });
     assert.deepEqual(reused.render(80), previous.render(80));
   }
 });
-
 
 test("add dedupe considers cuts, not orphan resolves with the same ID", async t => {
   const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, ".papercuts.jsonl");
@@ -779,60 +767,36 @@ test("add dedupe considers cuts, not orphan resolves with the same ID", async t 
 });
 
 
-test("self-rendered frame retains layout and matches the default box through state changes", async () => {
-  const { Box } = await import("@earendil-works/pi-tui");
+test("call and result rows combine without shared frame state", async () => {
   const { renderPapercutsCall, renderPapercutsResult } = await import("../lib/render.js");
   const tool = captureTool();
-  assert.equal(tool.renderShell, "self");
-  let tint = "\u001b[31m";
-  const theme = { ...plainTheme, fg: (_color, text) => tint + text + "\u001b[0m", bg: (color, text) => (color === "toolPendingBg" ? "\u001b[44m" : color === "toolErrorBg" ? "\u001b[41m" : "\u001b[42m") + text + "\u001b[0m" };
-  const args = { action: "list" }, context = { state: {}, args, expanded: false, isPartial: true, isError: false };
-  let result, call, tail, retained, compactLines, expandedLines;
+  const args = { action: "list" };
+  const theme = { ...plainTheme, fg: (_color, text) => "\u001b[36m" + text + "\u001b[0m" };
+  const items = Array.from({ length: 8 }, (_, i) => ({ id: "pc_00000000000" + i, severity: "minor", text: "reason 中文 😀 " + i }));
+  const result = { content: [], details: { ok: true, data: { total: 8, items } } };
+  const call = tool.renderCall(args, { expanded: false }, theme);
+  const tail = tool.renderResult({ ...result }, { expanded: false }, theme, args);
 
-  const expected = width => {
-    const box = new Box(1, 1, text => theme.bg(context.isPartial ? "toolPendingBg" : context.isError ? "toolErrorBg" : "toolSuccessBg", text));
-    box.addChild(renderPapercutsCall(args, theme, context));
-
-    if (result) box.addChild(renderPapercutsResult(result, { expanded: context.expanded }, theme, context));
-
-    return box.render(width);
-  };
-
-  for (const phase of ["pending", "partial", "complete", "same", "expanded", "collapse", "reexpand", "theme", "error", "resize"]) {
-    if (phase === "partial") result = { content: [], details: { ok: true, data: { total: 8, items: Array.from({ length: 8 }, (_, i) => ({ id: `pc_00000000000${i}`, severity: "minor", text: "reason 中文 😀 " + i })) } } };
-
-    if (phase === "complete") context.isPartial = false;
-
-    if (phase === "expanded" || phase === "reexpand") context.expanded = true;
-
-    if (phase === "collapse") context.expanded = false;
-
-    if (phase === "theme") { tint = "\u001b[36m"; call.invalidate(); }
-
-    if (phase === "error") { context.isError = true; result = { content: [], details: { ok: false, error: { message: "failed" } } }; }
-
-    const previous = call;
-    call = tool.renderCall(args, theme, { ...context, lastComponent: call });
-
-    if (result) tail = tool.renderResult({ ...result }, { expanded: context.expanded }, theme, { ...context, lastComponent: tail });
-    const width = phase === "resize" ? 24 : 100;
-    const lines = call.render(width);
-    assert.deepEqual([...lines, ...(tail?.render(width) ?? [])], expected(width), phase);
-
-    if (phase === "same") { assert.equal(call, previous); assert.equal(lines, retained, "stable outer frame must retain its layout"); }
-
-    if (phase === "same") compactLines = lines;
-
-    if (phase === "expanded") expandedLines = lines;
-
-    if (phase === "collapse") assert.equal(lines, compactLines, "compact layout survives expansion");
-
-    if (phase === "reexpand") assert.equal(lines, expandedLines, "expanded layout survives collapse");
-
-    retained = lines;
+  for (const width of [24, 100]) {
+    const rows = [...call.render(width), ...tail.render(width)];
+    assert.ok(rows.length > 0);
+    assert.ok(rows.every(line => line.isWellFormed()));
   }
-});
 
+  const compact = [...call.render(100), ...tail.render(100)].join("\n");
+  assert.match(compact, /papercuts/);
+  assert.match(compact, /list/);
+  assert.match(compact, /8 open papercuts/);
+  assert.doesNotMatch(compact, /reason 中文 😀 7/);
+
+  const expandedCall = tool.renderCall(args, { expanded: true }, theme);
+  const expandedTail = tool.renderResult({ ...result }, { expanded: true }, theme, args);
+  const expanded = [...expandedCall.render(100), ...expandedTail.render(100)].join("\n");
+  assert.match(expanded, /reason 中文 😀 7/);
+  assert.match(expanded, /pc_000000000007/);
+  assert.equal(typeof renderPapercutsCall, "function");
+  assert.equal(typeof renderPapercutsResult, "function");
+});
 
 test("durable actions leave the UI thread and preserve request environment snapshots", async t => {
   const { default: mutableFs } = await import("node:fs");
@@ -968,7 +932,7 @@ test("final review: malformed stored IDs and tags cannot poison valid actions", 
 
 test("final review: all raw display paths strip C0/C1 controls and ANSI", () => {
   const tool = captureTool(), dirty = "hello\u0007\u0008\u007f\u009b2J\u001b[31mworld\u001b[0m";
-  const call = rendered(tool.renderCall({ action: "add", text: dirty }, plainTheme, {}));
+  const call = rendered(tool.renderCall({ action: "add", text: dirty }, {}, plainTheme));
 
   const unsafe = text => Array.from(text).some(char => {
     const code = char.codePointAt(0);
@@ -980,7 +944,7 @@ test("final review: all raw display paths strip C0/C1 controls and ANSI", () => 
 
   for (const details of [undefined, { ok: true, data: { total: 1 } }]) {
     const result = { content: [{ type: "text", text: "# Header\n" + dirty }], details };
-    const view = rendered(tool.renderResult(result, { expanded: true }, plainTheme, { args: { action: "list" } }));
+    const view = rendered(tool.renderResult(result, { expanded: true }, plainTheme, { action: "list" }));
     assert.equal(unsafe(view), false);
     assert.match(view, /# Header\n/);
     assert.equal(result.content[0].text, "# Header\n" + dirty, "only presentation is sanitized");
@@ -989,7 +953,7 @@ test("final review: all raw display paths strip C0/C1 controls and ANSI", () => 
   const receipt = { details: { ok: true, data: { changed: false, record: { id: dirty, severity: dirty, text: "stored", tags: [] } } } };
 
   for (const expanded of [false, true]) {
-    const view = rendered(tool.renderResult(receipt, { expanded }, plainTheme, { args: { action: "add" } }));
+    const view = rendered(tool.renderResult(receipt, { expanded }, plainTheme, { action: "add" }));
     assert.equal(unsafe(view), false, "stored receipt fields are untrusted display text too");
   }
 
@@ -1004,12 +968,12 @@ test("call renderer fallback cannot swallow the Papercuts error result", () => {
   for (const warmed of [false, true]) {
     const context = { state: {}, expanded: false, args: { action: "add", text: "partial arguments" }, isError: true };
 
-    if (warmed) tool.renderCall(context.args, theme, context);
+    if (warmed) tool.renderCall(context.args, { expanded: context.expanded }, theme);
     // A JSON-valid partial argument can fail display coercion before validation.
     context.args.severity = { toString: 0 };
-    assert.throws(() => tool.renderCall(context.args, theme, context));
+    assert.throws(() => tool.renderCall(context.args, { expanded: context.expanded }, theme));
     const failure = { content: [], details: { ok: false, error: { message: "severity must be minor|major|blocker" } } };
-    const shown = tool.renderResult(failure, { expanded: false }, theme, context);
+    const shown = tool.renderResult(failure, { expanded: false }, theme, context.args);
     assert.match(rendered(shown), /severity must be minor/);
   }
 });
@@ -1034,25 +998,19 @@ test("independent registrations do not shut down each other's executor", async t
   assert.equal(other.details.data.record.text, "session B");
 });
 
-test("result-render failure clears old Papercuts output and permits recovery", () => {
+test("result-render failure propagates and later renders recover", () => {
   const tool = captureTool(), theme = { ...plainTheme, bg: (_color, text) => text };
-
-  const context = { state: {}, args: { action: "add" }, expanded: true };
-
+  const args = { action: "add" };
   const original = { content: [{ type: "text", text: "safe fallback" }], details: { ok: true, data: { changed: true,
     record: { id: "pc_000000000001", severity: "minor", text: "old receipt", tags: ["ui"] } } } };
-
-  const frame = tool.renderCall(context.args, theme, context);
-  tool.renderResult(original, { expanded: true }, theme, context);
-  assert.match(rendered(frame), /old receipt/);
+  const call = tool.renderCall(args, { expanded: true }, theme);
+  assert.match(rendered(call), /papercuts add/);
+  assert.match(rendered(tool.renderResult(original, { expanded: true }, theme, args)), /old receipt/);
   const malformed = structuredClone(original);
   malformed.details.data.record.tags = "legacy malformed tags";
-  assert.throws(() => tool.renderResult(malformed, { expanded: true }, theme, context));
-  assert.doesNotMatch(rendered(frame), /old receipt/, "the host fallback must not be accompanied by stale successful output");
-  tool.renderResult(original, { expanded: true }, theme, context);
-  assert.match(rendered(frame), /old receipt/, "clearing a failed render must update the text cache too");
+  assert.throws(() => tool.renderResult(malformed, { expanded: true }, theme, args));
+  assert.match(rendered(tool.renderResult(original, { expanded: true }, theme, args)), /old receipt/);
 });
-
 
 test("byte caps preserve lone surrogates instead of merging distinct papercuts", async () => {
   const tool = captureTool(), repo = tmpRepo(), file = path.join(repo, "surrogate-caps.jsonl");
@@ -1150,7 +1108,7 @@ test("malformed scalar records are diagnosed and skipped until explicit pruning"
   assert.equal(listed.isError, false);
   assert.deepEqual(dataOf(listed).data.items.map(item => [item.id, item.status]), [[valid.id, "open"], [sparse.id, "open"]]);
   assert.deepEqual(dataOf(listed).data.items[1].extra, sparse.extra);
-  const preview = tool.renderResult(listed, { expanded: true }, plainTheme, { args: { action: "list" }, expanded: true });
+  const preview = tool.renderResult(listed, { expanded: true }, plainTheme, { action: "list" });
   assert.match(rendered(preview), /Valid cut/);
   const markdown = await run({ action: "list", format: "md" });
   assert.equal(markdown.isError, false);
@@ -1253,14 +1211,14 @@ test("prune of a torn-only log does not claim nothing to prune", async () => {
 test("prune TUI shows the receipt instead of a generic success", async () => {
   const tool = captureTool(), repo = tmpRepo(), ctx = { cwd: repo };
   const args = { action: "prune" };
-  const view = result => rendered(tool.renderResult(result, { expanded: false }, plainTheme, { args }));
+  const view = result => rendered(tool.renderResult(result, { expanded: false }, plainTheme, args));
   const added = dataOf(await tool.execute("prune-tui-add", { action: "add", text: "archive me" }, undefined, undefined, ctx));
   await tool.execute("prune-tui-resolve", { action: "resolve", ids: [added.data.record.id] }, undefined, undefined, ctx);
   const pruned = await tool.execute("prune-tui", args, undefined, undefined, ctx);
   const compact = view(pruned);
   assert.match(compact, /Pruned 1 resolved papercut/);
   assert.doesNotMatch(compact, /action complete/);
-  const expanded = rendered(tool.renderResult(pruned, { expanded: true }, plainTheme, { args, expanded: true }));
+  const expanded = rendered(tool.renderResult(pruned, { expanded: true }, plainTheme, args));
   assert.match(expanded, /archive:/);
   const tornRepo = tmpRepo();
   fs.writeFileSync(path.join(tornRepo, ".papercuts.jsonl"), "{\"bad\"\n");

@@ -106,9 +106,10 @@ boundaries. Choose one promotion policy before enabling overlapping discovery.
 
 ## TUI rendering
 
-Tool rows use Pi's `Text` and `Box` components, with a ten-line compact result
-and full text on expansion. Each row retains at most two frames (compact and
-expanded); unchanged text retains width/layout caches across updates and toggles.
+Tool rows are returned as `{ render(width) }` row objects, with a ten-line compact result
+and full text on expansion. The host repaints a row on every draw, so arguments, result
+text and theme are always observed, and rows wider than the viewport are cut by the host
+painter.
 Current arguments, result text, theme and pending/error state are always observed.
 Display-only control stripping leaves model-facing content and details unchanged.
 Argument and tool/skill-description previews never introduce lone surrogates. Pi owns keyboard/click expansion and terminal
@@ -117,6 +118,7 @@ painting; no separate renderer or timer is started.
 Startup block warnings use the session UI context and stay silent when DCE is disabled. Validation failures carry
 `isError`, and `/deferred` notices report failed host activation/deactivation
 rather than claiming it succeeded. A renderer fallback still exposes the result;
+a failed result render is reported by the host, which keeps showing its own fallback.
 a failed result render clears stale output and leaves the row recoverable.
 The first layout of a very large result, resizing, or rewriting regular-terminal
 scrollback can still be expensive; cached paints are not a universal 60 FPS claim.

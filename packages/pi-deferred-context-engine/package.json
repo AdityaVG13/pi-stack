@@ -49,19 +49,19 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@oh-my-pi/pi-tui": "*",
     "typebox": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
       "optional": true
     },
-    "@earendil-works/pi-tui": {
+    "@oh-my-pi/pi-tui": {
       "optional": true
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-tui": "^1.0.0",
+    "@oh-my-pi/pi-tui": "^19.2.1",
     "typebox": "^1.0.0"
   },
   "publishConfig": {

@@ -76,13 +76,12 @@ append durability, tear healing, and archive-before-rewrite pruning.
 
 ## Rendering
 
-Renderers reuse their own previous `Text` component when freshly formatted text
-is unchanged, preserving Pi's width/layout cache without caching theme colors.
-Pi's self-rendering API also preserves the surrounding `Box` cache: padding,
-pending/success/error backgrounds and click expansion match the default shell.
-Each transcript row retains at most two frames, one per expansion state, so
-collapsing and reopening a result preserves both layouts. If the call renderer
-fails, its detached frame cannot swallow the host-visible error result. Failed
+Renderers return `{ render(width) }` row objects built from the current arguments,
+expansion and theme; the host repaints them on every draw, so changed arguments, nested
+result values, expansion and resize stay visible without a cached frame. The host paints
+rows inside its own tool box, with padding and pending/success/error backgrounds, and owns
+click expansion. A renderer that throws is reported by the host, which keeps showing its
+own fallback.
 result rendering clears the old receipt before the host shows its fallback.
 Changed arguments, nested result values, expansion, theme invalidation and resize
 remain visible. Common-width resolve batches build one ordered prefix index per
