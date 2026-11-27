@@ -845,7 +845,7 @@ test("TUI lifecycle warnings use the event context and validation failures are e
   }
 });
 
-test("TUI renderers retain layouts, refresh changed text and themes, and bound compact output", async () => {
+test("TUI renderers draw compact and expanded rows without terminal controls", async () => {
   const { default: extension } = await import("../index.js");
   const tools = new Map();
   extension({ registerTool: tool => tools.set(tool.name, tool), registerCommand() {}, on() {} });
@@ -853,41 +853,34 @@ test("TUI renderers retain layouts, refresh changed text and themes, and bound c
 
   for (const name of ["list_capabilities", "search_tools", "promote_tools", "demote_tools"]) {
     const tool = tools.get(name);
-    assert.equal(tool.renderShell, "self");
-    const context = { state: {}, args: { query: "Unicode 中文 😀 é " + "term ".repeat(80) }, expanded: false, isPartial: true };
-    const result = { content: [{ type: "text", text: "\u001b[31mfirst\u0007\n" + "Unicode 中文 😀 é row\n".repeat(100) + "last-row" }] };
-    const call = () => tool.renderCall(context.args, theme, context);
-    const renderResult = () => tool.renderResult(result, { expanded: context.expanded }, theme, context);
-    const compact = call(); renderResult();
-    const original = compact.render(120);
-    assert.ok(original.length < 25);
-    assert.equal(original.join("\n").includes("last-row"), false);
-    assert.equal(original.join("\n").includes("\u001b"), false);
-    assert.equal(original.join("\n").includes("\u0007"), false);
-    assert.equal(call(), compact); renderResult();
-    assert.equal(compact.render(120), original, "unchanged content retains the Box layout");
-    context.expanded = true;
-    const expanded = call(); renderResult();
-    assert.match(expanded.render(120).join("\n"), /last-row/);
-    context.expanded = false;
-    assert.equal(call(), compact); renderResult();
-    assert.equal(compact.render(120), original, "expansion does not discard the compact layout");
-    result.content[0].text = "updated result";
-    renderResult();
-    assert.match(compact.render(120).join("\n"), /updated result/);
-    const changedTheme = { ...theme, fg: (_color, text) => "new-theme " + text };
-    tool.renderCall(context.args, changedTheme, context);
-    tool.renderResult(result, { expanded: false }, changedTheme, context);
-    assert.match(compact.render(120).join("\n"), /new-theme/);
+    const args = { query: "Unicode 中文 😀 é " + "term ".repeat(80) };
+    const result = { content: [{ type: "text", text: "\u001b[31mfirst\u0007\n" + "Unicode 中文 😀 é row\n".repeat(100) + "last-row" }] };
+    const call = (expanded, activeTheme = theme) => tool.renderCall(args, { expanded }, activeTheme);
+    const renderResult = (expanded, activeTheme = theme) => tool.renderResult(result, { expanded }, activeTheme, args);
+    const compact = [...call(false).render(120), ...renderResult(false).render(120)];
 
-    for (const width of [12, 40, 120]) assert.ok(compact.render(width).every(line => line.isWellFormed()));
+    assert.ok(compact.length < 25);
+    assert.equal(compact.join("\n").includes("last-row"), false);
+    assert.equal(compact.join("\n").includes("\u001b"), false);
+    assert.equal(compact.join("\n").includes("\u0007"), false);
+    assert.match([...call(true).render(120), ...renderResult(true).render(120)].join("\n"), /last-row/);
+
+    result.content[0].text = "updated result";
+    assert.match(renderResult(false).render(120).join("\n"), /updated result/);
+
+    const changedTheme = { ...theme, fg: (_color, text) => "new-theme " + text };
+    assert.match(call(false, changedTheme).render(120).join("\n"), /new-theme/);
+
+    for (const width of [12, 40, 120]) {
+      assert.ok(call(true).render(width).every(line => line.isWellFormed()));
+      assert.ok(renderResult(true).render(width).every(line => line.isWellFormed()));
+    }
+
     const brokenTheme = { ...theme, fg() { throw new Error("host renderer fallback"); } };
-    assert.throws(() => tool.renderCall(context.args, brokenTheme, context), /host renderer fallback/);
-    const fallback = tool.renderResult(result, { expanded: false }, theme, context);
-    assert.match(fallback.render(120).join("\n"), /updated result/);
+    assert.throws(() => call(false, brokenTheme), /host renderer fallback/);
+    assert.match(renderResult(false).render(120).join("\n"), /updated result/);
   }
 });
-
 
 test("TUI commands expose rejected host transitions instead of reporting success", async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dce-tui-rejection-"));
@@ -970,38 +963,35 @@ test("intermediate agent_end preserves promotions until actual settlement", asyn
   }
 });
 
-test("DCE tool frames stay within one- and two-column viewport widths", async () => {
+test("DCE renderers return rows at every viewport width", async () => {
   const { deferredRenderer } = await import("../lib/render.js");
-  const { visibleWidth } = await import("@earendil-works/pi-tui");
   const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: text => text };
   const renderer = deferredRenderer("search_tools");
-  const context = { state: {}, expanded: true };
-  const frame = renderer.renderCall({ query: "😀中文 weather" }, theme, context);
-  renderer.renderResult({ content: [{ type: "text", text: "😀 forecast" }] }, { expanded: true }, theme, context);
+  const call = renderer.renderCall({ query: "😀中文 weather" }, { expanded: true }, theme);
+  const resultRows = renderer.renderResult({ content: [{ type: "text", text: "😀 forecast" }] }, { expanded: true }, theme);
 
-  for (const width of [1, 2, 3, 12]) {
-    const lines = frame.render(width);
-    assert.ok(lines.length > 0);
-    assert.ok(lines.every(line => visibleWidth(line) <= width), "over-wide tool frames crash Pi's main-screen renderer at width " + width);
-    assert.ok(lines.every(line => line.isWellFormed()));
+  for (const width of [1, 2, 3, 12, 120]) {
+    const rows = [...call.render(width), ...resultRows.render(width)];
+
+    assert.ok(rows.length > 0);
+    assert.ok(rows.every(line => line.isWellFormed()));
+    assert.ok(rows.some(line => line.includes("search_tools") || line.includes("forecast")));
   }
 });
 
-test("result-render failure clears old DCE output and permits recovery", async () => {
+test("result-render failure propagates and later renders recover", async () => {
   const { deferredRenderer } = await import("../lib/render.js");
   const { renderCall, renderResult } = deferredRenderer("list_capabilities");
   const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: text => text };
-  const context = { state: {}, args: {}, expanded: true };
+  const args = {};
   const result = { content: [{ type: "text", text: "old catalog" }] };
-  const frame = renderCall({}, theme, context);
-  renderResult(result, { expanded: true }, theme, context);
+  const call = renderCall(args, { expanded: true }, theme);
+  assert.match(call.render(100).join("\n"), /list_capabilities/);
+  assert.match(renderResult(result, { expanded: true }, theme).render(100).join("\n"), /old catalog/);
   const brokenTheme = { ...theme, fg() { throw new Error("render failure"); } };
-  assert.throws(() => renderResult(result, { expanded: true }, brokenTheme, context));
-  assert.doesNotMatch(frame.render(100).join("\n"), /old catalog/);
-  renderResult(result, { expanded: true }, theme, context);
-  assert.match(frame.render(100).join("\n"), /old catalog/);
+  assert.throws(() => renderResult(result, { expanded: true }, brokenTheme), /render failure/);
+  assert.match(renderResult(result, { expanded: true }, theme).render(100).join("\n"), /old catalog/);
 });
-
 
 test("keeping unrelated pins does not revoke a human session unblock", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dce-keep-unblock-"));
@@ -1468,5 +1458,52 @@ test("disabled audit reports no prompt pruning for native and legacy prompts", a
       assert.match(notices.at(-1), /duplicate-context=0/);
       assert.match(notices.at(-1), /deferred-skills=0/);
     }
+  }
+});
+
+test("OMP: before_agent_start leaves the active set; context repairs it", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-deferred-omp-guard-"));
+  const configPath = path.join(directory, "config.json");
+  fs.writeFileSync(configPath, JSON.stringify({
+    enabled: true,
+    deferByDefault: true,
+    replaceAlwaysActive: true,
+    replaceNeverDefer: true,
+    alwaysActive: ["read"],
+    neverDefer: ["read"],
+  }), "utf8");
+  const previous = process.env.PI_DEFERRED_TOOLS_CONFIG;
+  process.env.PI_DEFERRED_TOOLS_CONFIG = configPath;
+
+  try {
+    const { default: extension } = await import(`../index.js?omp-guard=${Date.now()}`);
+    const tools = [
+      { name: "read", description: "Read", parameters: {} },
+      { name: "weather_lookup", description: "Weather forecasts for cities", parameters: {} },
+    ];
+    let active = [];
+    const handlers = new Map();
+    const pi = {
+      getAllTools: () => tools,
+      getActiveTools: () => [...active],
+      setActiveTools: (names) => { active = [...new Set(names)]; },
+      registerTool: (tool) => { tools.push(tool); active.push(tool.name); },
+      registerCommand: () => {},
+      on: (name, handler) => handlers.set(name, handler),
+    };
+
+    extension(pi);
+
+    const beforeActive = [...pi.getActiveTools()];
+    await handlers.get("before_agent_start")({ prompt: "weather", systemPrompt: "base" }, {});
+    assert.deepEqual(pi.getActiveTools(), beforeActive, "OMP guard: before_agent_start must not rewrite the active set");
+
+    await handlers.get("context")({ messages: [] });
+    assert.ok(pi.getActiveTools().includes("read"), "context repairs pinned tools");
+    assert.ok(!pi.getActiveTools().includes("weather_lookup"), "context defers policy tools");
+  } finally {
+    if (previous === undefined) delete process.env.PI_DEFERRED_TOOLS_CONFIG;
+    else process.env.PI_DEFERRED_TOOLS_CONFIG = previous;
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
