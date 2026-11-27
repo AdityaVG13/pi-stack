@@ -12,7 +12,7 @@ import { isNativePromptOptions, projectPromptResources, optimizeSystemPrompt, no
 import { prioritizeContext, prioritizePayload, toolPriorityText, toolPriorityGuidance } from "./lib/routing.js";
 import { createDeferredController } from "./lib/engine.js";
 
-import { createDeferredCommand } from "./lib/commands.js";
+import { createDeferredCommand, deferredCommandCompletions } from "./lib/commands.js";
 
 export { parseToolNames, parseSearchToolsParams, parseDeferredCommand } from "./lib/params.js";
 
@@ -56,6 +56,7 @@ export default function piDeferredContextEngine(pi) {
 
   pi.registerCommand("deferred", {
     description: "Deferred context: status | audit | apply | reload | config | blocked | unblock",
+    getArgumentCompletions: prefix => deferredCommandCompletions(prefix, controller),
     handler: createDeferredCommand(pi, controller, () => config, next => { config = next; }),
   });
 

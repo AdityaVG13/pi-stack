@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- `/deferred` tab-completes subcommands, then blocked tool names and `--persist`
+  for `unblock`.
+
 ### Changed
 
 - Tool rows are `{ render(width) }` row objects instead of pi-tui `Text`/`Box` components:

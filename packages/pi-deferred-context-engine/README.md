@@ -68,6 +68,9 @@ DCE makes all visible skills active. Hidden skills are never marked active.
 /deferred status | audit | apply | reload | config | blocked | unblock <tool>… [--persist]
 ```
 
+Hosts that expose argument completions tab-complete the subcommand, then blocked
+tool names and `--persist` after `unblock`.
+
 ---
 
 ## Pi 0.99 exposure

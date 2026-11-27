@@ -1,7 +1,57 @@
 import { isFunction } from "./decode.js";
-import { parseDeferredCommand } from "./params.js";
+import { DEFERRED_SUBCOMMANDS, parseDeferredCommand } from "./params.js";
 import { blockedToolsCautionWarnings, emptyPinReplaceWarnings, hasBlockedConfig, loadConfig, removeBlockedTools, userConfigPath } from "./config.js";
 import { effectivePolicy, isNativePromptOptions, projectPromptResources, optimizeSystemPrompt, schemaAudit, normalizeSystemPromptText } from "./context.js";
+
+const UNBLOCK_PERSIST_FLAG = "--persist";
+
+function rows(values) {
+  return values.map(value => ({ value, label: value }));
+}
+
+function subcommandRows(head) {
+  const matches = DEFERRED_SUBCOMMANDS.filter(name => name.startsWith(head));
+
+  return matches.length > 0 ? rows(matches) : null;
+}
+
+function flagRows(last) {
+  const matches = [UNBLOCK_PERSIST_FLAG].filter(flag => flag.startsWith(last));
+
+  return matches.length > 0 ? rows(matches) : null;
+}
+
+function unblockRows(args, controller) {
+  const last = args[args.length - 1] || "";
+  const typed = args.filter(token => token !== "" && !token.startsWith("-"));
+  const pool = (controller.configuredBlockedNames() || []).filter(name => !typed.includes(name));
+  const candidates = pool.filter(name => name.startsWith(last));
+
+  if (typed.length > 0 && !args.includes(UNBLOCK_PERSIST_FLAG)) candidates.push(UNBLOCK_PERSIST_FLAG);
+
+  const matches = candidates.filter(value => value.startsWith(last));
+
+  return matches.length > 0 ? rows(matches) : null;
+}
+
+/**
+ * Tab completions for /deferred: subcommands, then blocked tool names and
+ * --persist once a name is present.
+ */
+export function deferredCommandCompletions(prefix, controller) {
+  const input = String(prefix ?? "").trimStart();
+  const tokens = input === "" ? [] : input.split(/\s+/);
+
+  if (tokens.length === 0) return rows(DEFERRED_SUBCOMMANDS);
+
+  const head = tokens[0].toLowerCase();
+  const args = tokens.slice(1);
+
+  if (tokens.length === 1) return subcommandRows(head);
+  if (head !== "unblock") return null;
+
+  return (args[args.length - 1] || "").startsWith("-") ? flagRows(args[args.length - 1]) : unblockRows(args, controller);
+}
 
 function notifyTransition(ctx, text, state, level = "info") {
   const failure = state?.setActiveError;
