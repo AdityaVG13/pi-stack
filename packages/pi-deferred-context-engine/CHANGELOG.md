@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `/deferred` tab-completes subcommands, then blocked tool names and `--persist`
+  for `unblock`.
+
+### Changed
+
+- Tool rows are `{ render(width) }` row objects instead of pi-tui `Text`/`Box` components:
+  the host repaints each row on every draw and cuts over-wide rows, so the per-row frame
+  cache is gone.
+- The optional peer is `@oh-my-pi/pi-tui`, not the removed `@earendil-works/pi-tui` scope.
+- Subscribes to OMP's `context` event alongside Pi's `context_with_system`, so request
+  projection runs on both hosts.
+- OMP: before_agent_start no longer rewrites the active tool set. OMP rebuilds the base
+  prompt between attempts and rolls the set back, which tripped the host's
+  repeated-policy guard; the `context` event repairs activation per provider call.
+- OMP presents the active tools in its own order; the transition observer now compares
+  the set instead of the sequence, so a presentation reorder no longer reports
+  `Host did not apply the requested active-tool state`.
+
 ## 0.5.3
 
 ### Changed

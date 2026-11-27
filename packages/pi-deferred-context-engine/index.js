@@ -12,7 +12,7 @@ import { isNativePromptOptions, projectPromptResources, optimizeSystemPrompt, no
 import { prioritizeContext, prioritizePayload, toolPriorityText, toolPriorityGuidance } from "./lib/routing.js";
 import { createDeferredController } from "./lib/engine.js";
 
-import { createDeferredCommand } from "./lib/commands.js";
+import { createDeferredCommand, deferredCommandCompletions } from "./lib/commands.js";
 
 export { parseToolNames, parseSearchToolsParams, parseDeferredCommand } from "./lib/params.js";
 
@@ -56,6 +56,7 @@ export default function piDeferredContextEngine(pi) {
 
   pi.registerCommand("deferred", {
     description: "Deferred context: status | audit | apply | reload | config | blocked | unblock",
+    getArgumentCompletions: prefix => deferredCommandCompletions(prefix, controller),
     handler: createDeferredCommand(pi, controller, () => config, next => { config = next; }),
   });
 
@@ -94,9 +95,11 @@ export default function piDeferredContextEngine(pi) {
       return {};
     }
 
-    await Promise.resolve(controller.synchronize());
-
+    // OMP rebuilds the base prompt between before_agent_start attempts and rolls the active
+    // set back, so writing it here trips the host's repeated-policy guard. The context event
+    // repairs activation per provider call instead.
     if (isNativePromptOptions(event.systemPromptOptions)) {
+      await Promise.resolve(controller.synchronize());
       const resources = projectPromptResources(promptOptions, config);
       const sections = { ...promptOptions.sections };
       const priority = toolPriorityText(config.toolPriority);
@@ -151,13 +154,17 @@ export default function piDeferredContextEngine(pi) {
 
   // A later-loaded package may change activation after before_agent_start.
   // Repair policy at each request and project the already-captured transcript.
-  pi.on("context_with_system", async event => {
+  // Pi calls this `context_with_system`; OMP calls it `context`.
+  async function projectRequestContext(event) {
     if (!config.enabled) return;
     await Promise.resolve(controller.synchronize());
     const messages = prioritizeContext(event.messages, config.toolPriority, requestDeclarationFilter());
 
     if (messages !== event.messages) return { messages };
-  });
+  }
+
+  pi.on("context", projectRequestContext);
+  pi.on("context_with_system", projectRequestContext);
   pi.on("before_provider_request", async event => {
     if (!config.enabled) return;
     await Promise.resolve(controller.synchronize());

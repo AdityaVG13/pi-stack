@@ -32,7 +32,11 @@ export function createToolTransitions(pi, normalizeActiveNames) {
     const observe = () => {
       const actual = activeNames();
 
-      if (!lastSetError && (actual.length !== normalized.length || actual.some((name, index) => name !== normalized[index]))) {
+      // Hosts own presentation order (OMP reorders); compare the set, not the sequence.
+      const requested = new Set(normalized);
+      const sameSet = actual.length === requested.size && actual.every(name => requested.has(name));
+
+      if (!lastSetError && !sameSet) {
         lastSetError = "Host did not apply the requested active-tool state";
       }
 

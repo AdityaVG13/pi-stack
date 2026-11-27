@@ -9,7 +9,9 @@ export const SEARCH_LIMIT_HARD_CAP = 20;
 
 export const LIST_CAPABILITY_STATES = ["active", "deferred", "registered", "blocked", "hidden", "all"];
 
-const commands = new Set(["status", "audit", "apply", "reload", "config", "blocked", "unblock"]);
+export const DEFERRED_SUBCOMMANDS = ["status", "audit", "apply", "reload", "config", "blocked", "unblock"];
+
+const commands = new Set(DEFERRED_SUBCOMMANDS);
 
 const usage = "usage: /deferred status | audit | apply | reload | config | blocked | unblock <tool>… [--persist]";
 
